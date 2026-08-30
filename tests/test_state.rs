@@ -61,7 +61,9 @@ fn create_test_app() -> (
         _resources: Box::new(()),
     };
 
-    let app = App::new(platform, action_rx).expect("Failed to create App with fake platform");
+    let (_, audio_rx) = unbounded();
+    let app = App::new_with_audio(platform, action_rx, audio_rx, None)
+        .expect("Failed to create App with fake platform");
 
     (app, action_tx, listening_history, shutdown_called, diffs)
 }

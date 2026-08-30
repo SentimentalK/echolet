@@ -15,7 +15,7 @@ pub struct App {
     _recognizer: Arc<OnlineRecognizer>,
     stream: OnlineStream,
     session: PartialSession,
-    _audio_input: AudioInput,
+    _audio_input: Option<AudioInput>,
     audio_rx: Receiver<AudioChunk>,
     action_rx: Receiver<AppAction>,
     platform: PlatformRuntime,
@@ -27,6 +27,18 @@ impl App {
         platform: PlatformRuntime,
         action_rx: Receiver<AppAction>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
+        let (audio_tx, audio_rx) = unbounded::<AudioChunk>();
+        let audio_input = AudioInput::start(audio_tx)?;
+        println!("[Audio] Microphone capture active (continuous stream).");
+        Self::new_with_audio(platform, action_rx, audio_rx, Some(audio_input))
+    }
+
+    pub fn new_with_audio(
+        platform: PlatformRuntime,
+        action_rx: Receiver<AppAction>,
+        audio_rx: Receiver<AudioChunk>,
+        audio_input: Option<AudioInput>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let model_dir = paths::default_model_dir();
         paths::validate_model_bundle(&model_dir)?;
         println!("[ASR] Model bundle validated: {:?}", model_dir);
@@ -34,10 +46,6 @@ impl App {
         let recognizer = Arc::new(OnlineRecognizer::new(&model_dir)?);
         let stream = recognizer.create_stream()?;
         println!("[ASR] Recognizer initialized successfully.");
-
-        let (audio_tx, audio_rx) = unbounded::<AudioChunk>();
-        let audio_input = AudioInput::start(audio_tx)?;
-        println!("[Audio] Microphone capture active (continuous stream).");
 
         // Explicit initial state projection
         platform.handle.set_listening(false);
