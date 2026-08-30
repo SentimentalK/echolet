@@ -1,0 +1,59 @@
+name: Linux Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-linux:
+    name: Build & Package Linux x86_64
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev pkg-config
+
+      - name: Cache downloaded runtime & model archives
+        uses: actions/cache@v4
+        with:
+          path: .cache/
+          key: echolet-assets-linux-x64-sherpa-v1.13.6-model-2023-02-16
+
+      - name: Prepare and verify official native runtime and model assets
+        run: |
+          ./scripts/download-official-assets.sh
+
+      - name: Run automated test suite
+        run: |
+          cargo test --release -- --nocapture
+
+      - name: Build and verify Linux release bundle
+        run: |
+          ./scripts/linux/build-release.sh
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: echolet-linux-x64
+          path: dist/echolet-linux-x64.tar.gz
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/echolet-linux-x64.tar.gz
+          generate_release_notes: true
