@@ -10,6 +10,7 @@ use std::time::Duration;
 use crossbeam_channel::unbounded;
 use echolet::asr::OnlineRecognizer;
 use echolet::audio::{AudioChunk, AudioInput};
+use echolet::beep::{beep_start, beep_stop};
 use echolet::diff::PartialSession;
 use echolet::injector::WaylandInjector;
 
@@ -144,11 +145,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             is_recording.store(next, Ordering::SeqCst);
 
             if next {
+                beep_start();
                 println!("\n[Hotkey] [F10] >>> Recording STARTED (Speaking...) <<<");
                 session.finalize();
                 stream.reset();
                 last_logged_text.clear();
             } else {
+                beep_stop();
                 println!("\n[Hotkey] [F10] >>> Recording STOPPED (Standby) <<<\n");
                 session.finalize();
                 stream.reset();
