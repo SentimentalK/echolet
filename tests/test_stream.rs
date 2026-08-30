@@ -1,16 +1,16 @@
-use std::path::Path;
 use std::sync::Arc;
 use echolet::asr;
+use echolet::paths;
 
 #[test]
 fn test_streaming_decode_wav() {
-    let model_dir = "/home/sentimentalk/sherpa-onnx/sherpa-onnx-streaming-zipformer-small-bilingual-zh-en-2023-02-16";
-    let wav_path = format!("{}/test_wavs/0.wav", model_dir);
+    let model_dir = paths::default_model_dir();
+    let wav_path = model_dir.join("test_wavs/0.wav");
 
-    assert!(Path::new(model_dir).exists());
-    assert!(Path::new(&wav_path).exists());
+    paths::validate_model_bundle(&model_dir).expect("Model bundle validation failed in test");
+    assert!(wav_path.exists(), "test_wavs/0.wav must exist at {:?}", wav_path);
 
-    let recognizer = Arc::new(asr::OnlineRecognizer::new(model_dir).expect("Failed to create recognizer"));
+    let recognizer = Arc::new(asr::OnlineRecognizer::new(&model_dir).expect("Failed to create recognizer"));
     let stream = recognizer.create_stream().expect("Failed to create stream");
 
     // Read 16-bit PCM wav file (skip 44 bytes header)

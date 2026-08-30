@@ -13,10 +13,10 @@ use echolet::audio::{AudioChunk, AudioInput};
 use echolet::beep::{beep_start, beep_stop};
 use echolet::diff::PartialSession;
 use echolet::injector::WaylandInjector;
+use echolet::paths;
 use echolet::tray::spawn_tray;
 
-const MODEL_DIR: &str =
-    "/home/sentimentalk/sherpa-onnx/sherpa-onnx-streaming-zipformer-small-bilingual-zh-en-2023-02-16";
+const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 fn get_socket_path() -> PathBuf {
     if let Ok(runtime_dir) = env::var("XDG_RUNTIME_DIR") {
@@ -94,7 +94,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     println!("============================================================");
-    println!(" Real-time Streaming Voice Input (Ubuntu Wayland) ");
+    println!(" Echolet v{} - Real-time Streaming Voice Input", APP_VERSION);
+    println!(" Resource Root: {:?}", paths::resource_root());
     println!("============================================================");
 
     // Register GNOME global shortcut F10
@@ -109,8 +110,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     listener.set_nonblocking(true)?;
     println!("[Control] Listening for toggle events on {:?}", socket_path);
 
-    println!("[ASR] Loading model from: {}", MODEL_DIR);
-    let recognizer = Arc::new(OnlineRecognizer::new(MODEL_DIR)?);
+    let model_dir = paths::default_model_dir();
+    paths::validate_model_bundle(&model_dir)?;
+    println!("[ASR] Model bundle validated: {:?}", model_dir);
+
+    let recognizer = Arc::new(OnlineRecognizer::new(&model_dir)?);
     let stream = recognizer.create_stream()?;
     println!("[ASR] Recognizer initialized successfully.");
 

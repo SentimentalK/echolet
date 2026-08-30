@@ -4,4 +4,5 @@ pub mod beep;
 pub mod diff;
 pub mod ffi;
 pub mod injector;
+pub mod paths;
 pub mod tray;
