@@ -19,7 +19,6 @@ impl AudioInput {
             .ok_or_else(|| "No default input audio device found".to_string())?;
 
         let device_name = device.name().unwrap_or_else(|_| "Unknown".to_string());
-        println!("[Audio] Using input device: {}", device_name);
 
         let default_config = device
             .default_input_config()
@@ -27,21 +26,26 @@ impl AudioInput {
 
         let sample_rate = default_config.sample_rate().0;
         let channels = default_config.channels() as usize;
-        println!(
-            "[Audio] Input config: sample_rate={}Hz, channels={}, format={:?}",
-            sample_rate,
-            channels,
-            default_config.sample_format()
-        );
+        let sample_format = default_config.sample_format();
+
+        println!("[Audio] ================= Audio Device Info =================");
+        println!("[Audio] Device Name:   {}", device_name);
+        println!("[Audio] Sample Rate:   {} Hz", sample_rate);
+        println!("[Audio] Channel Count: {}", channels);
+        println!("[Audio] Sample Format: {:?}", sample_format);
+        if channels > 1 {
+            println!("[Audio] Multi-channel input detected: Using primary channel (Channel 0) aligned with official sherpa microphone.");
+        }
+        println!("[Audio] =====================================================");
 
         let err_fn = |err| eprintln!("[Audio] Stream error: {}", err);
 
-        let stream = match default_config.sample_format() {
+        let stream = match sample_format {
             cpal::SampleFormat::F32 => device
                 .build_input_stream(
                     &default_config.into(),
                     move |data: &[f32], _: &_| {
-                        let mono = downmix_to_mono(data, channels);
+                        let mono = extract_primary_channel(data, channels);
                         let _ = tx.send(AudioChunk {
                             samples: mono,
                             sample_rate,
@@ -59,7 +63,7 @@ impl AudioInput {
                             .iter()
                             .map(|&s| s as f32 / 32768.0)
                             .collect();
-                        let mono = downmix_to_mono(&f32_data, channels);
+                        let mono = extract_primary_channel(&f32_data, channels);
                         let _ = tx.send(AudioChunk {
                             samples: mono,
                             sample_rate,
@@ -77,7 +81,7 @@ impl AudioInput {
                             .iter()
                             .map(|&s| (s as f32 - 32768.0) / 32768.0)
                             .collect();
-                        let mono = downmix_to_mono(&f32_data, channels);
+                        let mono = extract_primary_channel(&f32_data, channels);
                         let _ = tx.send(AudioChunk {
                             samples: mono,
                             sample_rate,
@@ -87,8 +91,8 @@ impl AudioInput {
                     None,
                 )
                 .map_err(|e| format!("Failed to build u16 input stream: {}", e))?,
-            sample_format => {
-                return Err(format!("Unsupported sample format: {:?}", sample_format));
+            format => {
+                return Err(format!("Unsupported sample format: {:?}", format));
             }
         };
 
@@ -103,7 +107,8 @@ impl AudioInput {
     }
 }
 
-fn downmix_to_mono(samples: &[f32], channels: usize) -> Vec<f32> {
+/// Extract Channel 0 (primary channel) instead of averaging, exactly matching sherpa-onnx ALSA/PortAudio
+fn extract_primary_channel(samples: &[f32], channels: usize) -> Vec<f32> {
     if samples.is_empty() || channels == 0 {
         return Vec::new();
     }
@@ -112,7 +117,7 @@ fn downmix_to_mono(samples: &[f32], channels: usize) -> Vec<f32> {
     } else {
         samples
             .chunks_exact(channels)
-            .map(|chunk| chunk.iter().sum::<f32>() / channels as f32)
+            .map(|chunk| chunk[0])
             .collect()
     }
 }

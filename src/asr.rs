@@ -42,45 +42,35 @@ impl OnlineRecognizer {
     pub fn new<P: AsRef<Path>>(model_dir: P) -> Result<Self, String> {
         let model_dir = model_dir.as_ref();
         
-        let encoder_path = model_dir.join("encoder-epoch-99-avg-1.onnx");
-        let encoder_int8 = model_dir.join("encoder-epoch-99-avg-1.int8.onnx");
-        let encoder = if encoder_int8.exists() {
-            encoder_int8
-        } else if encoder_path.exists() {
-            encoder_path
-        } else {
-            return Err(format!("Encoder not found in {:?}", model_dir));
-        };
+        // Exact model combination aligned with official sherpa CLI
+        let encoder = model_dir.join("encoder-epoch-99-avg-1.int8.onnx");
+        let decoder = model_dir.join("decoder-epoch-99-avg-1.onnx");
+        let joiner = model_dir.join("joiner-epoch-99-avg-1.int8.onnx");
+        let tokens = model_dir.join("tokens.txt");
 
-        let decoder_path = model_dir.join("decoder-epoch-99-avg-1.onnx");
-        let decoder_int8 = model_dir.join("decoder-epoch-99-avg-1.int8.onnx");
-        let decoder = if decoder_int8.exists() {
-            decoder_int8
-        } else if decoder_path.exists() {
-            decoder_path
-        } else {
-            return Err(format!("Decoder not found in {:?}", model_dir));
-        };
-
-        let joiner_path = model_dir.join("joiner-epoch-99-avg-1.onnx");
-        let joiner_int8 = model_dir.join("joiner-epoch-99-avg-1.int8.onnx");
-        let joiner = if joiner_int8.exists() {
-            joiner_int8
-        } else if joiner_path.exists() {
-            joiner_path
-        } else {
-            return Err(format!("Joiner not found in {:?}", model_dir));
-        };
-
-        let tokens_path = model_dir.join("tokens.txt");
-        if !tokens_path.exists() {
-            return Err(format!("tokens.txt not found in {:?}", model_dir));
+        if !encoder.exists() {
+            return Err(format!("Encoder {:?} not found", encoder));
         }
+        if !decoder.exists() {
+            return Err(format!("Decoder {:?} not found", decoder));
+        }
+        if !joiner.exists() {
+            return Err(format!("Joiner {:?} not found", joiner));
+        }
+        if !tokens.exists() {
+            return Err(format!("tokens.txt {:?} not found", tokens));
+        }
+
+        println!("[ASR] Using exact model files:");
+        println!("  Encoder: {:?}", encoder);
+        println!("  Decoder: {:?}", decoder);
+        println!("  Joiner:  {:?}", joiner);
+        println!("  Tokens:  {:?}", tokens);
 
         let c_encoder = CString::new(encoder.to_str().ok_or("Invalid encoder path")?).unwrap();
         let c_decoder = CString::new(decoder.to_str().ok_or("Invalid decoder path")?).unwrap();
         let c_joiner = CString::new(joiner.to_str().ok_or("Invalid joiner path")?).unwrap();
-        let c_tokens = CString::new(tokens_path.to_str().ok_or("Invalid tokens path")?).unwrap();
+        let c_tokens = CString::new(tokens.to_str().ok_or("Invalid tokens path")?).unwrap();
         let c_provider = CString::new("cpu").unwrap();
         let c_decoding = CString::new("greedy_search").unwrap();
 
@@ -99,7 +89,7 @@ impl OnlineRecognizer {
         config.enable_endpoint = 1;
         config.rule1_min_trailing_silence = 2.4;
         config.rule2_min_trailing_silence = 1.2;
-        config.rule3_min_utterance_length = 30.0;
+        config.rule3_min_utterance_length = 300.0;
 
         let raw = unsafe { SherpaOnnxCreateOnlineRecognizer(&config) };
         if raw.is_null() {
@@ -174,12 +164,6 @@ impl OnlineStream {
     pub fn reset(&self) {
         unsafe {
             SherpaOnnxOnlineStreamReset(self.recognizer.raw, self.raw);
-        }
-    }
-
-    pub fn input_finished(&self) {
-        unsafe {
-            SherpaOnnxOnlineStreamInputFinished(self.raw);
         }
     }
 }
