@@ -7,9 +7,11 @@ edition = "2021"
 cpal = "0.15"
 crossbeam-channel = "0.5"
 clap = { version = "4.5", features = ["derive"] }
+ctrlc = "3.4"
+
+[target.'cfg(target_os = "linux")'.dependencies]
 zbus = { version = "4.4", default-features = false, features = ["tokio"] }
 tokio = { version = "1.40", features = ["full"] }
 libc = "0.2"
-ctrlc = "3.4"
 arboard = "3.4"
 ksni = "0.3"

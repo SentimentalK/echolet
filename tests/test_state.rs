@@ -1,0 +1,145 @@
+use crossbeam_channel::unbounded;
+use echolet::actions::AppAction;
+use echolet::app::App;
+use echolet::platform::{PlatformHandle, PlatformRuntime, TextInjector};
+use echolet::state::AppState;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+
+struct FakeInjector {
+    diffs: Arc<Mutex<Vec<(usize, String)>>>,
+}
+
+impl TextInjector for FakeInjector {
+    fn apply_diff(&self, backspaces: usize, new_suffix: &str) {
+        self.diffs
+            .lock()
+            .unwrap()
+            .push((backspaces, new_suffix.to_string()));
+    }
+}
+
+struct FakePlatformHandle {
+    listening_history: Arc<Mutex<Vec<bool>>>,
+    shutdown_called: Arc<AtomicBool>,
+}
+
+impl PlatformHandle for FakePlatformHandle {
+    fn set_listening(&self, listening: bool) {
+        self.listening_history.lock().unwrap().push(listening);
+    }
+
+    fn shutdown(&self) {
+        self.shutdown_called.store(true, Ordering::SeqCst);
+    }
+}
+
+fn create_test_app() -> (
+    App,
+    crossbeam_channel::Sender<AppAction>,
+    Arc<Mutex<Vec<bool>>>,
+    Arc<AtomicBool>,
+    Arc<Mutex<Vec<(usize, String)>>>,
+) {
+    let (action_tx, action_rx) = unbounded::<AppAction>();
+    let listening_history = Arc::new(Mutex::new(Vec::new()));
+    let shutdown_called = Arc::new(AtomicBool::new(false));
+    let diffs = Arc::new(Mutex::new(Vec::new()));
+
+    let fake_handle = Box::new(FakePlatformHandle {
+        listening_history: listening_history.clone(),
+        shutdown_called: shutdown_called.clone(),
+    });
+
+    let fake_injector = Box::new(FakeInjector {
+        diffs: diffs.clone(),
+    });
+
+    let platform = PlatformRuntime {
+        injector: fake_injector,
+        handle: fake_handle,
+        _resources: Box::new(()),
+    };
+
+    let app = App::new(platform, action_rx).expect("Failed to create App with fake platform");
+
+    (app, action_tx, listening_history, shutdown_called, diffs)
+}
+
+#[test]
+fn test_app_state_defaults() {
+    let state = AppState::new();
+    assert!(!state.listening, "Initial listening state must be false");
+    assert!(state.running, "Initial running state must be true");
+
+    let default_state = AppState::default();
+    assert!(!default_state.listening);
+    assert!(default_state.running);
+}
+
+#[test]
+fn test_state_start_stop_transitions() {
+    let (mut app, action_tx, history, _, _) = create_test_app();
+
+    // Startup should explicitly initialize UI state to false
+    assert_eq!(*history.lock().unwrap(), vec![false]);
+    assert!(!app.state.listening);
+
+    // Send StartListening
+    action_tx.send(AppAction::StartListening).unwrap();
+    app.tick();
+    assert!(app.state.listening);
+    assert_eq!(*history.lock().unwrap(), vec![false, true]);
+
+    // Send StopListening
+    action_tx.send(AppAction::StopListening).unwrap();
+    app.tick();
+    assert!(!app.state.listening);
+    assert_eq!(*history.lock().unwrap(), vec![false, true, false]);
+}
+
+#[test]
+fn test_state_toggle_transition() {
+    let (mut app, action_tx, history, _, _) = create_test_app();
+
+    // Toggle 1: Start
+    action_tx.send(AppAction::ToggleListening).unwrap();
+    app.tick();
+    assert!(app.state.listening);
+    assert_eq!(*history.lock().unwrap(), vec![false, true]);
+
+    // Toggle 2: Stop
+    action_tx.send(AppAction::ToggleListening).unwrap();
+    app.tick();
+    assert!(!app.state.listening);
+    assert_eq!(*history.lock().unwrap(), vec![false, true, false]);
+}
+
+#[test]
+fn test_quit_action_terminates_running() {
+    let (mut app, action_tx, _, shutdown, _) = create_test_app();
+
+    assert!(app.state.running);
+    assert!(!shutdown.load(Ordering::SeqCst));
+
+    action_tx.send(AppAction::Quit).unwrap();
+    app.tick();
+
+    assert!(!app.state.running, "Quit action must set running = false");
+    assert!(shutdown.load(Ordering::SeqCst), "Quit action must notify platform shutdown");
+}
+
+#[test]
+fn test_endpoint_segment_finalization_invariant() {
+    let (mut app, _, _, _, _) = create_test_app();
+
+    // Manually transition to listening
+    app.start_listening();
+    assert!(app.state.listening);
+
+    // When an endpoint occurs, finalize_current_segment() is invoked
+    app.finalize_current_segment();
+
+    // Invariant check: listening MUST remain true across sentence boundaries
+    assert!(app.state.listening, "Listening state must remain TRUE after endpoint finalization");
+}

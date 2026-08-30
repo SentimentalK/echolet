@@ -1,16 +1,17 @@
+use crate::actions::AppAction;
+use crate::platform::PlatformHandle;
 use crossbeam_channel::Sender;
 use ksni::menu::{MenuItem, StandardItem};
 use ksni::{Icon, Tray, TrayMethods};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-pub struct VoiceTray {
-    pub recording: Arc<AtomicBool>,
-    pub toggle_tx: Sender<()>,
-    pub quit_tx: Sender<()>,
+pub struct LinuxTray {
+    pub is_listening: Arc<AtomicBool>,
+    pub action_tx: Sender<AppAction>,
 }
 
-impl Tray for VoiceTray {
+impl Tray for LinuxTray {
     fn id(&self) -> String {
         "voice-input-assistant".into()
     }
@@ -20,14 +21,14 @@ impl Tray for VoiceTray {
     }
 
     fn icon_pixmap(&self) -> Vec<Icon> {
-        let is_rec = self.recording.load(Ordering::SeqCst);
+        let is_rec = self.is_listening.load(Ordering::SeqCst);
         vec![create_circle_icon(is_rec, 32)]
     }
 
     fn menu(&self) -> Vec<MenuItem<Self>> {
-        let is_rec = self.recording.load(Ordering::SeqCst);
-        let toggle_tx = self.toggle_tx.clone();
-        let quit_tx = self.quit_tx.clone();
+        let is_rec = self.is_listening.load(Ordering::SeqCst);
+        let toggle_tx = self.action_tx.clone();
+        let quit_tx = self.action_tx.clone();
 
         let first_label = if is_rec {
             "Stop Listening"
@@ -40,7 +41,7 @@ impl Tray for VoiceTray {
             StandardItem {
                 label: first_label.into(),
                 activate: Box::new(move |_| {
-                    let _ = toggle_tx.send(());
+                    let _ = toggle_tx.send(AppAction::ToggleListening);
                 }),
                 ..Default::default()
             }
@@ -56,7 +57,7 @@ impl Tray for VoiceTray {
             StandardItem {
                 label: "Quit".into(),
                 activate: Box::new(move |_| {
-                    let _ = quit_tx.send(());
+                    let _ = quit_tx.send(AppAction::Quit);
                 }),
                 ..Default::default()
             }
@@ -65,22 +66,67 @@ impl Tray for VoiceTray {
     }
 }
 
-pub async fn spawn_tray(
-    recording: Arc<AtomicBool>,
-    toggle_tx: Sender<()>,
-    quit_tx: Sender<()>,
-) -> Result<ksni::Handle<VoiceTray>, ksni::Error> {
-    let tray = VoiceTray {
-        recording,
-        toggle_tx,
-        quit_tx,
+pub struct LinuxPlatformHandle {
+    pub is_listening: Arc<AtomicBool>,
+    pub tray_handle: Option<ksni::Handle<LinuxTray>>,
+    pub rt: Option<tokio::runtime::Runtime>,
+}
+
+impl PlatformHandle for LinuxPlatformHandle {
+    fn set_listening(&self, listening: bool) {
+        self.is_listening.store(listening, Ordering::SeqCst);
+        if let Some(handle) = &self.tray_handle {
+            if let Some(rt) = &self.rt {
+                rt.block_on(async {
+                    handle.update(|_| {}).await;
+                });
+            }
+        }
+    }
+
+    fn shutdown(&self) {
+        if let Some(handle) = &self.tray_handle {
+            handle.shutdown();
+        }
+    }
+}
+
+pub fn spawn_linux_tray(action_tx: Sender<AppAction>) -> LinuxPlatformHandle {
+    let is_listening = Arc::new(AtomicBool::new(false));
+    let tray = LinuxTray {
+        is_listening: is_listening.clone(),
+        action_tx,
     };
-    tray.spawn().await
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .ok();
+
+    let tray_handle = if let Some(ref runtime) = rt {
+        runtime.block_on(async {
+            tray.spawn().await.ok()
+        })
+    } else {
+        None
+    };
+
+    if tray_handle.is_some() {
+        println!("[Tray] System tray icon registered (Standby: ○, Listening: ●).");
+    } else {
+        println!("[Tray] Notice: Tray host not detected or registration bypassed.");
+    }
+
+    LinuxPlatformHandle {
+        is_listening,
+        tray_handle,
+        rt,
+    }
 }
 
 /// Generate ARGB32 pixmap:
-/// - Standby (false): Outline circle ○
-/// - Listening (true): Filled solid circle ● (Vibrant Red)
+/// - Standby (false): Outline circle ○ (#E0E0E0)
+/// - Listening (true): Filled solid circle ● (Vibrant Red #FF3B30)
 fn create_circle_icon(filled: bool, size: i32) -> Icon {
     let mut data = Vec::with_capacity((size * size * 4) as usize);
     let center = size as f32 / 2.0;
@@ -116,7 +162,6 @@ fn create_circle_icon(filled: bool, size: i32) -> Icon {
                 }
             };
 
-            // ksni expects ARGB32 byte sequence: [A, R, G, B]
             data.push(a);
             data.push(r);
             data.push(g);
