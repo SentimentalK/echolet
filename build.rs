@@ -3,6 +3,7 @@ use std::path::PathBuf;
 
 fn main() {
     println!("cargo:rerun-if-env-changed=ECHOLET_NATIVE_LIB_DIR");
+    println!("cargo:rerun-if-env-changed=ECHOLET_BUNDLE_BUILD");
 
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
 
@@ -33,13 +34,20 @@ fn main() {
     println!("cargo:rustc-link-lib=dylib=sherpa-onnx-c-api");
     println!("cargo:rustc-link-lib=dylib=onnxruntime");
 
-    // 4. Inject relative RPATH ($ORIGIN-based) so the binary finds runtime/lib portably:
-    // - Production Bundle: $ORIGIN/runtime/lib
-    // - Dev Binary (target/release/echolet): $ORIGIN/../../.local-runtime/runtime/lib
-    // - Dev Tests (target/release/deps/test_*): $ORIGIN/../../../.local-runtime/runtime/lib
-    println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN/runtime/lib");
-    println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN/../runtime/lib");
-    println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN/../../.local-runtime/runtime/lib");
-    println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN/../../../.local-runtime/runtime/lib");
+    // 4. Inject RPATH:
+    // - Production Bundle (ECHOLET_BUNDLE_BUILD=1): ONLY $ORIGIN/runtime/lib
+    // - Development Build: includes relative fallbacks for cargo run/test in repo
+    let is_bundle_build = env::var("ECHOLET_BUNDLE_BUILD")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+
+    if is_bundle_build {
+        println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN/runtime/lib");
+    } else {
+        println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN/runtime/lib");
+        println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN/../runtime/lib");
+        println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN/../../.local-runtime/runtime/lib");
+        println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN/../../../.local-runtime/runtime/lib");
+    }
     println!("cargo:rustc-link-arg=-Wl,-z,origin");
 }

@@ -44,7 +44,7 @@ pub fn handle_subcommand(args: &[String]) -> Result<bool, Box<dyn std::error::Er
     }
 }
 
-pub fn init(action_tx: Sender<AppAction>) -> Result<PlatformRuntime, Box<dyn std::error::Error>> {
+pub fn init(action_tx: Sender<AppAction>) -> Result<Option<PlatformRuntime>, Box<dyn std::error::Error>> {
     #[cfg(target_os = "linux")]
     {
         linux::init(action_tx)

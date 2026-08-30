@@ -1,10 +1,12 @@
 use crate::platform::TextInjector;
 use arboard::Clipboard;
 use libc::{c_int, c_uint, ioctl, suseconds_t, time_t, timeval};
+use std::env;
 use std::ffi::CString;
 use std::fs::{File, OpenOptions};
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::io::AsRawFd;
+use std::process::Command;
 use std::sync::Mutex;
 use std::thread;
 use std::time::Duration;
@@ -53,13 +55,13 @@ pub struct LinuxInjector {
 
 impl LinuxInjector {
     pub fn new() -> Self {
-        let uinput_file = match Self::init_uinput() {
+        let uinput_file = match Self::init_uinput_with_bootstrap() {
             Ok(file) => {
                 println!("[Injector] /dev/uinput virtual keyboard initialized successfully.");
                 Some(file)
             }
             Err(e) => {
-                eprintln!("[Injector] Warning: /dev/uinput could not be initialized: {}. Backspace keystrokes disabled.", e);
+                eprintln!("[Injector] Error initializing /dev/uinput: {}. Virtual keyboard input will be disabled.", e);
                 None
             }
         };
@@ -81,27 +83,26 @@ impl LinuxInjector {
         }
     }
 
-    fn init_uinput() -> Result<File, String> {
+    fn try_open_and_setup_uinput() -> Result<File, std::io::Error> {
         let file = OpenOptions::new()
             .read(true)
             .write(true)
             .custom_flags(libc::O_NONBLOCK)
-            .open("/dev/uinput")
-            .map_err(|e| format!("Failed to open /dev/uinput: {}", e))?;
+            .open("/dev/uinput")?;
 
         let fd = file.as_raw_fd();
 
         unsafe {
             if ioctl(fd, UI_SET_EVBIT as _, EV_KEY as c_int) < 0 {
-                return Err("ioctl UI_SET_EVBIT EV_KEY failed".into());
+                return Err(std::io::Error::last_os_error());
             }
             if ioctl(fd, UI_SET_EVBIT as _, EV_SYN as c_int) < 0 {
-                return Err("ioctl UI_SET_EVBIT EV_SYN failed".into());
+                return Err(std::io::Error::last_os_error());
             }
 
             for &key in &[KEY_BACKSPACE, KEY_LEFTCTRL, KEY_V] {
                 if ioctl(fd, UI_SET_KEYBIT as _, key as c_int) < 0 {
-                    return Err(format!("ioctl UI_SET_KEYBIT key {} failed", key));
+                    return Err(std::io::Error::last_os_error());
                 }
             }
 
@@ -117,17 +118,67 @@ impl LinuxInjector {
 
             const UI_DEV_SETUP: c_uint = 0x405c5503;
             if ioctl(fd, UI_DEV_SETUP as _, &setup) < 0 {
-                return Err("ioctl UI_DEV_SETUP failed".into());
+                return Err(std::io::Error::last_os_error());
             }
 
             if ioctl(fd, UI_DEV_CREATE as _) < 0 {
-                return Err("ioctl UI_DEV_CREATE failed".into());
+                return Err(std::io::Error::last_os_error());
             }
         }
 
-        // Give the OS a moment to register the new virtual input device
-        thread::sleep(Duration::from_millis(150));
+        // Give the OS kernel a moment to register the new virtual input device
+        thread::sleep(Duration::from_millis(100));
         Ok(file)
+    }
+
+    fn init_uinput_with_bootstrap() -> Result<File, String> {
+        // 1. Try opening directly
+        match Self::try_open_and_setup_uinput() {
+            Ok(file) => return Ok(file),
+            Err(e) if e.raw_os_error() == Some(libc::EACCES) || e.raw_os_error() == Some(libc::EPERM) => {
+                println!("[Injector] Notice: /dev/uinput requires user access permissions. Triggering system authorization...");
+                Self::bootstrap_permission_and_retry()?;
+                // Retry opening
+                Self::try_open_and_setup_uinput().map_err(|e| format!("Failed to open /dev/uinput after authorization: {}", e))
+            }
+            Err(e) => Err(format!("Failed to open /dev/uinput: {}", e)),
+        }
+    }
+
+    fn bootstrap_permission_and_retry() -> Result<(), String> {
+        let exe = env::current_exe()
+            .map_err(|e| format!("Cannot locate current executable: {}", e))?;
+
+        let status = Command::new("pkexec")
+            .arg(&exe)
+            .arg("setup-uinput")
+            .status()
+            .map_err(|e| format!("Failed to launch pkexec: {}", e))?;
+
+        if status.code() == Some(126) {
+            return Err("[Permission] Authorization cancelled by user. Virtual keyboard requires /dev/uinput access.".into());
+        }
+
+        if !status.success() {
+            return Err(format!(
+                "[Permission] pkexec setup-uinput failed with status: {:?}",
+                status.code()
+            ));
+        }
+
+        println!("[Permission] Authorization succeeded. Waiting for udev ACL to settle...");
+
+        // Retry loop up to 2 seconds (20 iterations * 100ms) to allow systemd-logind to apply ACL
+        for _ in 0..20 {
+            thread::sleep(Duration::from_millis(100));
+            if let Ok(file) = Self::try_open_and_setup_uinput() {
+                // Drop temporary check file; subsequent open will succeed
+                drop(file);
+                return Ok(());
+            }
+        }
+
+        Err("[Permission] Timed out waiting for /dev/uinput ACL to settle.".into())
     }
 
     fn emit_event(file: &mut File, type_: u16, code: u16, value: i32) {
