@@ -26,13 +26,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libasound2-dev pkg-config
 
-      - name: Cache downloaded runtime & model archives
-        uses: actions/cache@v4
-        with:
-          path: .cache/
-          key: echolet-assets-linux-x64-sherpa-v1.13.6-model-2023-02-16
-
-      - name: Prepare and verify official native runtime and model assets
+      - name: Download and verify official native runtime and model assets
         run: |
           ./scripts/download-official-assets.sh
 
