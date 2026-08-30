@@ -13,6 +13,7 @@ use echolet::audio::{AudioChunk, AudioInput};
 use echolet::beep::{beep_start, beep_stop};
 use echolet::diff::PartialSession;
 use echolet::injector::WaylandInjector;
+use echolet::tray::spawn_tray;
 
 const MODEL_DIR: &str =
     "/home/sentimentalk/sherpa-onnx/sherpa-onnx-streaming-zipformer-small-bilingual-zh-en-2023-02-16";
@@ -81,7 +82,8 @@ fn register_gnome_shortcut() {
     }
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().collect();
     if args.len() > 1 && args[1] == "toggle" {
         if let Err(e) = send_toggle_signal() {
@@ -122,6 +124,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let is_recording = Arc::new(AtomicBool::new(false));
     let running = Arc::new(AtomicBool::new(true));
 
+    // Channels for Tray interaction
+    let (tray_toggle_tx, tray_toggle_rx) = unbounded::<()>();
+    let (tray_quit_tx, tray_quit_rx) = unbounded::<()>();
+
+    let tray_handle = spawn_tray(
+        is_recording.clone(),
+        tray_toggle_tx,
+        tray_quit_tx,
+    )
+    .await
+    .ok();
+
+    if tray_handle.is_some() {
+        println!("[Tray] System tray icon registered (Standby: ○, Listening: ●).");
+    } else {
+        println!("[Tray] Notice: Tray host not detected or registration bypassed.");
+    }
+
     {
         let r = running.clone();
         ctrlc::set_handler(move || {
@@ -131,31 +151,57 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     println!("\n>>> Ready! Focus any text field (ChatGPT in Chrome, VS Code, Terminal) <<<");
-    println!(">>> Press [F10] to start speaking, press [F10] again to stop. <<<\n");
+    println!(">>> Press [F10] or click Tray [Start Listening] to speak. <<<");
+    println!(">>> Press [F10] again or click Tray [Stop Listening] to stop. <<<\n");
 
     let mut last_logged_text = String::new();
 
     while running.load(Ordering::SeqCst) {
-        // Check for incoming socket toggle requests
+        // Handle Quit from Tray menu
+        if tray_quit_rx.try_recv().is_ok() {
+            println!("\n[Tray] Quit requested from menu. Exiting...");
+            running.store(false, Ordering::SeqCst);
+            break;
+        }
+
+        // Check for toggle triggers (from F10/socket OR from Tray menu click)
+        let mut toggle_triggered = false;
+
+        // 1. Socket toggle event (F10 hotkey)
         if let Ok((mut client, _)) = listener.accept() {
             let mut buf = [0u8; 16];
             let _ = client.read(&mut buf);
+            toggle_triggered = true;
+        }
+
+        // 2. Tray menu toggle click
+        if tray_toggle_rx.try_recv().is_ok() {
+            toggle_triggered = true;
+        }
+
+        // Unified State Transition: ToggleRecording
+        if toggle_triggered {
             let current = is_recording.load(Ordering::SeqCst);
             let next = !current;
             is_recording.store(next, Ordering::SeqCst);
 
+            // Notify Tray to re-render icon and update menu (Start/Stop Listening)
+            if let Some(handle) = &tray_handle {
+                handle.update(|_| {}).await;
+            }
+
             if next {
                 beep_start();
-                println!("\n[Hotkey] [F10] >>> Recording STARTED (Speaking...) <<<");
+                println!("\n[Action] >>> Listening STARTED (Speaking...) <<<");
                 session.finalize();
                 stream.reset();
                 last_logged_text.clear();
             } else {
-                beep_stop();
-                println!("\n[Hotkey] [F10] >>> Recording STOPPED (Standby) <<<\n");
                 session.finalize();
                 stream.reset();
                 last_logged_text.clear();
+                beep_stop();
+                println!("\n[Action] >>> Listening STOPPED (Standby) <<<\n");
             }
         }
 
@@ -189,9 +235,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 injector.apply_diff(diff.backspaces, &diff.new_suffix);
             }
 
+            // Endpoint only commits the current sentence segment.
+            // Listening stays true, audio stays live, ready for the next sentence!
             if is_endpoint {
                 if !last_logged_text.is_empty() {
-                    println!("[Endpoint] Finalized utterance: \"{}\"", last_logged_text);
+                    println!(
+                        "[Endpoint] Finalized sentence: \"{}\" (Listening stays active)",
+                        last_logged_text
+                    );
                 }
                 session.finalize();
                 stream.reset();
@@ -199,7 +250,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        std::thread::sleep(Duration::from_millis(15));
+        tokio::time::sleep(Duration::from_millis(15)).await;
     }
 
     if socket_path.exists() {

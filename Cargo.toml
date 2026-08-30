@@ -12,3 +12,4 @@ tokio = { version = "1.40", features = ["full"] }
 libc = "0.2"
 ctrlc = "3.4"
 arboard = "3.4"
+ksni = "0.3"
