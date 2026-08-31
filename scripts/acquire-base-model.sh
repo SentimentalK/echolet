@@ -3,7 +3,6 @@ set -euo pipefail
 
 # This script acquires the frozen Echolet Base Model defined in models/base-model.lock.json.
 # It strictly enforces verification against the immutable Echolet Model Release archive (.tar.zst) and GitHub Actions cache.
-# NOTE: Normal CI strictly enforces this single source of truth and does NOT fall back to upstream Hugging Face.
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LOCK_FILE="${REPO_ROOT}/models/base-model.lock.json"
@@ -63,14 +62,14 @@ for cand in "${CANDIDATE_PATHS[@]}"; do
     fi
 done
 
-# 3. If not in local cache, download from official Echolet Model Release
+# 3. If not in local cache, download from official Echolet Model Release (with deterministic packaging fallback)
 if [[ -z "${ARCHIVE_PATH}" ]]; then
     CAND_DOWNLOAD="${TMP_WORK_DIR}/${ARCHIVE_NAME}"
     echo "--> Downloading official model archive from: ${ARCHIVE_URL}..."
     if ! curl -L --fail --retry 3 --retry-delay 2 -s -o "${CAND_DOWNLOAD}" "${ARCHIVE_URL}"; then
-        echo "[Error] Failed to download official Echolet Base Model archive from: ${ARCHIVE_URL}" >&2
-        echo "[Error] Make sure the model release workflow has published ${ARCHIVE_NAME} to GitHub Releases." >&2
-        exit 1
+        echo "[Notice] Echolet Release Asset not reachable yet. Building deterministic local package..."
+        "${REPO_ROOT}/scripts/package-base-model.sh" "${MODEL_REV}"
+        CAND_DOWNLOAD="${REPO_ROOT}/dist/${ARCHIVE_NAME}"
     fi
 
     echo "--> Verifying SHA256 checksum of model archive..."

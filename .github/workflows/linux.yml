@@ -44,9 +44,6 @@ jobs:
         with:
           path: |
             dist/model-*.tar.zst
-            dist/echolet-model-*.tar.zst
-            /tmp/model-*.tar.zst
-            /tmp/echolet-model-*.tar.zst
           key: echolet-base-model-${{ hashFiles('models/base-model.lock.json') }}
 
       - name: Acquire native runtime and frozen base model

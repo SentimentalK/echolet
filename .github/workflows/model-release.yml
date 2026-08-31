@@ -23,14 +23,9 @@ permissions:
   contents: write
 
 jobs:
-  validate-candidate:
-    name: Package & Validate Candidate Model
+  package-validate-publish:
+    name: Package, Validate & Publish Model
     runs-on: ubuntu-24.04
-    outputs:
-      tag: ${{ steps.meta.outputs.tag }}
-      archive_name: ${{ steps.meta.outputs.archive_name }}
-      archive_path: ${{ steps.meta.outputs.archive_path }}
-      sha256: ${{ steps.meta.outputs.sha256 }}
 
     steps:
       - name: Checkout repository
@@ -58,11 +53,17 @@ jobs:
           ARCHIVE_PATH="dist/${ARCHIVE_NAME}"
           SHA256=$(sha256sum "${ARCHIVE_PATH}" | awk '{print $1}')
           TAG="${PKG_NAME}"
-          
+
           echo "tag=${TAG}" >> $GITHUB_OUTPUT
           echo "archive_name=${ARCHIVE_NAME}" >> $GITHUB_OUTPUT
           echo "archive_path=${ARCHIVE_PATH}" >> $GITHUB_OUTPUT
           echo "sha256=${SHA256}" >> $GITHUB_OUTPUT
+
+          echo "=== Model Artifact Summary ==="
+          echo "Tag:          ${TAG}"
+          echo "Archive:      ${ARCHIVE_NAME}"
+          echo "SHA256:       ${SHA256}"
+          ls -lh "${ARCHIVE_PATH}"
 
       - name: Test candidate model with automated test suite
         run: |
@@ -76,53 +77,42 @@ jobs:
           path: ${{ steps.meta.outputs.archive_path }}
           if-no-files-found: error
 
-  publish-immutable-release:
-    name: Publish Immutable GitHub Model Release
-    needs: validate-candidate
-    if: github.event_name == 'workflow_dispatch' && github.event.inputs.publish_release == true
-    runs-on: ubuntu-24.04
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Download model artifact from validation job
-        uses: actions/download-artifact@v4
-        with:
-          name: ${{ needs.validate-candidate.outputs.tag }}
-          path: dist
-
-      - name: Verify release immutability (fail only if asset already exists)
+      - name: Verify release immutability (fail only if asset already attached)
+        if: (github.event_name == 'push' && github.ref == 'refs/heads/master') || (github.event_name == 'workflow_dispatch' && github.event.inputs.publish_release == 'true')
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TAG="${{ needs.validate-candidate.outputs.tag }}"
-          ARCHIVE_NAME="${{ needs.validate-candidate.outputs.archive_name }}"
-          
-          if gh release view "${TAG}" --json assets -q '.assets[].name' 2>/dev/null | grep -q "^${ARCHIVE_NAME}$"; then
+          TAG="${{ steps.meta.outputs.tag }}"
+          ARCHIVE_NAME="${{ steps.meta.outputs.archive_name }}"
+
+          # Only block if the specific asset file already exists inside the release.
+          # An empty release (tag exists, assets=[]) is fine — we just attach to it.
+          if gh release view "${TAG}" --json assets -q '.assets[].name' 2>/dev/null | grep -qx "${ARCHIVE_NAME}"; then
             echo "::error::Asset ${ARCHIVE_NAME} already exists in release ${TAG}! Echolet base models are strictly immutable. To release a new model, bump the revision in models/base-model.json."
             exit 1
           fi
+          echo "Immutability check passed: asset ${ARCHIVE_NAME} not yet present in release ${TAG}."
 
       - name: Publish GitHub Model Release Asset
+        if: (github.event_name == 'push' && github.ref == 'refs/heads/master') || (github.event_name == 'workflow_dispatch' && github.event.inputs.publish_release == 'true')
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ needs.validate-candidate.outputs.tag }}
-          name: "Echolet Base Model ${{ needs.validate-candidate.outputs.tag }}"
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: "Echolet Base Model ${{ steps.meta.outputs.tag }}"
           body: |
-            ## Echolet Base Model (${{ needs.validate-candidate.outputs.tag }})
-            
-            * **Archive**: `${{ needs.validate-candidate.outputs.archive_name }}`
-            * **Archive SHA256**: `${{ needs.validate-candidate.outputs.sha256 }}`
-            
+            ## Echolet Base Model (${{ steps.meta.outputs.tag }})
+
+            * **Archive**: `${{ steps.meta.outputs.archive_name }}`
+            * **Archive SHA256**: `${{ steps.meta.outputs.sha256 }}`
+
             ```json
             {
               "schema_version": 1,
               "id": "xasr-zh-en-480ms",
               "revision": "r1",
-              "archive": "${{ needs.validate-candidate.outputs.archive_name }}",
-              "url": "https://github.com/${{ github.repository }}/releases/download/${{ needs.validate-candidate.outputs.tag }}/${{ needs.validate-candidate.outputs.archive_name }}",
-              "sha256": "${{ needs.validate-candidate.outputs.sha256 }}"
+              "archive": "${{ steps.meta.outputs.archive_name }}",
+              "url": "https://github.com/${{ github.repository }}/releases/download/${{ steps.meta.outputs.tag }}/${{ steps.meta.outputs.archive_name }}",
+              "sha256": "${{ steps.meta.outputs.sha256 }}"
             }
             ```
-          files: dist/${{ needs.validate-candidate.outputs.archive_name }}
+          files: dist/${{ steps.meta.outputs.archive_name }}

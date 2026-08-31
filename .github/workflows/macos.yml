@@ -39,8 +39,6 @@ jobs:
         with:
           path: |
             dist/model-*.tar.zst
-            dist/echolet-model-*.tar.zst
-            /tmp/model-*.tar.zst
           key: echolet-base-model-${{ hashFiles('models/base-model.lock.json') }}
 
       - name: "Notice: macOS CI Architecture Ready"
