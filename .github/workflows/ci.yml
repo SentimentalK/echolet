@@ -16,6 +16,7 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       core: ${{ steps.filter.outputs.core }}
+      platform_build: ${{ steps.filter.outputs.platform_build }}
       linux: ${{ steps.filter.outputs.linux }}
       windows: ${{ steps.filter.outputs.windows }}
       macos: ${{ steps.filter.outputs.macos }}
@@ -31,19 +32,35 @@ jobs:
         with:
           filters: |
             core:
+              - 'src/actions.rs'
+              - 'src/app.rs'
+              - 'src/asr.rs'
+              - 'src/audio.rs'
+              - 'src/beep.rs'
+              - 'src/config.rs'
+              - 'src/diff.rs'
+              - 'src/ffi.rs'
+              - 'src/history.rs'
+              - 'src/lib.rs'
+              - 'src/state.rs'
+              - 'src/models/**'
+              - 'tests/**'
+              - 'licenses/**'
+            platform_build:
               - 'Cargo.toml'
               - 'Cargo.lock'
               - 'build.rs'
-              - 'src/*.rs'
-              - 'src/models/**'
+              - 'src/main.rs'
+              - 'src/paths.rs'
               - 'src/platform/mod.rs'
-              - 'licenses/**'
             linux:
               - 'src/platform/linux/**'
               - 'scripts/linux/**'
               - 'scripts/download-official-assets.sh'
               - 'scripts/acquire-base-model.sh'
               - 'scripts/stage-release.sh'
+              - 'scripts/prepare-local-assets.sh'
+              - 'scripts/package-base-model.sh'
               - '.github/workflows/linux.yml'
             windows:
               - 'src/platform/windows/**'
@@ -57,12 +74,13 @@ jobs:
               - 'android/**'
               - '.github/workflows/android.yml'
             model:
-              - 'models/base-model.lock.json'
+              - 'model.json'
+              - 'models/**'
 
   linux:
     name: Linux CI
     needs: detect-changes
-    if: needs.detect-changes.outputs.core == 'true' || needs.detect-changes.outputs.model == 'true' || needs.detect-changes.outputs.linux == 'true' || github.event_name == 'workflow_dispatch'
+    if: needs.detect-changes.outputs.core == 'true' || needs.detect-changes.outputs.platform_build == 'true' || needs.detect-changes.outputs.linux == 'true' || needs.detect-changes.outputs.model == 'true' || github.event_name == 'workflow_dispatch'
     uses: ./.github/workflows/linux.yml
     with:
       upload_release: false
@@ -70,7 +88,7 @@ jobs:
   windows:
     name: Windows CI
     needs: detect-changes
-    if: needs.detect-changes.outputs.core == 'true' || needs.detect-changes.outputs.model == 'true' || needs.detect-changes.outputs.windows == 'true' || github.event_name == 'workflow_dispatch'
+    if: needs.detect-changes.outputs.platform_build == 'true' || needs.detect-changes.outputs.windows == 'true' || needs.detect-changes.outputs.model == 'true' || github.event_name == 'workflow_dispatch'
     uses: ./.github/workflows/windows.yml
     with:
       upload_release: false
@@ -78,15 +96,16 @@ jobs:
   macos:
     name: macOS CI
     needs: detect-changes
-    if: needs.detect-changes.outputs.core == 'true' || needs.detect-changes.outputs.model == 'true' || needs.detect-changes.outputs.macos == 'true' || github.event_name == 'workflow_dispatch'
+    if: needs.detect-changes.outputs.platform_build == 'true' || needs.detect-changes.outputs.macos == 'true' || needs.detect-changes.outputs.model == 'true' || github.event_name == 'workflow_dispatch'
     uses: ./.github/workflows/macos.yml
     with:
       upload_release: false
+      include_intel: false
 
   android:
     name: Android CI
     needs: detect-changes
-    if: needs.detect-changes.outputs.core == 'true' || needs.detect-changes.outputs.model == 'true' || needs.detect-changes.outputs.android == 'true' || github.event_name == 'workflow_dispatch'
+    if: needs.detect-changes.outputs.android == 'true' || needs.detect-changes.outputs.model == 'true' || github.event_name == 'workflow_dispatch'
     uses: ./.github/workflows/android.yml
     with:
       upload_release: false

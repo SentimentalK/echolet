@@ -7,26 +7,21 @@ on:
         type: boolean
         default: false
         description: 'Upload to GitHub Release'
+      include_intel:
+        type: boolean
+        default: false
+        description: 'Include Intel (x86_64) runner'
   workflow_dispatch:
+    inputs:
+      include_intel:
+        type: boolean
+        default: false
+        description: 'Include Intel (x86_64) runner'
 
 jobs:
-  build-macos:
-    name: macOS ${{ matrix.name }} Build & Test
-    runs-on: ${{ matrix.runner }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: arm64
-            name: Apple Silicon
-            runner: macos-15
-            target: aarch64-apple-darwin
-            artifact: echolet-macos-arm64
-          - arch: x64
-            name: Intel
-            runner: macos-15-intel
-            target: x86_64-apple-darwin
-            artifact: echolet-macos-x64
+  build-macos-arm64:
+    name: macOS Apple Silicon Build & Test
+    runs-on: macos-15
 
     steps:
       - name: Checkout repository
@@ -35,7 +30,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
+          targets: aarch64-apple-darwin
 
       - name: Install macOS system dependencies
         run: |
@@ -50,9 +45,9 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: ${{ runner.os }}-${{ matrix.arch }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-arm64-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-${{ matrix.arch }}-cargo-
+            ${{ runner.os }}-arm64-cargo-
 
       - name: Cache Echolet Base Model Archive
         uses: actions/cache@v4
@@ -63,7 +58,7 @@ jobs:
 
       - name: Acquire native runtime and frozen base model
         run: |
-          ./scripts/macos/prepare-assets.sh ${{ matrix.arch }}
+          ./scripts/macos/prepare-assets.sh arm64
 
       - name: Run automated test suite
         run: |
@@ -71,10 +66,66 @@ jobs:
 
       - name: Build and verify macOS release bundle
         run: |
-          ./scripts/macos/build-release.sh ${{ matrix.arch }}
+          ./scripts/macos/build-release.sh arm64
 
       - name: Publish to GitHub Release
         if: ${{ inputs.upload_release }}
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/${{ matrix.artifact }}.zip
+          files: dist/echolet-macos-arm64.zip
+
+  build-macos-x64:
+    name: macOS Intel Build & Test
+    if: inputs.include_intel == true || inputs.upload_release == true
+    runs-on: macos-15-intel
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin
+
+      - name: Install macOS system dependencies
+        run: |
+          brew install zstd jq curl
+
+      - name: Cache Cargo dependencies and build cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-x64-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-x64-cargo-
+
+      - name: Cache Echolet Base Model Archive
+        uses: actions/cache@v4
+        with:
+          path: |
+            dist/model-*.tar.zst
+          key: echolet-base-model-${{ hashFiles('models/base-model.lock.json') }}
+
+      - name: Acquire native runtime and frozen base model
+        run: |
+          ./scripts/macos/prepare-assets.sh x64
+
+      - name: Run automated test suite
+        run: |
+          cargo test --release -- --nocapture
+
+      - name: Build and verify macOS release bundle
+        run: |
+          ./scripts/macos/build-release.sh x64
+
+      - name: Publish to GitHub Release
+        if: ${{ inputs.upload_release }}
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/echolet-macos-x64.zip

@@ -27,6 +27,7 @@ jobs:
     uses: ./.github/workflows/macos.yml
     with:
       upload_release: true
+      include_intel: true
 
   release-android:
     name: Release Android
