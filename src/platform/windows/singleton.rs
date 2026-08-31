@@ -11,7 +11,7 @@ unsafe impl Sync for SingleInstanceGuard {}
 
 impl Drop for SingleInstanceGuard {
     fn drop(&mut self) {
-        if !self.handle.is_null() {
+        if self.handle != 0 {
             unsafe {
                 CloseHandle(self.handle);
             }
@@ -20,10 +20,12 @@ impl Drop for SingleInstanceGuard {
 }
 
 pub fn acquire_single_instance() -> Result<Option<SingleInstanceGuard>, String> {
-    let mutex_name: Vec<u16> = "Local\\EcholetDesktopSingleton\0".encode_utf16().collect();
+    let mutex_name: Vec<u16> = "Local\\EcholetDesktopSingleton\0"
+        .encode_utf16()
+        .collect();
     unsafe {
         let handle = CreateMutexW(ptr::null(), 1, mutex_name.as_ptr());
-        if handle.is_null() {
+        if handle == 0 {
             return Err(format!("Failed to create mutex: {}", GetLastError()));
         }
 

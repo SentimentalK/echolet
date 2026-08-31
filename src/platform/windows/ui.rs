@@ -17,7 +17,7 @@ use windows_sys::Win32::UI::Shell::{
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu,
-    DestroyWindow, DispatchMessageW, GetCursorPos, GetMessageW, LoadIconW,
+    DestroyWindow, DispatchMessageW, GetCursorPos, GetMessageW, LoadIconW, MSG,
     PostMessageW, PostQuitMessage, RegisterClassW, RegisterWindowMessageW,
     SetForegroundWindow, TrackPopupMenuEx, TranslateMessage, HWND_MESSAGE, HMENU,
     IDI_APPLICATION, MF_DISABLED, MF_GRAYED, MF_SEPARATOR, MF_STRING, TPM_NONOTIFY,
@@ -149,11 +149,12 @@ unsafe extern "system" fn wnd_proc(
                         state.model_name = active_id;
                     }
                     WindowsUiCommand::OpenHistoryFolder(path) => {
-                        let mut path_utf16: Vec<u16> = path.to_string_lossy().encode_utf16().collect();
+                        let mut path_utf16: Vec<u16> =
+                            path.to_string_lossy().encode_utf16().collect();
                         path_utf16.push(0);
                         let open_verb: Vec<u16> = "open\0".encode_utf16().collect();
                         ShellExecuteW(
-                            0,
+                            ptr::null_mut(),
                             open_verb.as_ptr(),
                             path_utf16.as_ptr(),
                             ptr::null(),
@@ -202,7 +203,7 @@ unsafe fn update_tray_icon(hwnd: HWND, listening: bool, action: u32) {
     nid.uID = TRAY_ICON_ID;
     nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
     nid.uCallbackMessage = WM_TRAY_CALLBACK;
-    nid.hIcon = LoadIconW(0, IDI_APPLICATION);
+    nid.hIcon = LoadIconW(ptr::null_mut(), IDI_APPLICATION);
 
     let tip = if listening {
         "Echolet (Listening - Press F10 to stop)"
@@ -222,7 +223,7 @@ unsafe fn show_tray_menu(hwnd: HWND, state: &UiState) {
     SetForegroundWindow(hwnd);
 
     let hmenu: HMENU = CreatePopupMenu();
-    if hmenu.is_null() {
+    if hmenu == 0 {
         return;
     }
 
@@ -232,12 +233,22 @@ unsafe fn show_tray_menu(hwnd: HWND, state: &UiState) {
     } else {
         "Start Listening (F10)"
     };
-    AppendMenuW(hmenu, MF_STRING, IDM_TOGGLE_LISTENING, to_wide(toggle_text).as_ptr());
+    AppendMenuW(
+        hmenu,
+        MF_STRING,
+        IDM_TOGGLE_LISTENING,
+        to_wide(toggle_text).as_ptr(),
+    );
     AppendMenuW(hmenu, MF_SEPARATOR, 0, ptr::null());
 
     // 2. Model Info
     let model_text = format!("Model: {}", state.model_name);
-    AppendMenuW(hmenu, MF_STRING | MF_DISABLED | MF_GRAYED, IDM_MODEL_INFO, to_wide(&model_text).as_ptr());
+    AppendMenuW(
+        hmenu,
+        MF_STRING | MF_DISABLED | MF_GRAYED,
+        IDM_MODEL_INFO,
+        to_wide(&model_text).as_ptr(),
+    );
     AppendMenuW(hmenu, MF_SEPARATOR, 0, ptr::null());
 
     // 3. Local History
@@ -246,17 +257,42 @@ unsafe fn show_tray_menu(hwnd: HWND, state: &UiState) {
         .replace(&std::env::var("USERPROFILE").unwrap_or_default(), "~");
 
     if !state.history_enabled {
-        AppendMenuW(hmenu, MF_STRING, IDM_TOGGLE_HISTORY, to_wide("Local History: Off").as_ptr());
+        AppendMenuW(
+            hmenu,
+            MF_STRING,
+            IDM_TOGGLE_HISTORY,
+            to_wide("Local History: Off").as_ptr(),
+        );
     } else {
-        AppendMenuW(hmenu, MF_STRING, IDM_TOGGLE_HISTORY, to_wide("✓ Local History").as_ptr());
-        AppendMenuW(hmenu, MF_STRING, IDM_OPEN_HISTORY_FOLDER, to_wide("    Open History Folder").as_ptr());
+        AppendMenuW(
+            hmenu,
+            MF_STRING,
+            IDM_TOGGLE_HISTORY,
+            to_wide("✓ Local History").as_ptr(),
+        );
+        AppendMenuW(
+            hmenu,
+            MF_STRING,
+            IDM_OPEN_HISTORY_FOLDER,
+            to_wide("    Open History Folder").as_ptr(),
+        );
         let path_text = format!("    {}", hist_dir);
-        AppendMenuW(hmenu, MF_STRING | MF_DISABLED | MF_GRAYED, IDM_HISTORY_PATH, to_wide(&path_text).as_ptr());
+        AppendMenuW(
+            hmenu,
+            MF_STRING | MF_DISABLED | MF_GRAYED,
+            IDM_HISTORY_PATH,
+            to_wide(&path_text).as_ptr(),
+        );
     }
     AppendMenuW(hmenu, MF_SEPARATOR, 0, ptr::null());
 
     // 4. Hotkey
-    AppendMenuW(hmenu, MF_STRING | MF_DISABLED | MF_GRAYED, IDM_HOTKEY_INFO, to_wide("Hotkey: F10").as_ptr());
+    AppendMenuW(
+        hmenu,
+        MF_STRING | MF_DISABLED | MF_GRAYED,
+        IDM_HOTKEY_INFO,
+        to_wide("Hotkey: F10").as_ptr(),
+    );
     AppendMenuW(hmenu, MF_SEPARATOR, 0, ptr::null());
 
     // 5. Quit
@@ -323,12 +359,12 @@ pub fn spawn_ui_thread(
                 0,
                 0,
                 HWND_MESSAGE,
-                0,
+                ptr::null_mut(),
                 hinstance,
                 ptr::null(),
             );
 
-            if hwnd.is_null() {
+            if hwnd == 0 {
                 let _ = init_tx.send(Err("Failed to create message-only window".into()));
                 return;
             }
@@ -357,8 +393,8 @@ pub fn spawn_ui_thread(
             let _ = init_tx.send(Ok(()));
 
             // 3. Win32 Message Loop
-            let mut msg = std::mem::zeroed();
-            while GetMessageW(&mut msg, 0, 0, 0) > 0 {
+            let mut msg: MSG = std::mem::zeroed();
+            while GetMessageW(&mut msg, ptr::null_mut(), 0, 0) > 0 {
                 TranslateMessage(&msg);
                 DispatchMessageW(&msg);
             }

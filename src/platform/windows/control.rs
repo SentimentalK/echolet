@@ -5,10 +5,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
-use windows_sys::Win32::Foundation::{CloseHandle, GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE};
-use windows_sys::Win32::Storage::FileSystem::{
-    CreateFileW, ReadFile, WriteFile, OPEN_EXISTING,
+use windows_sys::Win32::Foundation::{
+    CloseHandle, GetLastError, GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE,
 };
+use windows_sys::Win32::Storage::FileSystem::{CreateFileW, OPEN_EXISTING};
+use windows_sys::Win32::System::IO::{ReadFile, WriteFile};
 use windows_sys::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_ACCESS_DUPLEX,
     PIPE_READMODE_MESSAGE, PIPE_TYPE_MESSAGE, PIPE_WAIT,
@@ -56,7 +57,8 @@ pub fn start_control_listener(
                     }
 
                     let connected = ConnectNamedPipe(pipe, ptr::null_mut());
-                    if connected != 0 || windows_sys::Win32::Foundation::GetLastError() == 535 { // ERROR_PIPE_CONNECTED
+                    if connected != 0 || GetLastError() == 535 {
+                        // ERROR_PIPE_CONNECTED
                         let mut buf = [0u8; 128];
                         let mut bytes_read = 0;
                         if ReadFile(
@@ -155,6 +157,8 @@ pub fn send_command(cmd: &str) -> Result<String, String> {
             return Err("Failed to read response from Named Pipe.".into());
         }
 
-        Ok(String::from_utf8_lossy(&buf[..bytes_read as usize]).trim().to_string())
+        Ok(String::from_utf8_lossy(&buf[..bytes_read as usize])
+            .trim()
+            .to_string())
     }
 }
