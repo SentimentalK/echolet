@@ -44,6 +44,6 @@ jobs:
             dist/echolet-model-*.tar.zst
           key: echolet-base-model-${{ hashFiles('models/base-model.lock.json') }}
 
-      - name: Notice: Windows CI Architecture Ready
+      - name: "Notice: Windows CI Architecture Ready"
         run: |
           echo "Windows platform build step ready. Consumes same models/base-model.lock.json."

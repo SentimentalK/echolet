@@ -28,6 +28,6 @@ jobs:
             dist/echolet-model-*.tar.zst
           key: echolet-base-model-${{ hashFiles('models/base-model.lock.json') }}
 
-      - name: Notice: Android CI Architecture Ready
+      - name: "Notice: Android CI Architecture Ready"
         run: |
           echo "Android platform build step ready. Consumes same models/base-model.lock.json."

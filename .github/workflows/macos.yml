@@ -44,6 +44,6 @@ jobs:
             dist/echolet-model-*.tar.zst
           key: echolet-base-model-${{ hashFiles('models/base-model.lock.json') }}
 
-      - name: Notice: macOS CI Architecture Ready
+      - name: "Notice: macOS CI Architecture Ready"
         run: |
           echo "macOS platform build step ready. Consumes same models/base-model.lock.json."
