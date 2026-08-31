@@ -2,9 +2,13 @@ name: Model Release Pipeline
 
 on:
   push:
+    branches:
+      - master
     paths:
       - 'models/base-model.json'
   pull_request:
+    branches:
+      - master
     paths:
       - 'models/base-model.json'
   workflow_dispatch:
@@ -24,6 +28,7 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       tag: ${{ steps.meta.outputs.tag }}
+      archive_name: ${{ steps.meta.outputs.archive_name }}
       archive_path: ${{ steps.meta.outputs.archive_path }}
       sha256: ${{ steps.meta.outputs.sha256 }}
 
@@ -49,11 +54,13 @@ jobs:
           MODEL_ID=$(jq -r '.id' models/base-model.json)
           REV=$(jq -r '.revision' models/base-model.json)
           PKG_NAME="echolet-model-${MODEL_ID}-${REV}"
-          ARCHIVE_PATH="dist/${PKG_NAME}.tar.zst"
+          ARCHIVE_NAME="${PKG_NAME}.tar.zst"
+          ARCHIVE_PATH="dist/${ARCHIVE_NAME}"
           SHA256=$(sha256sum "${ARCHIVE_PATH}" | awk '{print $1}')
           TAG="model-${MODEL_ID}-${REV}"
           
           echo "tag=${TAG}" >> $GITHUB_OUTPUT
+          echo "archive_name=${ARCHIVE_NAME}" >> $GITHUB_OUTPUT
           echo "archive_path=${ARCHIVE_PATH}" >> $GITHUB_OUTPUT
           echo "sha256=${SHA256}" >> $GITHUB_OUTPUT
 
@@ -72,7 +79,7 @@ jobs:
   publish-immutable-release:
     name: Publish Immutable GitHub Model Release
     needs: validate-candidate
-    if: github.event_name == 'workflow_dispatch' && github.event.inputs.publish_release == 'true'
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.publish_release == true
     runs-on: ubuntu-24.04
 
     steps:
@@ -103,7 +110,7 @@ jobs:
           body: |
             ## Echolet Base Model (${{ needs.validate-candidate.outputs.tag }})
             
-            * **Archive**: `${{ needs.validate-candidate.outputs.archive_path }}`
+            * **Archive**: `${{ needs.validate-candidate.outputs.archive_name }}`
             * **Archive SHA256**: `${{ needs.validate-candidate.outputs.sha256 }}`
             
             ```json
@@ -111,9 +118,9 @@ jobs:
               "schema_version": 1,
               "id": "xasr-zh-en-480ms",
               "revision": "r1",
-              "archive": "${{ needs.validate-candidate.outputs.tag }}.tar.zst",
-              "url": "https://github.com/${{ github.repository }}/releases/download/${{ needs.validate-candidate.outputs.tag }}/${{ needs.validate-candidate.outputs.tag }}.tar.zst",
+              "archive": "${{ needs.validate-candidate.outputs.archive_name }}",
+              "url": "https://github.com/${{ github.repository }}/releases/download/${{ needs.validate-candidate.outputs.tag }}/${{ needs.validate-candidate.outputs.archive_name }}",
               "sha256": "${{ needs.validate-candidate.outputs.sha256 }}"
             }
             ```
-          files: dist/${{ needs.validate-candidate.outputs.tag }}.tar.zst
+          files: dist/${{ needs.validate-candidate.outputs.archive_name }}
