@@ -16,8 +16,13 @@ $SherpaAsset = "sherpa-onnx-v1.13.6-win-x64-shared-MD-Release-lib.tar.bz2"
 $SherpaSha256 = "dca033829d3a7e74c127fc0d349a12257fb890fe5038a381ab1706e4b35cf0fa"
 $SherpaUrl = "https://github.com/k2-fsa/sherpa-onnx/releases/download/$SherpaVersion/$SherpaAsset"
 
-$ModelUrl = "https://github.com/SentimentalK/echolet/releases/download/model-xasr-zh-en-480ms-r1/model-xasr-zh-en-480ms-r1.tar.zst"
-$ModelSha256 = "689ff18c584d29910da37b6fe904db0c1489c9d1eb775bf227181c0022d4f828"
+# Read official model lock as single source of truth
+$ModelLockPath = Join-Path $RepoRoot "models\base-model.lock.json"
+$ModelLock = Get-Content $ModelLockPath -Raw | ConvertFrom-Json
+
+$ModelUrl = $ModelLock.url
+$ModelSha256 = $ModelLock.sha256
+$ModelArchive = $ModelLock.archive
 
 $TestWavUrl = "https://huggingface.co/csukuangfj/sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20/resolve/main/test_wavs/0.wav"
 $TestWavSha256 = "7d93384ca14702cc584a7a33fe2fed92e89e708549161cb12ea38c916882103b"
@@ -56,10 +61,10 @@ try {
     Copy-Item -Path "$ExtractedLib\*.dll" -Destination $RuntimeLibDir -Force
     Copy-Item -Path "$ExtractedLib\*.dll" -Destination $RuntimeBinDir -Force
 
-    # 2. Acquire Echolet Base Model
-    $CachedArchive = "$RepoRoot\dist\model-xasr-zh-en-480ms-r1.tar.zst"
+    # 2. Acquire Echolet Base Model from lock file
+    $CachedArchive = Join-Path "$RepoRoot\dist" $ModelArchive
     if (!(Test-Path $CachedArchive)) {
-        Write-Host "--> Downloading Echolet Base Model (r1)..."
+        Write-Host "--> Downloading Echolet Base Model ($ModelArchive)..."
         curl.exe -L --fail --retry 3 --retry-delay 2 -s -o $CachedArchive $ModelUrl
     }
 
