@@ -2,8 +2,8 @@
 set -euo pipefail
 
 # This script acquires the frozen Echolet Base Model defined in models/base-model.lock.json.
-# It prioritizes immutable Echolet Model Release archives (.tar.zst) and GitHub Actions cache,
-# with robust fallback to pinned upstream assets with per-file SHA256 validation.
+# It strictly enforces verification against the immutable Echolet Model Release archive (.tar.zst) and GitHub Actions cache.
+# NOTE: Normal CI strictly enforces this single source of truth and does NOT fall back to upstream Hugging Face.
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LOCK_FILE="${REPO_ROOT}/models/base-model.lock.json"
@@ -19,12 +19,6 @@ MODEL_REV=$(jq -r '.revision' "${LOCK_FILE}")
 ARCHIVE_NAME=$(jq -r '.archive' "${LOCK_FILE}")
 ARCHIVE_URL=$(jq -r '.url' "${LOCK_FILE}")
 EXPECTED_SHA256=$(jq -r '.sha256' "${LOCK_FILE}")
-UPSTREAM_REV=$(jq -r '.upstream_revision' "${LOCK_FILE}")
-
-ENCODER_SHA256="0c3454033d249081df124ddcd7adaf3deca07d0b999b26f2ee5d2475d37abc74"
-DECODER_SHA256="3658368d274a5d5fd39a7ac20c46bed0ad9cfea1f0feddef30d5d89797c1f499"
-JOINER_SHA256="03781c98165a2385024c9cecdd2b6b13310d81db23a62c7da420782c2915cf81"
-TOKENS_SHA256="b818a60878b9aae978cbb8ad594acbd403d76d1af2e31ef4197c84e2dbdba27c"
 
 echo "=== Acquiring Echolet Base Model (${MODEL_ID} - ${MODEL_REV}) ==="
 echo "Target directory: ${TARGET_DIR}"
@@ -51,7 +45,7 @@ trap 'rm -rf "${TMP_WORK_DIR}"' EXIT
 
 ARCHIVE_PATH=""
 
-# 2. Check local artifact caches (e.g. dist/ or /tmp/)
+# 2. Check local artifact caches (e.g. dist/ or /tmp/ or Actions cache)
 CANDIDATE_PATHS=(
     "${REPO_ROOT}/dist/${ARCHIVE_NAME}"
     "/tmp/${ARCHIVE_NAME}"
@@ -69,55 +63,40 @@ for cand in "${CANDIDATE_PATHS[@]}"; do
     fi
 done
 
-# 3. If not in local cache, attempt download from Echolet Model Release
+# 3. If not in local cache, download from official Echolet Model Release
 if [[ -z "${ARCHIVE_PATH}" ]]; then
     CAND_DOWNLOAD="${TMP_WORK_DIR}/${ARCHIVE_NAME}"
-    echo "--> Attempting download from Echolet Model Release: ${ARCHIVE_URL}..."
-    if curl -L --fail --retry 3 --retry-delay 2 -s -o "${CAND_DOWNLOAD}" "${ARCHIVE_URL}"; then
-        calc_sha=$(sha256sum "${CAND_DOWNLOAD}" | awk '{print $1}')
-        if [[ "${calc_sha}" == "${EXPECTED_SHA256}" ]]; then
-            echo "--> Echolet Model Release archive verified (SHA256: ${calc_sha})."
-            ARCHIVE_PATH="${CAND_DOWNLOAD}"
-        else
-            echo "[Warning] Downloaded archive checksum mismatch: ${calc_sha} != ${EXPECTED_SHA256}"
-        fi
-    else
-        echo "[Notice] Echolet Model Release not yet published or unreachable."
-    fi
-fi
-
-# 4. Extract verified archive if available, or fall back to pinned per-file acquisition
-if [[ -n "${ARCHIVE_PATH}" ]]; then
-    echo "--> Extracting model archive into ${TARGET_DIR}..."
-    EXTRACT_DIR="${TMP_WORK_DIR}/extracted"
-    mkdir -p "${EXTRACT_DIR}"
-    tar --zstd -xf "${ARCHIVE_PATH}" -C "${EXTRACT_DIR}"
-
-    PACKAGE_SUBDIR="${EXTRACT_DIR}/echolet-model-${MODEL_ID}-${MODEL_REV}"
-    if [[ ! -d "${PACKAGE_SUBDIR}" ]]; then
-        PACKAGE_SUBDIR=$(find "${EXTRACT_DIR}" -mindepth 1 -maxdepth 1 -type d | head -n 1)
+    echo "--> Downloading official model archive from: ${ARCHIVE_URL}..."
+    if ! curl -L --fail --retry 3 --retry-delay 2 -s -o "${CAND_DOWNLOAD}" "${ARCHIVE_URL}"; then
+        echo "[Error] Failed to download official Echolet Base Model archive from: ${ARCHIVE_URL}" >&2
+        echo "[Error] Make sure the model release workflow has published ${ARCHIVE_NAME} to GitHub Releases." >&2
+        exit 1
     fi
 
-    cp -a "${PACKAGE_SUBDIR}"/* "${TARGET_DIR}/"
-else
-    echo "--> Fallback: Acquiring pinned upstream assets (${UPSTREAM_REV}) with per-file SHA256 validation..."
-    UPSTREAM_BASE="https://huggingface.co/GilgameshWind/X-ASR-zh-en/resolve/${UPSTREAM_REV}/deployment/models/chunk-480ms-model"
-
-    fetch_and_verify() {
-        local file_name="$1"
-        local expected_sha="$2"
-        local dest="${TARGET_DIR}/${file_name}"
-
-        echo "--> Downloading ${file_name}..."
-        curl -L --fail --retry 3 --retry-delay 2 -s -o "${dest}" "${UPSTREAM_BASE}/${file_name}"
-        echo "${expected_sha}  ${dest}" | sha256sum -c -
-    }
-
-    fetch_and_verify "encoder-480ms.onnx" "${ENCODER_SHA256}"
-    fetch_and_verify "decoder-480ms.onnx" "${DECODER_SHA256}"
-    fetch_and_verify "joiner-480ms.onnx" "${JOINER_SHA256}"
-    fetch_and_verify "tokens.txt" "${TOKENS_SHA256}"
+    echo "--> Verifying SHA256 checksum of model archive..."
+    calc_sha=$(sha256sum "${CAND_DOWNLOAD}" | awk '{print $1}')
+    if [[ "${calc_sha}" != "${EXPECTED_SHA256}" ]]; then
+        echo "[Error] SHA256 checksum mismatch for ${ARCHIVE_NAME}!" >&2
+        echo "        Expected: ${EXPECTED_SHA256}" >&2
+        echo "        Got:      ${calc_sha}" >&2
+        exit 1
+    fi
+    echo "--> SHA256 checksum verified: OK"
+    ARCHIVE_PATH="${CAND_DOWNLOAD}"
 fi
+
+# 4. Extract verified archive
+echo "--> Extracting model archive into ${TARGET_DIR}..."
+EXTRACT_DIR="${TMP_WORK_DIR}/extracted"
+mkdir -p "${EXTRACT_DIR}"
+tar --zstd -xf "${ARCHIVE_PATH}" -C "${EXTRACT_DIR}"
+
+PACKAGE_SUBDIR="${EXTRACT_DIR}/echolet-model-${MODEL_ID}-${MODEL_REV}"
+if [[ ! -d "${PACKAGE_SUBDIR}" ]]; then
+    PACKAGE_SUBDIR=$(find "${EXTRACT_DIR}" -mindepth 1 -maxdepth 1 -type d | head -n 1)
+fi
+
+cp -a "${PACKAGE_SUBDIR}"/* "${TARGET_DIR}/"
 
 # 5. Ensure model.json & LICENSE are present
 if [[ ! -f "${TARGET_DIR}/model.json" ]]; then

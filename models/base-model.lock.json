@@ -4,7 +4,7 @@
   "revision": "r1",
   "archive": "echolet-model-xasr-zh-en-480ms-r1.tar.zst",
   "url": "https://github.com/SentimentalK/echolet/releases/download/model-xasr-zh-en-480ms-r1/echolet-model-xasr-zh-en-480ms-r1.tar.zst",
-  "sha256": "2e862fe8be794727fce8703c7afaf0b2e7169c81b6ed1266544d4dfbb1ff6efc",
+  "sha256": "f477b0662fcdab71f546078208d39bac45c1ade0db0cf96f1d101221a93de6c6",
   "upstream_repository": "GilgameshWind/X-ASR-zh-en",
   "upstream_revision": "689ff18c584d29910da37b6fe904db0c1489c9d1",
   "files": {

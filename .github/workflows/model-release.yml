@@ -1,74 +1,119 @@
-name: Model Release
+name: Model Release Pipeline
 
 on:
+  push:
+    paths:
+      - 'models/base-model.json'
+  pull_request:
+    paths:
+      - 'models/base-model.json'
   workflow_dispatch:
     inputs:
-      revision:
-        description: 'Echolet Model Revision (e.g. r1, r2)'
+      publish_release:
+        description: 'Publish immutable GitHub Release Asset'
+        type: boolean
         required: true
-        default: 'r1'
+        default: true
 
 permissions:
   contents: write
 
 jobs:
-  package-and-publish-model:
-    name: Package & Publish Echolet Base Model
+  validate-candidate:
+    name: Package & Validate Candidate Model
     runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      archive_path: ${{ steps.meta.outputs.archive_path }}
+      sha256: ${{ steps.meta.outputs.sha256 }}
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install compression & verification tools
+      - name: Install compression & system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y zstd jq curl
+          sudo apt-get install -y zstd jq curl libasound2-dev pkg-config
 
-      - name: Package base model artifact (.tar.zst)
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Package deterministic model artifact (.tar.zst)
         run: |
-          ./scripts/package-base-model.sh "${{ github.event.inputs.revision }}"
+          ./scripts/package-base-model.sh
 
       - name: Identify archive and compute checksum
         id: meta
         run: |
-          PKG_NAME="echolet-model-xasr-zh-en-480ms-${{ github.event.inputs.revision }}"
+          MODEL_ID=$(jq -r '.id' models/base-model.json)
+          REV=$(jq -r '.revision' models/base-model.json)
+          PKG_NAME="echolet-model-${MODEL_ID}-${REV}"
           ARCHIVE_PATH="dist/${PKG_NAME}.tar.zst"
           SHA256=$(sha256sum "${ARCHIVE_PATH}" | awk '{print $1}')
-          TAG="model-xasr-zh-en-480ms-${{ github.event.inputs.revision }}"
+          TAG="model-${MODEL_ID}-${REV}"
           
           echo "tag=${TAG}" >> $GITHUB_OUTPUT
           echo "archive_path=${ARCHIVE_PATH}" >> $GITHUB_OUTPUT
           echo "sha256=${SHA256}" >> $GITHUB_OUTPUT
 
-      - name: Upload artifact to workflow
+      - name: Test candidate model with automated test suite
+        run: |
+          ./scripts/download-official-assets.sh
+          cargo test --release -- --nocapture
+
+      - name: Upload artifact to workflow run
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.meta.outputs.tag }}
           path: ${{ steps.meta.outputs.archive_path }}
           if-no-files-found: error
 
+  publish-immutable-release:
+    name: Publish Immutable GitHub Model Release
+    needs: validate-candidate
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.publish_release == 'true'
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download model artifact from validation job
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.validate-candidate.outputs.tag }}
+          path: dist
+
+      - name: Verify release immutability (fail if tag already exists)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ needs.validate-candidate.outputs.tag }}"
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            echo "::error::Release ${TAG} already exists! Echolet base models are strictly immutable. To release a new model, bump the revision in models/base-model.json."
+            exit 1
+          fi
+
       - name: Publish GitHub Model Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.meta.outputs.tag }}
-          name: "Echolet Base Model ${{ steps.meta.outputs.tag }}"
+          tag_name: ${{ needs.validate-candidate.outputs.tag }}
+          name: "Echolet Base Model ${{ needs.validate-candidate.outputs.tag }}"
           body: |
-            ## Echolet Base Model (${{ steps.meta.outputs.tag }})
+            ## Echolet Base Model (${{ needs.validate-candidate.outputs.tag }})
             
-            * **Model ID**: `xasr-zh-en-480ms`
-            * **Echolet Revision**: `${{ github.event.inputs.revision }}`
-            * **Archive**: `${{ steps.meta.outputs.archive_path }}`
-            * **Archive SHA256**: `${{ steps.meta.outputs.sha256 }}`
+            * **Archive**: `${{ needs.validate-candidate.outputs.archive_path }}`
+            * **Archive SHA256**: `${{ needs.validate-candidate.outputs.sha256 }}`
             
             ```json
             {
               "schema_version": 1,
               "id": "xasr-zh-en-480ms",
-              "revision": "${{ github.event.inputs.revision }}",
-              "archive": "${{ steps.meta.outputs.tag }}.tar.zst",
-              "url": "https://github.com/${{ github.repository }}/releases/download/${{ steps.meta.outputs.tag }}/${{ steps.meta.outputs.tag }}.tar.zst",
-              "sha256": "${{ steps.meta.outputs.sha256 }}"
+              "revision": "r1",
+              "archive": "${{ needs.validate-candidate.outputs.tag }}.tar.zst",
+              "url": "https://github.com/${{ github.repository }}/releases/download/${{ needs.validate-candidate.outputs.tag }}/${{ needs.validate-candidate.outputs.tag }}.tar.zst",
+              "sha256": "${{ needs.validate-candidate.outputs.sha256 }}"
             }
             ```
-          files: ${{ steps.meta.outputs.archive_path }}
+          files: dist/${{ needs.validate-candidate.outputs.tag }}.tar.zst

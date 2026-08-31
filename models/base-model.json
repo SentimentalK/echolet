@@ -1,0 +1,32 @@
+{
+  "id": "xasr-zh-en-480ms",
+  "revision": "r1",
+  "upstream_project": "X-ASR",
+  "upstream_repository": "GilgameshWind/X-ASR-zh-en",
+  "upstream_revision": "689ff18c584d29910da37b6fe904db0c1489c9d1",
+  "language": ["zh", "en"],
+  "chunk_ms": 480,
+  "license": "Apache-2.0",
+  "files": {
+    "encoder": {
+      "name": "encoder-480ms.onnx",
+      "upstream_path": "deployment/models/chunk-480ms-model/encoder-480ms.onnx",
+      "sha256": "0c3454033d249081df124ddcd7adaf3deca07d0b999b26f2ee5d2475d37abc74"
+    },
+    "decoder": {
+      "name": "decoder-480ms.onnx",
+      "upstream_path": "deployment/models/chunk-480ms-model/decoder-480ms.onnx",
+      "sha256": "3658368d274a5d5fd39a7ac20c46bed0ad9cfea1f0feddef30d5d89797c1f499"
+    },
+    "joiner": {
+      "name": "joiner-480ms.onnx",
+      "upstream_path": "deployment/models/chunk-480ms-model/joiner-480ms.onnx",
+      "sha256": "03781c98165a2385024c9cecdd2b6b13310d81db23a62c7da420782c2915cf81"
+    },
+    "tokens": {
+      "name": "tokens.txt",
+      "upstream_path": "deployment/models/chunk-480ms-model/tokens.txt",
+      "sha256": "b818a60878b9aae978cbb8ad594acbd403d76d1af2e31ef4197c84e2dbdba27c"
+    }
+  }
+}
