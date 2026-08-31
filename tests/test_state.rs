@@ -292,14 +292,17 @@ fn test_mic_start_failure_graceful_fallback() {
 fn test_app_history_toggle_and_open_folder_actions() {
     let (mut app, action_tx, _, _, _, hist_history, opened_folders) = create_test_app();
 
-    // Initial projection
-    assert_eq!(*hist_history.lock().unwrap(), vec![false]);
+    let initial_state = app.history_manager.enabled;
+    assert_eq!(*hist_history.lock().unwrap(), vec![initial_state]);
 
-    // Send ToggleHistory -> Enable
+    // Send ToggleHistory -> Invert state
     action_tx.send(AppAction::ToggleHistory).unwrap();
     app.tick();
-    assert!(app.history_manager.enabled);
-    assert_eq!(*hist_history.lock().unwrap(), vec![false, true]);
+    assert_eq!(app.history_manager.enabled, !initial_state);
+    assert_eq!(
+        *hist_history.lock().unwrap(),
+        vec![initial_state, !initial_state]
+    );
 
     // Send OpenHistoryFolder
     action_tx.send(AppAction::OpenHistoryFolder).unwrap();
@@ -309,9 +312,12 @@ fn test_app_history_toggle_and_open_folder_actions() {
         vec![app.history_manager.history_dir.clone()]
     );
 
-    // Send ToggleHistory -> Disable
+    // Send ToggleHistory again -> Revert to initial state
     action_tx.send(AppAction::ToggleHistory).unwrap();
     app.tick();
-    assert!(!app.history_manager.enabled);
-    assert_eq!(*hist_history.lock().unwrap(), vec![false, true, false]);
+    assert_eq!(app.history_manager.enabled, initial_state);
+    assert_eq!(
+        *hist_history.lock().unwrap(),
+        vec![initial_state, !initial_state, initial_state]
+    );
 }

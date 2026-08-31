@@ -149,35 +149,35 @@ impl Tray for LinuxTray {
                 .to_string_lossy()
                 .replace(&std::env::var("HOME").unwrap_or_default(), "~");
 
-            let sub_items: Vec<MenuItem<Self>> = vec![
+            // 1. Toggle row (clicking turns Off)
+            menu_items.push(
                 StandardItem {
-                    label: "Disable History".into(),
+                    label: "✓ Local History".into(),
                     activate: Box::new(move |_| {
                         let _ = hist_toggle_tx.send(AppAction::ToggleHistory);
                     }),
                     ..Default::default()
                 }
                 .into(),
+            );
+
+            // 2. Open History Folder action row (indented)
+            menu_items.push(
                 StandardItem {
-                    label: "Open History Folder".into(),
+                    label: "    Open History Folder".into(),
                     activate: Box::new(move |_| {
                         let _ = hist_open_tx.send(AppAction::OpenHistoryFolder);
                     }),
                     ..Default::default()
                 }
                 .into(),
-                StandardItem {
-                    label: history_path_str,
-                    enabled: false,
-                    ..Default::default()
-                }
-                .into(),
-            ];
+            );
 
+            // 3. Informational path row (indented, disabled)
             menu_items.push(
-                SubMenu {
-                    label: "✓ Local History".into(),
-                    submenu: sub_items,
+                StandardItem {
+                    label: format!("    {}", history_path_str),
+                    enabled: false,
                     ..Default::default()
                 }
                 .into(),
