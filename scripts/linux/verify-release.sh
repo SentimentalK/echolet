@@ -4,9 +4,26 @@ set -euo pipefail
 # This script verifies that the staged release bundle satisfies all production release contracts.
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-DIST_DIR="${REPO_ROOT}/dist/echolet-linux-x64"
 
-echo "=== Verifying Echolet Linux Production Release Bundle ==="
+# 1. Normalize architecture
+RAW_ARCH="${1:-${ECHOLET_ARCH:-$(uname -m)}}"
+case "${RAW_ARCH}" in
+    x86_64|x64|amd64)
+        ARCH="x64"
+        ;;
+    aarch64|arm64)
+        ARCH="arm64"
+        ;;
+    *)
+        echo "[Error] Unsupported architecture: ${RAW_ARCH}" >&2
+        exit 1
+        ;;
+esac
+
+DIST_NAME="echolet-linux-${ARCH}"
+DIST_DIR="${REPO_ROOT}/dist/${DIST_NAME}"
+
+echo "=== Verifying Echolet Linux Production Release Bundle (${DIST_NAME}) ==="
 echo "Target directory: ${DIST_DIR}"
 
 if [[ ! -d "${DIST_DIR}" ]]; then
@@ -107,4 +124,4 @@ if grep -rn "/home/sentimentalk/sherpa-onnx" "${DIST_DIR}/model.json" "${DIST_DI
     exit 1
 fi
 
-echo "=== All production release verification checks PASSED! ==="
+echo "=== All production release verification checks PASSED (${DIST_NAME})! ==="

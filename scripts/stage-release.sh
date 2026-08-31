@@ -1,59 +1,76 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# This script creates a self-contained production bundle at dist/echolet-linux-x64/
+# This script creates a self-contained production bundle at dist/echolet-linux-${ARCH}/
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-DIST_DIR="${REPO_ROOT}/dist/echolet-linux-x64"
+
+# 1. Normalize architecture
+RAW_ARCH="${1:-${ECHOLET_ARCH:-$(uname -m)}}"
+case "${RAW_ARCH}" in
+    x86_64|x64|amd64)
+        ARCH="x64"
+        ;;
+    aarch64|arm64)
+        ARCH="arm64"
+        ;;
+    *)
+        echo "[Error] Unsupported architecture: ${RAW_ARCH}" >&2
+        exit 1
+        ;;
+esac
+
+DIST_NAME="echolet-linux-${ARCH}"
+DIST_DIR="${REPO_ROOT}/dist/${DIST_NAME}"
 LOCAL_RUNTIME="${REPO_ROOT}/.local-runtime"
 
-echo "=== Building & Staging Echolet Production Bundle ==="
-echo "Repo root: ${REPO_ROOT}"
+echo "=== Building & Staging Echolet Production Bundle (${DIST_NAME}) ==="
+echo "Repo root:   ${REPO_ROOT}"
 echo "Dist target: ${DIST_DIR}"
 
-# 1. Ensure local staging assets exist
+# 2. Ensure local staging assets exist
 if [[ ! -d "${LOCAL_RUNTIME}/runtime/lib" || ! -f "${LOCAL_RUNTIME}/models/bilingual-zh-en/encoder-480ms.onnx" ]]; then
     echo "--> Local assets not found. Running prepare-local-assets.sh first..."
-    "${REPO_ROOT}/scripts/prepare-local-assets.sh"
+    "${REPO_ROOT}/scripts/prepare-local-assets.sh" "${ARCH}"
 fi
 
-# 2. Build release binary with pure production RPATH ($ORIGIN/runtime/lib)
+# 3. Build release binary with pure production RPATH ($ORIGIN/runtime/lib)
 echo "--> Compiling release binary with ECHOLET_BUNDLE_BUILD=1..."
 cd "${REPO_ROOT}"
 ECHOLET_BUNDLE_BUILD=1 cargo build --release
 
-# 3. Clean and create dist directory structure
+# 4. Clean and create dist directory structure
 rm -rf "${DIST_DIR}"
 mkdir -p "${DIST_DIR}/runtime/lib"
 mkdir -p "${DIST_DIR}/models/bilingual-zh-en"
 mkdir -p "${DIST_DIR}/licenses"
 
-# 4. Copy binary
+# 5. Copy binary
 echo "--> Copying executable..."
 cp "${REPO_ROOT}/target/release/echolet" "${DIST_DIR}/echolet"
 chmod +x "${DIST_DIR}/echolet"
 
-# 5. Copy native libraries
+# 6. Copy native libraries
 echo "--> Copying native runtime libraries..."
 cp -a "${LOCAL_RUNTIME}/runtime/lib"/*.so* "${DIST_DIR}/runtime/lib/"
 
-# 6. Copy models (excluding test_wavs for clean production bundle)
+# 7. Copy models (excluding test_wavs for clean production bundle)
 echo "--> Copying model files (excluding test_wavs)..."
 cp "${LOCAL_RUNTIME}/models/bilingual-zh-en/encoder-480ms.onnx" "${DIST_DIR}/models/bilingual-zh-en/"
 cp "${LOCAL_RUNTIME}/models/bilingual-zh-en/decoder-480ms.onnx" "${DIST_DIR}/models/bilingual-zh-en/"
 cp "${LOCAL_RUNTIME}/models/bilingual-zh-en/joiner-480ms.onnx" "${DIST_DIR}/models/bilingual-zh-en/"
 cp "${LOCAL_RUNTIME}/models/bilingual-zh-en/tokens.txt" "${DIST_DIR}/models/bilingual-zh-en/"
 
-# 7. Copy model manifest and registry
+# 8. Copy model manifest and registry
 echo "--> Copying manifest and registry..."
 cp "${REPO_ROOT}/model.json" "${DIST_DIR}/model.json"
 cp "${REPO_ROOT}/models/registry.json" "${DIST_DIR}/models/registry.json"
 
-# 8. Copy open-source licenses
+# 9. Copy open-source licenses
 echo "--> Copying licenses..."
 cp -a "${REPO_ROOT}/licenses"/* "${DIST_DIR}/licenses/"
 
-# 9. Sanity check bundle completeness
+# 10. Sanity check bundle completeness
 echo "--> Validating production bundle structure..."
 REQUIRED_FILES=(
     "${DIST_DIR}/echolet"
