@@ -9,9 +9,6 @@ on:
         description: 'Upload to GitHub Release'
   workflow_dispatch:
 
-permissions:
-  contents: write
-
 jobs:
   build-android:
     name: Android Build & Test

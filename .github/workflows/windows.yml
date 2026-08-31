@@ -9,9 +9,6 @@ on:
         description: 'Upload to GitHub Release'
   workflow_dispatch:
 
-permissions:
-  contents: write
-
 jobs:
   build-windows:
     name: Windows x86_64 Build & Test
