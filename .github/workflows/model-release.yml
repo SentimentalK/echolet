@@ -92,17 +92,19 @@ jobs:
           name: ${{ needs.validate-candidate.outputs.tag }}
           path: dist
 
-      - name: Verify release immutability (fail if tag already exists)
+      - name: Verify release immutability (fail only if asset already exists)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="${{ needs.validate-candidate.outputs.tag }}"
-          if gh release view "${TAG}" >/dev/null 2>&1; then
-            echo "::error::Release ${TAG} already exists! Echolet base models are strictly immutable. To release a new model, bump the revision in models/base-model.json."
+          ARCHIVE_NAME="${{ needs.validate-candidate.outputs.archive_name }}"
+          
+          if gh release view "${TAG}" --json assets -q '.assets[].name' 2>/dev/null | grep -q "^${ARCHIVE_NAME}$"; then
+            echo "::error::Asset ${ARCHIVE_NAME} already exists in release ${TAG}! Echolet base models are strictly immutable. To release a new model, bump the revision in models/base-model.json."
             exit 1
           fi
 
-      - name: Publish GitHub Model Release
+      - name: Publish GitHub Model Release Asset
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.validate-candidate.outputs.tag }}
