@@ -1,7 +1,7 @@
+use crate::config::EcholetConfig;
 use crate::models::manifest::ModelManifest;
 use crate::models::registry::ModelRegistry;
 use crate::paths;
-use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -12,11 +12,6 @@ pub struct InstalledModel {
     pub dir: PathBuf,
     pub manifest: ModelManifest,
     pub is_bundled: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EcholetConfig {
-    pub selected_model: String,
 }
 
 pub struct ModelManager {
@@ -94,7 +89,7 @@ impl ModelManager {
         // 1. Scan bundled models directory (<resource_root>/models)
         self.scan_directory(&self.bundled_models_dir.clone(), true);
 
-        // 2. Scan user models directory (~/.local/share/echolet/models)
+        // 2. Scan user models directory (~/.echolet/models)
         // User models override or complement bundled models
         self.scan_directory(&self.user_models_dir.clone(), false);
     }
@@ -133,7 +128,10 @@ impl ModelManager {
                 // If model.json is absent, match against registry entries
                 let dir_name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
                 for reg in &self.registry.models {
-                    if reg.id == dir_name || dir_name.starts_with(&reg.language) || dir_name.contains("bilingual") {
+                    if reg.id == dir_name
+                        || dir_name.starts_with(&reg.language)
+                        || dir_name.contains("bilingual")
+                    {
                         let manifest = reg.to_manifest();
                         if manifest.validate_files(&path).is_ok() {
                             self.installed.insert(
@@ -196,25 +194,15 @@ impl ModelManager {
 
     pub fn load_config(&self) -> Option<EcholetConfig> {
         if self.config_path.exists() {
-            if let Ok(content) = fs::read_to_string(&self.config_path) {
-                if let Ok(config) = serde_json::from_str::<EcholetConfig>(&content) {
-                    return Some(config);
-                }
-            }
+            Some(EcholetConfig::load_from(&self.config_path))
+        } else {
+            None
         }
-        None
     }
 
     pub fn save_config(&self) -> Result<(), String> {
-        if let Some(parent) = self.config_path.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
-        let config = EcholetConfig {
-            selected_model: self.active_model_id.clone(),
-        };
-        let content = serde_json::to_string_pretty(&config)
-            .map_err(|e| format!("Failed to serialize config: {}", e))?;
-        fs::write(&self.config_path, content)
-            .map_err(|e| format!("Failed to write config {:?}: {}", self.config_path, e))
+        let mut config = EcholetConfig::load_from(&self.config_path);
+        config.selected_model = self.active_model_id.clone();
+        config.save_to(&self.config_path)
     }
 }

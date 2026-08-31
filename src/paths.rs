@@ -2,7 +2,7 @@ use crate::models::manifest::ModelManifest;
 use std::env;
 use std::path::{Path, PathBuf};
 
-/// Resolves the application ResourceRoot directory.
+/// Resolves the application ResourceRoot directory (read-only product bundle).
 /// Priority:
 /// 1. ECHOLET_RESOURCE_ROOT environment variable (if set and exists)
 /// 2. Directory containing current executable (Production Bundle layout)
@@ -51,30 +51,45 @@ pub fn bundled_models_dir() -> PathBuf {
     resource_root().join("models")
 }
 
-pub fn user_data_dir() -> PathBuf {
-    if let Ok(env_data) = env::var("ECHOLET_USER_DATA_DIR") {
-        return PathBuf::from(env_data);
+/// Resolves the consolidated Echolet user data directory (~/.echolet).
+/// Override via ECHOLET_USER_HOME or ECHOLET_HOME for tests / isolated environments.
+pub fn echolet_home_dir() -> PathBuf {
+    if let Ok(env_home) = env::var("ECHOLET_USER_HOME") {
+        return PathBuf::from(env_home);
     }
-    dirs::data_local_dir()
-        .unwrap_or_else(|| PathBuf::from(env::var("HOME").unwrap_or_else(|_| ".".into())).join(".local/share"))
-        .join("echolet")
-}
-
-pub fn user_models_dir() -> PathBuf {
-    user_data_dir().join("models")
-}
-
-pub fn user_config_dir() -> PathBuf {
-    if let Ok(env_cfg) = env::var("ECHOLET_USER_CONFIG_DIR") {
-        return PathBuf::from(env_cfg);
+    if let Ok(env_home) = env::var("ECHOLET_HOME") {
+        return PathBuf::from(env_home);
     }
-    dirs::config_dir()
-        .unwrap_or_else(|| PathBuf::from(env::var("HOME").unwrap_or_else(|_| ".".into())).join(".config"))
-        .join("echolet")
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from(env::var("HOME").unwrap_or_else(|_| ".".into())))
+        .join(".echolet")
 }
 
+/// Consolidated user configuration path: ~/.echolet/config.json
 pub fn user_config_path() -> PathBuf {
-    user_config_dir().join("config.json")
+    echolet_home_dir().join("config.json")
+}
+
+/// User-downloaded models directory: ~/.echolet/models
+pub fn user_models_dir() -> PathBuf {
+    echolet_home_dir().join("models")
+}
+
+/// Local transcript history directory: ~/.echolet/history
+pub fn history_dir() -> PathBuf {
+    echolet_home_dir().join("history")
+}
+
+/// Backward compatibility search paths for migrating legacy configurations.
+pub fn legacy_config_paths() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if let Some(cfg) = dirs::config_dir() {
+        paths.push(cfg.join("echolet/config.json"));
+    }
+    if let Some(data) = dirs::data_local_dir() {
+        paths.push(data.join("echolet/config.json"));
+    }
+    paths
 }
 
 pub fn default_model_dir() -> PathBuf {

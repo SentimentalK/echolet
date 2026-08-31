@@ -4,6 +4,7 @@ use echolet::app::App;
 use echolet::audio::{AudioChunk, AudioSource, AudioStarter};
 use echolet::platform::{PlatformHandle, PlatformRuntime, TextInjector};
 use echolet::state::AppState;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -22,6 +23,8 @@ impl TextInjector for FakeInjector {
 
 struct FakePlatformHandle {
     listening_history: Arc<Mutex<Vec<bool>>>,
+    history_state_history: Arc<Mutex<Vec<bool>>>,
+    opened_folders: Arc<Mutex<Vec<PathBuf>>>,
     shutdown_called: Arc<AtomicBool>,
 }
 
@@ -33,6 +36,17 @@ impl PlatformHandle for FakePlatformHandle {
     fn shutdown(&self) {
         self.shutdown_called.store(true, Ordering::SeqCst);
     }
+
+    fn update_history_state(&self, enabled: bool) {
+        self.history_state_history.lock().unwrap().push(enabled);
+    }
+
+    fn open_history_folder(&self, history_dir: &Path) {
+        self.opened_folders
+            .lock()
+            .unwrap()
+            .push(history_dir.to_path_buf());
+    }
 }
 
 fn create_test_app() -> (
@@ -41,14 +55,20 @@ fn create_test_app() -> (
     Arc<Mutex<Vec<bool>>>,
     Arc<AtomicBool>,
     Arc<Mutex<Vec<(usize, String)>>>,
+    Arc<Mutex<Vec<bool>>>,
+    Arc<Mutex<Vec<PathBuf>>>,
 ) {
     let (action_tx, action_rx) = unbounded::<AppAction>();
     let listening_history = Arc::new(Mutex::new(Vec::new()));
+    let history_state_history = Arc::new(Mutex::new(Vec::new()));
+    let opened_folders = Arc::new(Mutex::new(Vec::new()));
     let shutdown_called = Arc::new(AtomicBool::new(false));
     let diffs = Arc::new(Mutex::new(Vec::new()));
 
     let fake_handle = Box::new(FakePlatformHandle {
         listening_history: listening_history.clone(),
+        history_state_history: history_state_history.clone(),
+        opened_folders: opened_folders.clone(),
         shutdown_called: shutdown_called.clone(),
     });
 
@@ -66,7 +86,15 @@ fn create_test_app() -> (
     let app = App::new_with_audio(platform, action_rx, audio_rx, None)
         .expect("Failed to create App with fake platform");
 
-    (app, action_tx, listening_history, shutdown_called, diffs)
+    (
+        app,
+        action_tx,
+        listening_history,
+        shutdown_called,
+        diffs,
+        history_state_history,
+        opened_folders,
+    )
 }
 
 fn create_test_app_with_starter(
@@ -78,11 +106,15 @@ fn create_test_app_with_starter(
 ) {
     let (action_tx, action_rx) = unbounded::<AppAction>();
     let listening_history = Arc::new(Mutex::new(Vec::new()));
+    let history_state_history = Arc::new(Mutex::new(Vec::new()));
+    let opened_folders = Arc::new(Mutex::new(Vec::new()));
     let shutdown_called = Arc::new(AtomicBool::new(false));
     let diffs = Arc::new(Mutex::new(Vec::new()));
 
     let fake_handle = Box::new(FakePlatformHandle {
         listening_history: listening_history.clone(),
+        history_state_history: history_state_history.clone(),
+        opened_folders: opened_folders.clone(),
         shutdown_called: shutdown_called.clone(),
     });
 
@@ -124,7 +156,7 @@ fn test_app_state_defaults() {
 
 #[test]
 fn test_state_start_stop_transitions() {
-    let (mut app, action_tx, history, _, _) = create_test_app();
+    let (mut app, action_tx, history, _, _, _, _) = create_test_app();
 
     // Startup should explicitly initialize UI state to false
     assert_eq!(*history.lock().unwrap(), vec![false]);
@@ -145,7 +177,7 @@ fn test_state_start_stop_transitions() {
 
 #[test]
 fn test_state_toggle_transition() {
-    let (mut app, action_tx, history, _, _) = create_test_app();
+    let (mut app, action_tx, history, _, _, _, _) = create_test_app();
 
     // Toggle 1: Start
     action_tx.send(AppAction::ToggleListening).unwrap();
@@ -162,7 +194,7 @@ fn test_state_toggle_transition() {
 
 #[test]
 fn test_quit_action_terminates_running() {
-    let (mut app, action_tx, _, shutdown, _) = create_test_app();
+    let (mut app, action_tx, _, shutdown, _, _, _) = create_test_app();
 
     assert!(app.state.running);
     assert!(!shutdown.load(Ordering::SeqCst));
@@ -179,7 +211,7 @@ fn test_quit_action_terminates_running() {
 
 #[test]
 fn test_endpoint_segment_finalization_invariant() {
-    let (mut app, _, _, _, _) = create_test_app();
+    let (mut app, _, _, _, _, _, _) = create_test_app();
 
     // Manually transition to listening
     app.start_listening();
@@ -197,7 +229,7 @@ fn test_endpoint_segment_finalization_invariant() {
 
 #[test]
 fn test_mic_dynamic_lifecycle_transitions() {
-    let (mut app, action_tx, history, _, _) = create_test_app();
+    let (mut app, action_tx, history, _, _, _, _) = create_test_app();
 
     // 1. Initial state: Standby, microphone is NOT open
     assert!(!app.state.listening);
@@ -254,4 +286,32 @@ fn test_mic_start_failure_graceful_fallback() {
     );
     // UI history should only have the initial false, no state change occurred
     assert_eq!(*history.lock().unwrap(), vec![false]);
+}
+
+#[test]
+fn test_app_history_toggle_and_open_folder_actions() {
+    let (mut app, action_tx, _, _, _, hist_history, opened_folders) = create_test_app();
+
+    // Initial projection
+    assert_eq!(*hist_history.lock().unwrap(), vec![false]);
+
+    // Send ToggleHistory -> Enable
+    action_tx.send(AppAction::ToggleHistory).unwrap();
+    app.tick();
+    assert!(app.history_manager.enabled);
+    assert_eq!(*hist_history.lock().unwrap(), vec![false, true]);
+
+    // Send OpenHistoryFolder
+    action_tx.send(AppAction::OpenHistoryFolder).unwrap();
+    app.tick();
+    assert_eq!(
+        *opened_folders.lock().unwrap(),
+        vec![app.history_manager.history_dir.clone()]
+    );
+
+    // Send ToggleHistory -> Disable
+    action_tx.send(AppAction::ToggleHistory).unwrap();
+    app.tick();
+    assert!(!app.history_manager.enabled);
+    assert_eq!(*hist_history.lock().unwrap(), vec![false, true, false]);
 }

@@ -5,6 +5,7 @@ use crate::platform::PlatformHandle;
 use crossbeam_channel::Sender;
 use ksni::menu::{MenuItem, StandardItem, SubMenu};
 use ksni::{Icon, Tray, TrayMethods};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -19,6 +20,7 @@ pub struct ModelItemInfo {
 
 pub struct LinuxTray {
     pub is_listening: Arc<AtomicBool>,
+    pub history_enabled: Arc<AtomicBool>,
     pub models_info: Arc<Mutex<Vec<ModelItemInfo>>>,
     pub action_tx: Sender<AppAction>,
 }
@@ -126,7 +128,63 @@ impl Tray for LinuxTray {
             );
         }
 
-        // 3. Hotkey: F10
+        // 3. Local History item
+        let hist_enabled = self.history_enabled.load(Ordering::SeqCst);
+        let hist_toggle_tx = self.action_tx.clone();
+        let hist_open_tx = self.action_tx.clone();
+
+        if !hist_enabled {
+            menu_items.push(
+                StandardItem {
+                    label: "Local History: Off".into(),
+                    activate: Box::new(move |_| {
+                        let _ = hist_toggle_tx.send(AppAction::ToggleHistory);
+                    }),
+                    ..Default::default()
+                }
+                .into(),
+            );
+        } else {
+            let history_path_str = paths::history_dir()
+                .to_string_lossy()
+                .replace(&std::env::var("HOME").unwrap_or_default(), "~");
+
+            let sub_items: Vec<MenuItem<Self>> = vec![
+                StandardItem {
+                    label: "Disable History".into(),
+                    activate: Box::new(move |_| {
+                        let _ = hist_toggle_tx.send(AppAction::ToggleHistory);
+                    }),
+                    ..Default::default()
+                }
+                .into(),
+                StandardItem {
+                    label: "Open History Folder".into(),
+                    activate: Box::new(move |_| {
+                        let _ = hist_open_tx.send(AppAction::OpenHistoryFolder);
+                    }),
+                    ..Default::default()
+                }
+                .into(),
+                StandardItem {
+                    label: history_path_str,
+                    enabled: false,
+                    ..Default::default()
+                }
+                .into(),
+            ];
+
+            menu_items.push(
+                SubMenu {
+                    label: "✓ Local History".into(),
+                    submenu: sub_items,
+                    ..Default::default()
+                }
+                .into(),
+            );
+        }
+
+        // 4. Hotkey: F10
         menu_items.push(
             StandardItem {
                 label: "Hotkey: F10".into(),
@@ -136,7 +194,7 @@ impl Tray for LinuxTray {
             .into(),
         );
 
-        // 4. Quit
+        // 5. Quit
         menu_items.push(
             StandardItem {
                 label: "Quit".into(),
@@ -154,6 +212,7 @@ impl Tray for LinuxTray {
 
 pub struct LinuxPlatformHandle {
     pub is_listening: Arc<AtomicBool>,
+    pub history_enabled: Arc<AtomicBool>,
     pub models_info: Arc<Mutex<Vec<ModelItemInfo>>>,
     pub registry: ModelRegistry,
     pub tray_handle: Option<ksni::Handle<LinuxTray>>,
@@ -211,10 +270,32 @@ impl PlatformHandle for LinuxPlatformHandle {
             }
         }
     }
+
+    fn update_history_state(&self, enabled: bool) {
+        self.history_enabled.store(enabled, Ordering::SeqCst);
+        if let Some(handle) = &self.tray_handle {
+            if let Some(rt) = &self.rt {
+                rt.block_on(async {
+                    handle.update(|_| {}).await;
+                });
+            }
+        }
+    }
+
+    fn open_history_folder(&self, history_dir: &Path) {
+        let _ = std::fs::create_dir_all(history_dir);
+        let res = std::process::Command::new("xdg-open")
+            .arg(history_dir)
+            .spawn();
+        if let Err(err) = res {
+            eprintln!("[Platform] Failed to open folder {:?}: {}", history_dir, err);
+        }
+    }
 }
 
 pub fn spawn_linux_tray(action_tx: Sender<AppAction>) -> LinuxPlatformHandle {
     let is_listening = Arc::new(AtomicBool::new(false));
+    let history_enabled = Arc::new(AtomicBool::new(false));
 
     // Load initial registry for initial menu population
     let res_root = paths::resource_root();
@@ -243,6 +324,7 @@ pub fn spawn_linux_tray(action_tx: Sender<AppAction>) -> LinuxPlatformHandle {
 
     let tray = LinuxTray {
         is_listening: is_listening.clone(),
+        history_enabled: history_enabled.clone(),
         models_info: models_info.clone(),
         action_tx,
     };
@@ -268,6 +350,7 @@ pub fn spawn_linux_tray(action_tx: Sender<AppAction>) -> LinuxPlatformHandle {
 
     LinuxPlatformHandle {
         is_listening,
+        history_enabled,
         models_info,
         registry,
         tray_handle,

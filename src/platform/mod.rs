@@ -1,5 +1,6 @@
 use crate::actions::AppAction;
 use crossbeam_channel::Sender;
+use std::path::Path;
 
 pub trait TextInjector: Send + Sync {
     fn apply_diff(&self, backspaces: usize, new_suffix: &str);
@@ -14,6 +15,8 @@ pub trait PlatformHandle: Send + Sync {
         _installed_ids: &[String],
         _downloading_ids: &[String],
     ) {}
+    fn update_history_state(&self, _enabled: bool) {}
+    fn open_history_folder(&self, _history_dir: &Path) {}
 }
 
 pub struct PlatformRuntime {

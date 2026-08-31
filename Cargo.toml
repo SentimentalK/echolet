@@ -16,6 +16,7 @@ hex = "0.4"
 ureq = { version = "2.10", default-features = false, features = ["tls", "gzip"] }
 tar = "0.4"
 bzip2 = "0.4"
+chrono = { version = "0.4", features = ["serde"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 zbus = { version = "4.4", default-features = false, features = ["tokio"] }

@@ -10,4 +10,6 @@ pub enum AppAction {
         success: bool,
         error: Option<String>,
     },
+    ToggleHistory,
+    OpenHistoryFolder,
 }

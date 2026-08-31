@@ -2,10 +2,14 @@ use crate::actions::AppAction;
 use crate::asr::{OnlineRecognizer, OnlineStream};
 use crate::audio::{AudioChunk, AudioInput, AudioSource, AudioStarter};
 use crate::beep::{beep_start, beep_stop};
+use crate::config::EcholetConfig;
 use crate::diff::PartialSession;
+use crate::history::HistoryManager;
 use crate::models::{download_and_install_model, ModelManager};
+use crate::paths;
 use crate::platform::PlatformRuntime;
 use crate::state::AppState;
+use chrono::{DateTime, Local};
 use crossbeam_channel::{unbounded, Receiver, Sender};
 use std::sync::Arc;
 use std::time::Duration;
@@ -16,7 +20,9 @@ fn default_audio_starter() -> AudioStarter {
 
 pub struct App {
     pub state: AppState,
+    pub config: EcholetConfig,
     pub model_manager: ModelManager,
+    pub history_manager: HistoryManager,
     _recognizer: Arc<OnlineRecognizer>,
     stream: OnlineStream,
     session: PartialSession,
@@ -28,6 +34,7 @@ pub struct App {
     action_tx: Option<Sender<AppAction>>,
     platform: PlatformRuntime,
     last_logged_text: String,
+    current_utterance_start: Option<DateTime<Local>>,
 }
 
 impl App {
@@ -110,6 +117,10 @@ impl App {
         audio_starter: AudioStarter,
         audio_source: Option<Box<dyn AudioSource>>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
+        let config = EcholetConfig::load();
+        let history_dir = paths::history_dir();
+        let history_manager = HistoryManager::new(config.history_enabled, history_dir);
+
         let model_manager = ModelManager::new()
             .map_err(|e| format!("Failed to initialize ModelManager: {}", e))?;
         let active_model = model_manager
@@ -130,11 +141,14 @@ impl App {
 
         // Initial UI projection
         platform.handle.set_listening(false);
+        platform.handle.update_history_state(config.history_enabled);
         notify_platform_models(&platform, &model_manager);
 
         Ok(Self {
             state: AppState::new(),
+            config,
             model_manager,
+            history_manager,
             _recognizer: recognizer,
             stream,
             session: PartialSession::new(),
@@ -146,6 +160,7 @@ impl App {
             action_tx,
             platform,
             last_logged_text: String::new(),
+            current_utterance_start: None,
         })
     }
 
@@ -190,17 +205,30 @@ impl App {
             return;
         }
 
-        // 1. Finalize current segment
+        // 1. Flush any pending finalized text to history before resetting ASR
+        if !self.last_logged_text.is_empty() {
+            let end_time = Local::now();
+            let start_time = self.current_utterance_start.take().unwrap_or(end_time);
+            self.history_manager.on_utterance(
+                start_time,
+                end_time,
+                &self.last_logged_text,
+                &self.model_manager.active_model_id,
+            );
+        }
+        self.history_manager.flush();
+
+        // 2. Finalize current segment
         self.finalize_current_segment();
 
-        // 2. Drop audio capture stream (releases cpal::Stream & hardware device)
+        // 3. Drop audio capture stream (releases cpal::Stream & hardware device)
         self._audio_source = None;
 
-        // 3. Drain residual audio chunks from channel
+        // 4. Drain residual audio chunks from channel
         while self.audio_rx.try_recv().is_ok() {}
         println!("[Audio] Microphone capture stopped and released.");
 
-        // 4. Transition state
+        // 5. Transition state
         self.state.listening = false;
         beep_stop();
         self.platform.handle.set_listening(false);
@@ -220,6 +248,7 @@ impl App {
         self.session.finalize();
         self.stream.reset();
         self.last_logged_text.clear();
+        self.current_utterance_start = None;
     }
 
     /// Transactionally switches active model to `model_id`.
@@ -270,8 +299,11 @@ impl App {
             self.session.finalize();
             self.session = PartialSession::new();
             self.last_logged_text.clear();
+            self.current_utterance_start = None;
 
             let _ = self.model_manager.set_active_model(model_id);
+            self.config.selected_model = model_id.to_string();
+            let _ = self.config.save();
             self.notify_models();
 
             println!(
@@ -328,6 +360,7 @@ impl App {
             AppAction::StopListening => self.stop_listening(),
             AppAction::Quit => {
                 println!("\n[App] Quit action received. Exiting...");
+                self.history_manager.flush();
                 self.state.running = false;
                 self.platform.handle.shutdown();
             }
@@ -357,6 +390,22 @@ impl App {
                     );
                     self.notify_models();
                 }
+            }
+            AppAction::ToggleHistory => {
+                let new_enabled = !self.history_manager.enabled;
+                self.history_manager.set_enabled(new_enabled);
+                self.config.history_enabled = new_enabled;
+                let _ = self.config.save();
+                self.platform.handle.update_history_state(new_enabled);
+                println!(
+                    "[History] Local History toggled: {}",
+                    if new_enabled { "ON" } else { "OFF" }
+                );
+            }
+            AppAction::OpenHistoryFolder => {
+                self.platform
+                    .handle
+                    .open_history_folder(&self.history_manager.history_dir);
             }
         }
     }
@@ -388,6 +437,11 @@ impl App {
             let current_text = self.stream.get_result();
             let is_endpoint = self.stream.is_endpoint();
 
+            // Track utterance start timestamp when first non-empty text appears
+            if !current_text.is_empty() && self.current_utterance_start.is_none() {
+                self.current_utterance_start = Some(Local::now());
+            }
+
             if let Some(diff) = self.session.update(&current_text) {
                 if !current_text.is_empty() && current_text != self.last_logged_text {
                     println!(
@@ -410,6 +464,14 @@ impl App {
                         "[Endpoint] Finalized sentence: \"{}\" (Listening stays active)",
                         self.last_logged_text
                     );
+                    let end_time = Local::now();
+                    let start_time = self.current_utterance_start.take().unwrap_or(end_time);
+                    self.history_manager.on_utterance(
+                        start_time,
+                        end_time,
+                        &self.last_logged_text,
+                        &self.model_manager.active_model_id,
+                    );
                 }
                 self.finalize_current_segment();
             }
@@ -421,6 +483,12 @@ impl App {
             self.tick();
             std::thread::sleep(Duration::from_millis(15));
         }
+    }
+}
+
+impl Drop for App {
+    fn drop(&mut self) {
+        self.history_manager.flush();
     }
 }
 
