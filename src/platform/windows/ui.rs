@@ -223,7 +223,7 @@ unsafe fn show_tray_menu(hwnd: HWND, state: &UiState) {
     SetForegroundWindow(hwnd);
 
     let hmenu: HMENU = CreatePopupMenu();
-    if hmenu == 0 {
+    if hmenu.is_null() {
         return;
     }
 
@@ -364,7 +364,7 @@ pub fn spawn_ui_thread(
                 ptr::null(),
             );
 
-            if hwnd == 0 {
+            if hwnd.is_null() {
                 let _ = init_tx.send(Err("Failed to create message-only window".into()));
                 return;
             }

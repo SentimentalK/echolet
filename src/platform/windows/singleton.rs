@@ -11,7 +11,7 @@ unsafe impl Sync for SingleInstanceGuard {}
 
 impl Drop for SingleInstanceGuard {
     fn drop(&mut self) {
-        if self.handle != 0 {
+        if !self.handle.is_null() {
             unsafe {
                 CloseHandle(self.handle);
             }
@@ -25,7 +25,7 @@ pub fn acquire_single_instance() -> Result<Option<SingleInstanceGuard>, String> 
         .collect();
     unsafe {
         let handle = CreateMutexW(ptr::null(), 1, mutex_name.as_ptr());
-        if handle == 0 {
+        if handle.is_null() {
             return Err(format!("Failed to create mutex: {}", GetLastError()));
         }
 

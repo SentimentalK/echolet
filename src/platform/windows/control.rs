@@ -8,10 +8,11 @@ use std::time::Duration;
 use windows_sys::Win32::Foundation::{
     CloseHandle, GetLastError, GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE,
 };
-use windows_sys::Win32::Storage::FileSystem::{CreateFileW, OPEN_EXISTING};
-use windows_sys::Win32::System::IO::{ReadFile, WriteFile};
+use windows_sys::Win32::Storage::FileSystem::{
+    CreateFileW, ReadFile, WriteFile, OPEN_EXISTING, PIPE_ACCESS_DUPLEX,
+};
 use windows_sys::Win32::System::Pipes::{
-    ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_ACCESS_DUPLEX,
+    ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe,
     PIPE_READMODE_MESSAGE, PIPE_TYPE_MESSAGE, PIPE_WAIT,
 };
 
