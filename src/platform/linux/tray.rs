@@ -1,13 +1,25 @@
 use crate::actions::AppAction;
+use crate::models::ModelRegistry;
+use crate::paths;
 use crate::platform::PlatformHandle;
 use crossbeam_channel::Sender;
-use ksni::menu::{MenuItem, StandardItem};
+use ksni::menu::{MenuItem, StandardItem, SubMenu};
 use ksni::{Icon, Tray, TrayMethods};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+
+#[derive(Debug, Clone)]
+pub struct ModelItemInfo {
+    pub id: String,
+    pub label: String,
+    pub is_selected: bool,
+    pub is_installed: bool,
+    pub is_downloading: bool,
+}
 
 pub struct LinuxTray {
     pub is_listening: Arc<AtomicBool>,
+    pub models_info: Arc<Mutex<Vec<ModelItemInfo>>>,
     pub action_tx: Sender<AppAction>,
 }
 
@@ -36,8 +48,10 @@ impl Tray for LinuxTray {
             "Start Listening"
         };
 
-        vec![
-            // Line 1: Start/Stop Listening
+        let mut menu_items: Vec<MenuItem<Self>> = Vec::new();
+
+        // 1. Start/Stop Listening
+        menu_items.push(
             StandardItem {
                 label: first_label.into(),
                 activate: Box::new(move |_| {
@@ -46,14 +60,66 @@ impl Tray for LinuxTray {
                 ..Default::default()
             }
             .into(),
-            // Line 2: Hotkey: F10 (disabled/informational)
+        );
+
+        // 2. Model Submenu
+        let models = self.models_info.lock().unwrap().clone();
+        let mut sub_items: Vec<MenuItem<Self>> = Vec::new();
+
+        for m in models {
+            let action_tx = self.action_tx.clone();
+            let model_id = m.id.clone();
+            let is_selected = m.is_selected;
+            let is_downloading = m.is_downloading;
+
+            let label = if is_downloading {
+                format!("{} — Downloading...", m.label)
+            } else if is_selected {
+                format!("✓ {}", m.label)
+            } else if m.is_installed {
+                m.label.clone()
+            } else {
+                format!("{} — Download", m.label)
+            };
+
+            let item_enabled = !is_rec && !is_downloading && !is_selected;
+            let m_id = model_id.clone();
+
+            sub_items.push(
+                StandardItem {
+                    label,
+                    enabled: item_enabled,
+                    activate: Box::new(move |_| {
+                        let _ = action_tx.send(AppAction::SelectModel(m_id.clone()));
+                    }),
+                    ..Default::default()
+                }
+                .into(),
+            );
+        }
+
+        menu_items.push(
+            SubMenu {
+                label: "Model".into(),
+                enabled: !is_rec,
+                submenu: sub_items,
+                ..Default::default()
+            }
+            .into(),
+        );
+
+        // 3. Hotkey: F10
+        menu_items.push(
             StandardItem {
                 label: "Hotkey: F10".into(),
                 enabled: false,
                 ..Default::default()
             }
             .into(),
-            // Line 3: Quit
+        );
+
+        // 4. Quit
+        menu_items.push(
             StandardItem {
                 label: "Quit".into(),
                 activate: Box::new(move |_| {
@@ -62,12 +128,16 @@ impl Tray for LinuxTray {
                 ..Default::default()
             }
             .into(),
-        ]
+        );
+
+        menu_items
     }
 }
 
 pub struct LinuxPlatformHandle {
     pub is_listening: Arc<AtomicBool>,
+    pub models_info: Arc<Mutex<Vec<ModelItemInfo>>>,
+    pub registry: ModelRegistry,
     pub tray_handle: Option<ksni::Handle<LinuxTray>>,
     pub rt: Option<tokio::runtime::Runtime>,
 }
@@ -89,12 +159,73 @@ impl PlatformHandle for LinuxPlatformHandle {
             handle.shutdown();
         }
     }
+
+    fn update_models(
+        &self,
+        active_id: &str,
+        installed_ids: &[String],
+        downloading_ids: &[String],
+    ) {
+        let mut new_info = Vec::new();
+        for entry in &self.registry.models {
+            let is_selected = entry.id == active_id;
+            let is_installed = installed_ids.iter().any(|id| id == &entry.id);
+            let is_downloading = downloading_ids.iter().any(|id| id == &entry.id);
+
+            new_info.push(ModelItemInfo {
+                id: entry.id.clone(),
+                label: entry.display_title(),
+                is_selected,
+                is_installed,
+                is_downloading,
+            });
+        }
+
+        if let Ok(mut lock) = self.models_info.lock() {
+            *lock = new_info;
+        }
+
+        if let Some(handle) = &self.tray_handle {
+            if let Some(rt) = &self.rt {
+                rt.block_on(async {
+                    handle.update(|_| {}).await;
+                });
+            }
+        }
+    }
 }
 
 pub fn spawn_linux_tray(action_tx: Sender<AppAction>) -> LinuxPlatformHandle {
     let is_listening = Arc::new(AtomicBool::new(false));
+
+    // Load initial registry for initial menu population
+    let res_root = paths::resource_root();
+    let reg_path = res_root.join("models/registry.json");
+    let registry = if reg_path.exists() {
+        ModelRegistry::from_file(&reg_path).unwrap_or_else(|_| {
+            ModelRegistry::from_str(include_str!("../../../models/registry.json")).unwrap()
+        })
+    } else {
+        ModelRegistry::from_str(include_str!("../../../models/registry.json")).unwrap()
+    };
+
+    let mut initial_models = Vec::new();
+    for entry in &registry.models {
+        let is_selected = entry.id == registry.default_model_id;
+        initial_models.push(ModelItemInfo {
+            id: entry.id.clone(),
+            label: entry.display_title(),
+            is_selected,
+            is_installed: is_selected, // Bundled default is initially installed
+            is_downloading: false,
+        });
+    }
+
+    let models_info = Arc::new(Mutex::new(initial_models));
+
     let tray = LinuxTray {
         is_listening: is_listening.clone(),
+        models_info: models_info.clone(),
         action_tx,
     };
 
@@ -119,6 +250,8 @@ pub fn spawn_linux_tray(action_tx: Sender<AppAction>) -> LinuxPlatformHandle {
 
     LinuxPlatformHandle {
         is_listening,
+        models_info,
+        registry,
         tray_handle,
         rt,
     }

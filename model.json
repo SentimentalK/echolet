@@ -1,8 +1,9 @@
 {
-  "id": "bilingual-zh-en",
-  "display_name": "Chinese + English",
+  "id": "sherpa-onnx-streaming-zipformer-small-bilingual-zh-en-2023-02-16",
+  "display_name": "Chinese + English (Zipformer-Small)",
   "version": "2023-02-16",
-  "directory": "models/bilingual-zh-en",
+  "language": "zh-en",
+  "family": "online-transducer",
   "encoder": "encoder-epoch-99-avg-1.int8.onnx",
   "decoder": "decoder-epoch-99-avg-1.onnx",
   "joiner": "joiner-epoch-99-avg-1.int8.onnx",

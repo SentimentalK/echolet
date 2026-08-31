@@ -55,7 +55,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // 5. Initialize Platform Layer (registers hotkeys, IPC socket, single instance check, tray, virtual keyboard)
-    let platform_runtime = match platform::init(action_tx)? {
+    let platform_runtime = match platform::init(action_tx.clone())? {
         Some(rt) => rt,
         None => return Ok(()), // Duplicate instance detected; exiting cleanly
     };
@@ -70,7 +70,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!(">>> Press [F10] or click Tray [Start Listening] to speak. <<<");
     println!(">>> Press [F10] again or click Tray [Stop Listening] to stop. <<<\n");
 
-    let mut app = App::new(platform_runtime, action_rx)?;
+    let mut app = App::new_with_tx(platform_runtime, action_tx, action_rx)?;
     app.run();
 
     println!("[System] Exited cleanly.");

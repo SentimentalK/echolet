@@ -1,0 +1,81 @@
+{
+  "schema_version": 1,
+  "default_model_id": "sherpa-onnx-streaming-zipformer-small-bilingual-zh-en-2023-02-16",
+  "models": [
+    {
+      "id": "sherpa-onnx-streaming-zipformer-small-bilingual-zh-en-2023-02-16",
+      "display_name": "Chinese + English (Zipformer-Small)",
+      "version": "2023-02-16",
+      "language": "zh-en",
+      "family": "online-transducer",
+      "source": {
+        "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-small-bilingual-zh-en-2023-02-16.tar.bz2",
+        "sha256": "2b7c63322b32e5e0f2526043a1103366119ca58dd615cd7105a37c01db9553d7"
+      },
+      "files": {
+        "encoder": "encoder-epoch-99-avg-1.int8.onnx",
+        "decoder": "decoder-epoch-99-avg-1.onnx",
+        "joiner": "joiner-epoch-99-avg-1.int8.onnx",
+        "tokens": "tokens.txt"
+      },
+      "runtime": {
+        "sample_rate": 16000,
+        "feature_dim": 80,
+        "num_threads": 1,
+        "provider": "cpu",
+        "decoding_method": "greedy_search",
+        "max_active_paths": 4
+      }
+    },
+    {
+      "id": "sherpa-onnx-streaming-zipformer-en-20M-2023-02-17",
+      "display_name": "English (Zipformer-20M)",
+      "version": "2023-02-17",
+      "language": "en",
+      "family": "online-transducer",
+      "source": {
+        "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-en-20M-2023-02-17.tar.bz2",
+        "sha256": "9c559283e8498d3fe95913c79ca1cb454bb26281ac2b102b41306c7d752765d9"
+      },
+      "files": {
+        "encoder": "encoder-epoch-99-avg-1.int8.onnx",
+        "decoder": "decoder-epoch-99-avg-1.onnx",
+        "joiner": "joiner-epoch-99-avg-1.int8.onnx",
+        "tokens": "tokens.txt"
+      },
+      "runtime": {
+        "sample_rate": 16000,
+        "feature_dim": 80,
+        "num_threads": 1,
+        "provider": "cpu",
+        "decoding_method": "greedy_search",
+        "max_active_paths": 4
+      }
+    },
+    {
+      "id": "sherpa-onnx-streaming-zipformer-zh-int8-2025-06-30",
+      "display_name": "Chinese (Zipformer-int8)",
+      "version": "2025-06-30",
+      "language": "zh",
+      "family": "online-transducer",
+      "source": {
+        "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-zh-int8-2025-06-30.tar.bz2",
+        "sha256": "5a2832047ea1f97dd0dc595b816c230c4bafad65cfc0341fa57517cadc50afd0"
+      },
+      "files": {
+        "encoder": "encoder.int8.onnx",
+        "decoder": "decoder.onnx",
+        "joiner": "joiner.int8.onnx",
+        "tokens": "tokens.txt"
+      },
+      "runtime": {
+        "sample_rate": 16000,
+        "feature_dim": 80,
+        "num_threads": 1,
+        "provider": "cpu",
+        "decoding_method": "greedy_search",
+        "max_active_paths": 4
+      }
+    }
+  ]
+}

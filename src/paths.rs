@@ -1,31 +1,6 @@
+use crate::models::manifest::ModelManifest;
 use std::env;
 use std::path::{Path, PathBuf};
-
-pub struct ModelManifest {
-    pub id: String,
-    pub display_name: String,
-    pub version: String,
-    pub directory: String,
-    pub encoder: String,
-    pub decoder: String,
-    pub joiner: String,
-    pub tokens: String,
-}
-
-impl Default for ModelManifest {
-    fn default() -> Self {
-        Self {
-            id: "bilingual-zh-en".into(),
-            display_name: "Chinese + English".into(),
-            version: "2023-02-16".into(),
-            directory: "models/bilingual-zh-en".into(),
-            encoder: "encoder-epoch-99-avg-1.int8.onnx".into(),
-            decoder: "decoder-epoch-99-avg-1.onnx".into(),
-            joiner: "joiner-epoch-99-avg-1.int8.onnx".into(),
-            tokens: "tokens.txt".into(),
-        }
-    }
-}
 
 /// Resolves the application ResourceRoot directory.
 /// Priority:
@@ -72,40 +47,50 @@ pub fn runtime_lib_dir() -> PathBuf {
     resource_root().join("runtime/lib")
 }
 
-pub fn model_root() -> PathBuf {
+pub fn bundled_models_dir() -> PathBuf {
     resource_root().join("models")
 }
 
-pub fn default_model_dir() -> PathBuf {
-    resource_root().join("models/bilingual-zh-en")
+pub fn user_data_dir() -> PathBuf {
+    if let Ok(env_data) = env::var("ECHOLET_USER_DATA_DIR") {
+        return PathBuf::from(env_data);
+    }
+    dirs::data_local_dir()
+        .unwrap_or_else(|| PathBuf::from(env::var("HOME").unwrap_or_else(|_| ".".into())).join(".local/share"))
+        .join("echolet")
 }
 
-/// Validates that the model bundle contains all required files.
+pub fn user_models_dir() -> PathBuf {
+    user_data_dir().join("models")
+}
+
+pub fn user_config_dir() -> PathBuf {
+    if let Ok(env_cfg) = env::var("ECHOLET_USER_CONFIG_DIR") {
+        return PathBuf::from(env_cfg);
+    }
+    dirs::config_dir()
+        .unwrap_or_else(|| PathBuf::from(env::var("HOME").unwrap_or_else(|_| ".".into())).join(".config"))
+        .join("echolet")
+}
+
+pub fn user_config_path() -> PathBuf {
+    user_config_dir().join("config.json")
+}
+
+pub fn default_model_dir() -> PathBuf {
+    let bundled = bundled_models_dir();
+    let modern = bundled.join("zh-en-small-2023-02-16");
+    if modern.exists() {
+        return modern;
+    }
+    bundled.join("bilingual-zh-en")
+}
+
 pub fn validate_model_bundle(model_dir: &Path) -> Result<(), String> {
-    if !model_dir.exists() {
-        return Err(format!(
-            "[Error] Model directory not found: {:?}\nEnsure the bundle has 'models/bilingual-zh-en' or set ECHOLET_RESOURCE_ROOT.",
-            model_dir
-        ));
-    }
-
-    let manifest = ModelManifest::default();
-    let required_files = [
-        (&manifest.encoder, "Encoder ONNX model"),
-        (&manifest.decoder, "Decoder ONNX model"),
-        (&manifest.joiner, "Joiner ONNX model"),
-        (&manifest.tokens, "Tokens vocabulary file"),
-    ];
-
-    for (file_name, desc) in required_files {
-        let file_path = model_dir.join(file_name);
-        if !file_path.exists() {
-            return Err(format!(
-                "[Error] Model bundle incomplete: missing {} ({:?})\nExpected at: {:?}",
-                desc, file_name, file_path
-            ));
-        }
-    }
-
-    Ok(())
+    let manifest = if model_dir.join("model.json").exists() {
+        ModelManifest::from_file(&model_dir.join("model.json"))?
+    } else {
+        ModelManifest::default()
+    };
+    manifest.validate_files(model_dir)
 }

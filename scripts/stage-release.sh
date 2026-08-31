@@ -44,9 +44,10 @@ cp "${LOCAL_RUNTIME}/models/bilingual-zh-en/decoder-epoch-99-avg-1.onnx" "${DIST
 cp "${LOCAL_RUNTIME}/models/bilingual-zh-en/joiner-epoch-99-avg-1.int8.onnx" "${DIST_DIR}/models/bilingual-zh-en/"
 cp "${LOCAL_RUNTIME}/models/bilingual-zh-en/tokens.txt" "${DIST_DIR}/models/bilingual-zh-en/"
 
-# 7. Copy model manifest
-echo "--> Copying manifest..."
+# 7. Copy model manifest and registry
+echo "--> Copying manifest and registry..."
 cp "${REPO_ROOT}/model.json" "${DIST_DIR}/model.json"
+cp "${REPO_ROOT}/models/registry.json" "${DIST_DIR}/models/registry.json"
 
 # 8. Copy open-source licenses
 echo "--> Copying licenses..."
@@ -57,6 +58,7 @@ echo "--> Validating production bundle structure..."
 REQUIRED_FILES=(
     "${DIST_DIR}/echolet"
     "${DIST_DIR}/model.json"
+    "${DIST_DIR}/models/registry.json"
     "${DIST_DIR}/runtime/lib/libsherpa-onnx-c-api.so"
     "${DIST_DIR}/runtime/lib/libonnxruntime.so"
     "${DIST_DIR}/models/bilingual-zh-en/encoder-epoch-99-avg-1.int8.onnx"
@@ -77,7 +79,7 @@ done
 
 # Ensure test_wavs is NOT in production bundle
 if [[ -d "${DIST_DIR}/models/bilingual-zh-en/test_wavs" ]]; then
-    echo "[Error] test_wavs should not be present in production release bundle!" >&2
+    echo "[Error] test_wavs directory found in production release!" >&2
     exit 1
 fi
 

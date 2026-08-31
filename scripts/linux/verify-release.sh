@@ -51,10 +51,15 @@ if echo "${LDD_OUTPUT}" | grep "not found" >/dev/null; then
     exit 1
 fi
 
-# 4. Check model files and manifest
-echo "--> Checking model manifest and files..."
+# 4. Check model files, manifest, and registry
+echo "--> Checking model manifest, registry, and files..."
 if [[ ! -f "${DIST_DIR}/model.json" ]]; then
     echo "[Error] Missing model.json manifest!" >&2
+    exit 1
+fi
+
+if [[ ! -f "${DIST_DIR}/models/registry.json" ]]; then
+    echo "[Error] Missing models/registry.json!" >&2
     exit 1
 fi
 
@@ -97,7 +102,7 @@ done
 
 # 7. Check for host path leakage in text files
 echo "--> Checking for host path leakage..."
-if grep -rn "/home/sentimentalk/sherpa-onnx" "${DIST_DIR}/model.json" "${DIST_DIR}/licenses" >/dev/null 2>&1; then
+if grep -rn "/home/sentimentalk/sherpa-onnx" "${DIST_DIR}/model.json" "${DIST_DIR}/licenses" "${DIST_DIR}/models/registry.json" >/dev/null 2>&1; then
     echo "[Error] Host path leaked into release metadata/licenses!" >&2
     exit 1
 fi

@@ -5,6 +5,7 @@ pub mod audio;
 pub mod beep;
 pub mod diff;
 pub mod ffi;
+pub mod models;
 pub mod paths;
 pub mod platform;
 pub mod state;

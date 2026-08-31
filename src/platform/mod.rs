@@ -8,6 +8,12 @@ pub trait TextInjector: Send + Sync {
 pub trait PlatformHandle: Send + Sync {
     fn set_listening(&self, listening: bool);
     fn shutdown(&self);
+    fn update_models(
+        &self,
+        _active_id: &str,
+        _installed_ids: &[String],
+        _downloading_ids: &[String],
+    ) {}
 }
 
 pub struct PlatformRuntime {

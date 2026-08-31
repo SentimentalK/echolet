@@ -60,8 +60,11 @@ if [[ -f "${EXTRACTED_MODEL}/test_wavs/0.wav" ]]; then
     cp "${EXTRACTED_MODEL}/test_wavs/0.wav" "${STAGING_DIR}/models/bilingual-zh-en/test_wavs/"
 fi
 
-# 5. Copy manifest
+# 5. Copy manifest & registry
+cp "${REPO_ROOT}/model.json" "${STAGING_DIR}/models/bilingual-zh-en/model.json"
 cp "${REPO_ROOT}/model.json" "${STAGING_DIR}/model.json"
+mkdir -p "${STAGING_DIR}/models"
+cp "${REPO_ROOT}/models/registry.json" "${STAGING_DIR}/models/registry.json"
 
 echo "=== Official assets staged successfully into .local-runtime/ ==="
 ls -lh "${STAGING_DIR}/runtime/lib"

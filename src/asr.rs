@@ -1,7 +1,8 @@
+use crate::ffi::*;
+use crate::models::manifest::ModelManifest;
 use std::ffi::{CStr, CString};
 use std::path::Path;
 use std::sync::Arc;
-use crate::ffi::*;
 
 pub struct OnlineRecognizer {
     raw: *const SherpaOnnxOnlineRecognizer,
@@ -41,27 +42,29 @@ impl Drop for OnlineStream {
 impl OnlineRecognizer {
     pub fn new<P: AsRef<Path>>(model_dir: P) -> Result<Self, String> {
         let model_dir = model_dir.as_ref();
-        
-        // Exact model combination aligned with official sherpa CLI
-        let encoder = model_dir.join("encoder-epoch-99-avg-1.int8.onnx");
-        let decoder = model_dir.join("decoder-epoch-99-avg-1.onnx");
-        let joiner = model_dir.join("joiner-epoch-99-avg-1.int8.onnx");
-        let tokens = model_dir.join("tokens.txt");
+        let manifest_path = model_dir.join("model.json");
+        let manifest = if manifest_path.exists() {
+            ModelManifest::from_file(&manifest_path)?
+        } else {
+            ModelManifest::default()
+        };
+        Self::from_manifest(model_dir, &manifest)
+    }
 
-        if !encoder.exists() {
-            return Err(format!("Encoder {:?} not found", encoder));
-        }
-        if !decoder.exists() {
-            return Err(format!("Decoder {:?} not found", decoder));
-        }
-        if !joiner.exists() {
-            return Err(format!("Joiner {:?} not found", joiner));
-        }
-        if !tokens.exists() {
-            return Err(format!("tokens.txt {:?} not found", tokens));
-        }
+    pub fn from_manifest<P: AsRef<Path>>(
+        model_dir: P,
+        manifest: &ModelManifest,
+    ) -> Result<Self, String> {
+        let model_dir = model_dir.as_ref();
 
-        println!("[ASR] Using exact model files:");
+        manifest.validate_files(model_dir)?;
+
+        let encoder = model_dir.join(&manifest.encoder);
+        let decoder = model_dir.join(&manifest.decoder);
+        let joiner = model_dir.join(&manifest.joiner);
+        let tokens = model_dir.join(&manifest.tokens);
+
+        println!("[ASR] Initializing Recognizer for model '{}':", manifest.id);
         println!("  Encoder: {:?}", encoder);
         println!("  Decoder: {:?}", decoder);
         println!("  Joiner:  {:?}", joiner);
@@ -71,21 +74,21 @@ impl OnlineRecognizer {
         let c_decoder = CString::new(decoder.to_str().ok_or("Invalid decoder path")?).unwrap();
         let c_joiner = CString::new(joiner.to_str().ok_or("Invalid joiner path")?).unwrap();
         let c_tokens = CString::new(tokens.to_str().ok_or("Invalid tokens path")?).unwrap();
-        let c_provider = CString::new("cpu").unwrap();
-        let c_decoding = CString::new("greedy_search").unwrap();
+        let c_provider = CString::new(manifest.provider.as_str()).unwrap_or_else(|_| CString::new("cpu").unwrap());
+        let c_decoding = CString::new(manifest.decoding_method.as_str()).unwrap_or_else(|_| CString::new("greedy_search").unwrap());
 
         let mut config: SherpaOnnxOnlineRecognizerConfig = unsafe { std::mem::zeroed() };
-        config.feat_config.sample_rate = 16000;
-        config.feat_config.feature_dim = 80;
+        config.feat_config.sample_rate = manifest.sample_rate as i32;
+        config.feat_config.feature_dim = manifest.feature_dim;
         config.model_config.transducer.encoder = c_encoder.as_ptr();
         config.model_config.transducer.decoder = c_decoder.as_ptr();
         config.model_config.transducer.joiner = c_joiner.as_ptr();
         config.model_config.tokens = c_tokens.as_ptr();
-        config.model_config.num_threads = 1;
+        config.model_config.num_threads = manifest.num_threads;
         config.model_config.provider = c_provider.as_ptr();
         config.model_config.debug = 0;
         config.decoding_method = c_decoding.as_ptr();
-        config.max_active_paths = 4;
+        config.max_active_paths = manifest.max_active_paths;
         config.enable_endpoint = 1;
         config.rule1_min_trailing_silence = 2.4;
         config.rule2_min_trailing_silence = 1.2;
@@ -93,7 +96,7 @@ impl OnlineRecognizer {
 
         let raw = unsafe { SherpaOnnxCreateOnlineRecognizer(&config) };
         if raw.is_null() {
-            return Err("SherpaOnnxCreateOnlineRecognizer returned null".to_string());
+            return Err(format!("SherpaOnnxCreateOnlineRecognizer failed for model '{}'", manifest.id));
         }
 
         Ok(Self { raw })
