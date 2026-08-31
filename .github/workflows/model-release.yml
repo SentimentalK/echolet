@@ -53,11 +53,11 @@ jobs:
         run: |
           MODEL_ID=$(jq -r '.id' models/base-model.json)
           REV=$(jq -r '.revision' models/base-model.json)
-          PKG_NAME="echolet-model-${MODEL_ID}-${REV}"
+          PKG_NAME="model-${MODEL_ID}-${REV}"
           ARCHIVE_NAME="${PKG_NAME}.tar.zst"
           ARCHIVE_PATH="dist/${ARCHIVE_NAME}"
           SHA256=$(sha256sum "${ARCHIVE_PATH}" | awk '{print $1}')
-          TAG="model-${MODEL_ID}-${REV}"
+          TAG="${PKG_NAME}"
           
           echo "tag=${TAG}" >> $GITHUB_OUTPUT
           echo "archive_name=${ARCHIVE_NAME}" >> $GITHUB_OUTPUT

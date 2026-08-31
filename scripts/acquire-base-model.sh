@@ -91,7 +91,10 @@ EXTRACT_DIR="${TMP_WORK_DIR}/extracted"
 mkdir -p "${EXTRACT_DIR}"
 tar --zstd -xf "${ARCHIVE_PATH}" -C "${EXTRACT_DIR}"
 
-PACKAGE_SUBDIR="${EXTRACT_DIR}/echolet-model-${MODEL_ID}-${MODEL_REV}"
+PACKAGE_SUBDIR="${EXTRACT_DIR}/model-${MODEL_ID}-${MODEL_REV}"
+if [[ ! -d "${PACKAGE_SUBDIR}" ]]; then
+    PACKAGE_SUBDIR="${EXTRACT_DIR}/echolet-model-${MODEL_ID}-${MODEL_REV}"
+fi
 if [[ ! -d "${PACKAGE_SUBDIR}" ]]; then
     PACKAGE_SUBDIR=$(find "${EXTRACT_DIR}" -mindepth 1 -maxdepth 1 -type d | head -n 1)
 fi

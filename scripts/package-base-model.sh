@@ -19,7 +19,7 @@ UPSTREAM_PROJECT=$(jq -r '.upstream_project' "${BASE_MODEL_DEF}")
 UPSTREAM_REPO=$(jq -r '.upstream_repository' "${BASE_MODEL_DEF}")
 UPSTREAM_REV=$(jq -r '.upstream_revision' "${BASE_MODEL_DEF}")
 
-PKG_NAME="echolet-model-${MODEL_ID}-${ECHOLET_REV}"
+PKG_NAME="model-${MODEL_ID}-${ECHOLET_REV}"
 OUTPUT_ARCHIVE="${REPO_ROOT}/dist/${PKG_NAME}.tar.zst"
 
 echo "=== Reproducible Packaging of Echolet Base Model Artifact ==="
@@ -28,6 +28,7 @@ echo "Echolet Revision: ${ECHOLET_REV}"
 echo "Upstream Project: ${UPSTREAM_PROJECT}"
 echo "Upstream Repo:    ${UPSTREAM_REPO}"
 echo "Upstream Rev:     ${UPSTREAM_REV}"
+echo "Archive Target:   ${OUTPUT_ARCHIVE}"
 
 TMP_WORK_DIR=$(mktemp -d)
 trap 'rm -rf "${TMP_WORK_DIR}"' EXIT
@@ -90,7 +91,7 @@ cat << EOF
   "id": "${MODEL_ID}",
   "revision": "${ECHOLET_REV}",
   "archive": "${PKG_NAME}.tar.zst",
-  "url": "https://github.com/${UPSTREAM_PROJECT}/echolet/releases/download/model-${MODEL_ID}-${ECHOLET_REV}/${PKG_NAME}.tar.zst",
+  "url": "https://github.com/SentimentalK/echolet/releases/download/${PKG_NAME}/${PKG_NAME}.tar.zst",
   "sha256": "${ARCHIVE_SHA256}",
   "upstream_repository": "${UPSTREAM_REPO}",
   "upstream_revision": "${UPSTREAM_REV}",
