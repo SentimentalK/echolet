@@ -19,6 +19,8 @@ pub struct ModelFilesConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ModelRuntimeConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_type: Option<String>,
     #[serde(default = "default_sample_rate")]
     pub sample_rate: u32,
     #[serde(default = "default_feature_dim")]
@@ -80,6 +82,7 @@ impl RegistryModelEntry {
             decoder: self.files.decoder.clone(),
             joiner: self.files.joiner.clone(),
             tokens: self.files.tokens.clone(),
+            model_type: self.runtime.model_type.clone(),
             sample_rate: self.runtime.sample_rate,
             feature_dim: self.runtime.feature_dim,
             num_threads: self.runtime.num_threads,

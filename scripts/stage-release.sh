@@ -12,7 +12,7 @@ echo "Repo root: ${REPO_ROOT}"
 echo "Dist target: ${DIST_DIR}"
 
 # 1. Ensure local staging assets exist
-if [[ ! -d "${LOCAL_RUNTIME}/runtime/lib" || ! -d "${LOCAL_RUNTIME}/models/bilingual-zh-en" ]]; then
+if [[ ! -d "${LOCAL_RUNTIME}/runtime/lib" || ! -f "${LOCAL_RUNTIME}/models/bilingual-zh-en/encoder-480ms.onnx" ]]; then
     echo "--> Local assets not found. Running prepare-local-assets.sh first..."
     "${REPO_ROOT}/scripts/prepare-local-assets.sh"
 fi
@@ -39,9 +39,9 @@ cp -a "${LOCAL_RUNTIME}/runtime/lib"/*.so* "${DIST_DIR}/runtime/lib/"
 
 # 6. Copy models (excluding test_wavs for clean production bundle)
 echo "--> Copying model files (excluding test_wavs)..."
-cp "${LOCAL_RUNTIME}/models/bilingual-zh-en/encoder-epoch-99-avg-1.int8.onnx" "${DIST_DIR}/models/bilingual-zh-en/"
-cp "${LOCAL_RUNTIME}/models/bilingual-zh-en/decoder-epoch-99-avg-1.onnx" "${DIST_DIR}/models/bilingual-zh-en/"
-cp "${LOCAL_RUNTIME}/models/bilingual-zh-en/joiner-epoch-99-avg-1.int8.onnx" "${DIST_DIR}/models/bilingual-zh-en/"
+cp "${LOCAL_RUNTIME}/models/bilingual-zh-en/encoder-480ms.onnx" "${DIST_DIR}/models/bilingual-zh-en/"
+cp "${LOCAL_RUNTIME}/models/bilingual-zh-en/decoder-480ms.onnx" "${DIST_DIR}/models/bilingual-zh-en/"
+cp "${LOCAL_RUNTIME}/models/bilingual-zh-en/joiner-480ms.onnx" "${DIST_DIR}/models/bilingual-zh-en/"
 cp "${LOCAL_RUNTIME}/models/bilingual-zh-en/tokens.txt" "${DIST_DIR}/models/bilingual-zh-en/"
 
 # 7. Copy model manifest and registry
@@ -61,9 +61,9 @@ REQUIRED_FILES=(
     "${DIST_DIR}/models/registry.json"
     "${DIST_DIR}/runtime/lib/libsherpa-onnx-c-api.so"
     "${DIST_DIR}/runtime/lib/libonnxruntime.so"
-    "${DIST_DIR}/models/bilingual-zh-en/encoder-epoch-99-avg-1.int8.onnx"
-    "${DIST_DIR}/models/bilingual-zh-en/decoder-epoch-99-avg-1.onnx"
-    "${DIST_DIR}/models/bilingual-zh-en/joiner-epoch-99-avg-1.int8.onnx"
+    "${DIST_DIR}/models/bilingual-zh-en/encoder-480ms.onnx"
+    "${DIST_DIR}/models/bilingual-zh-en/decoder-480ms.onnx"
+    "${DIST_DIR}/models/bilingual-zh-en/joiner-480ms.onnx"
     "${DIST_DIR}/models/bilingual-zh-en/tokens.txt"
     "${DIST_DIR}/licenses/sherpa-onnx-LICENSE"
     "${DIST_DIR}/licenses/onnxruntime-LICENSE"

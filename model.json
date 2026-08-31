@@ -1,11 +1,18 @@
 {
-  "id": "sherpa-onnx-streaming-zipformer-small-bilingual-zh-en-2023-02-16",
-  "display_name": "Chinese + English (Zipformer-Small)",
-  "version": "2023-02-16",
+  "id": "echolet-xasr-zh-en-480ms-689ff18c584d29910da37b6fe904db0c1489c9d1",
+  "display_name": "Chinese + English (X-ASR / 480ms)",
+  "version": "2026",
   "language": "zh-en",
   "family": "online-transducer",
-  "encoder": "encoder-epoch-99-avg-1.int8.onnx",
-  "decoder": "decoder-epoch-99-avg-1.onnx",
-  "joiner": "joiner-epoch-99-avg-1.int8.onnx",
-  "tokens": "tokens.txt"
+  "encoder": "encoder-480ms.onnx",
+  "decoder": "decoder-480ms.onnx",
+  "joiner": "joiner-480ms.onnx",
+  "tokens": "tokens.txt",
+  "model_type": "zipformer2",
+  "sample_rate": 16000,
+  "feature_dim": 80,
+  "num_threads": 1,
+  "provider": "cpu",
+  "decoding_method": "greedy_search",
+  "max_active_paths": 4
 }

@@ -64,9 +64,9 @@ if [[ ! -f "${DIST_DIR}/models/registry.json" ]]; then
 fi
 
 MODEL_FILES=(
-    "encoder-epoch-99-avg-1.int8.onnx"
-    "decoder-epoch-99-avg-1.onnx"
-    "joiner-epoch-99-avg-1.int8.onnx"
+    "encoder-480ms.onnx"
+    "decoder-480ms.onnx"
+    "joiner-480ms.onnx"
     "tokens.txt"
 )
 

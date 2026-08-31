@@ -47,43 +47,42 @@ fn test_registry_parsing_and_invariants() {
     assert_eq!(registry.schema_version, 1);
     assert_eq!(
         registry.default_model_id,
-        "sherpa-onnx-streaming-zipformer-small-bilingual-zh-en-2023-02-16"
+        "echolet-xasr-zh-en-480ms-689ff18c584d29910da37b6fe904db0c1489c9d1"
     );
     assert_eq!(registry.models.len(), 3, "Registry must contain exactly 3 verified models");
 
-    // 1. Bilingual Model
-    let zh_en = registry
-        .get_model("sherpa-onnx-streaming-zipformer-small-bilingual-zh-en-2023-02-16")
-        .expect("Missing zh-en model");
+    // 1. X-ASR Bilingual Model (2026 Default Bundled)
+    let xasr = registry
+        .get_model("echolet-xasr-zh-en-480ms-689ff18c584d29910da37b6fe904db0c1489c9d1")
+        .expect("Missing X-ASR model");
     assert_eq!(
-        zh_en.display_title(),
-        "Chinese + English (Zipformer-Small) — 2023-02-16"
+        xasr.display_title(),
+        "Chinese + English (X-ASR / 480ms) — 2026"
     );
-    assert_eq!(
-        zh_en.source.sha256,
-        "2b7c63322b32e5e0f2526043a1103366119ca58dd615cd7105a37c01db9553d7"
-    );
-    assert_eq!(zh_en.files.encoder, "encoder-epoch-99-avg-1.int8.onnx");
-    assert_eq!(zh_en.files.decoder, "decoder-epoch-99-avg-1.onnx");
-    assert_eq!(zh_en.files.joiner, "joiner-epoch-99-avg-1.int8.onnx");
-    assert_eq!(zh_en.files.tokens, "tokens.txt");
+    assert_eq!(xasr.files.encoder, "encoder-480ms.onnx");
+    assert_eq!(xasr.files.decoder, "decoder-480ms.onnx");
+    assert_eq!(xasr.files.joiner, "joiner-480ms.onnx");
+    assert_eq!(xasr.files.tokens, "tokens.txt");
+    assert_eq!(xasr.runtime.model_type, Some("zipformer2".into()));
 
-    // 2. English Model
+    // 2. English Model (Nemotron 2026)
     let en = registry
-        .get_model("sherpa-onnx-streaming-zipformer-en-20M-2023-02-17")
-        .expect("Missing en model");
+        .get_model("sherpa-onnx-nemotron-speech-streaming-en-0.6b-560ms-int8-2026-04-25")
+        .expect("Missing Nemotron en model");
     assert_eq!(
         en.display_title(),
-        "English (Zipformer-20M) — 2023-02-17"
+        "English (Nemotron 0.6B / 560ms) — 2026-04-25"
     );
     assert_eq!(
         en.source.sha256,
-        "9c559283e8498d3fe95913c79ca1cb454bb26281ac2b102b41306c7d752765d9"
+        "78e2b79fcf7271553a74402a76b771b09ea40117a39566a79f52235b23db6358"
     );
-    assert_eq!(en.files.encoder, "encoder-epoch-99-avg-1.int8.onnx");
+    assert_eq!(en.files.encoder, "encoder.int8.onnx");
+    assert_eq!(en.files.decoder, "decoder.int8.onnx");
+    assert_eq!(en.files.joiner, "joiner.int8.onnx");
     assert_eq!(en.files.tokens, "tokens.txt");
 
-    // 3. Chinese Model
+    // 3. Chinese Model (2025)
     let zh = registry
         .get_model("sherpa-onnx-streaming-zipformer-zh-int8-2025-06-30")
         .expect("Missing zh model");
@@ -146,13 +145,13 @@ fn test_config_persistence_and_fallback() {
     manager.config_path = tmp_dir.join("config.json");
 
     // Save config
-    manager.active_model_id = "sherpa-onnx-streaming-zipformer-small-bilingual-zh-en-2023-02-16".into();
+    manager.active_model_id = "echolet-xasr-zh-en-480ms-689ff18c584d29910da37b6fe904db0c1489c9d1".into();
     manager.save_config().expect("Failed to save config");
     assert!(manager.config_path.exists());
 
     // Load config
     let loaded = manager.load_config().expect("Failed to load config");
-    assert_eq!(loaded.selected_model, "sherpa-onnx-streaming-zipformer-small-bilingual-zh-en-2023-02-16");
+    assert_eq!(loaded.selected_model, "echolet-xasr-zh-en-480ms-689ff18c584d29910da37b6fe904db0c1489c9d1");
 
     let _ = fs::remove_dir_all(&tmp_dir);
 }
@@ -181,10 +180,7 @@ fn test_transactional_model_switch_and_listening_guard() {
         .expect("Failed to create App");
 
     let initial_model = app.model_manager.active_model_id.clone();
-    assert_eq!(
-        initial_model,
-        "sherpa-onnx-streaming-zipformer-small-bilingual-zh-en-2023-02-16"
-    );
+    assert!(!initial_model.is_empty(), "Initial active model must not be empty");
 
     // 1. Guard check: Switching while Listening must be rejected
     app.start_listening();

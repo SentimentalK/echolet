@@ -15,6 +15,9 @@ pub struct ModelManifest {
     pub joiner: String,
     pub tokens: String,
 
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_type: Option<String>,
+
     #[serde(default = "default_sample_rate")]
     pub sample_rate: u32,
     #[serde(default = "default_feature_dim")]
@@ -51,15 +54,16 @@ fn default_max_active_paths() -> i32 {
 impl Default for ModelManifest {
     fn default() -> Self {
         Self {
-            id: "sherpa-onnx-streaming-zipformer-small-bilingual-zh-en-2023-02-16".into(),
-            display_name: "Chinese + English (Zipformer-Small)".into(),
-            version: "2023-02-16".into(),
+            id: "echolet-xasr-zh-en-480ms-689ff18c584d29910da37b6fe904db0c1489c9d1".into(),
+            display_name: "Chinese + English (X-ASR / 480ms)".into(),
+            version: "2026".into(),
             language: "zh-en".into(),
             family: "online-transducer".into(),
-            encoder: "encoder-epoch-99-avg-1.int8.onnx".into(),
-            decoder: "decoder-epoch-99-avg-1.onnx".into(),
-            joiner: "joiner-epoch-99-avg-1.int8.onnx".into(),
+            encoder: "encoder-480ms.onnx".into(),
+            decoder: "decoder-480ms.onnx".into(),
+            joiner: "joiner-480ms.onnx".into(),
             tokens: "tokens.txt".into(),
+            model_type: Some("zipformer2".into()),
             sample_rate: 16000,
             feature_dim: 80,
             num_threads: 1,

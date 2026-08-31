@@ -69,6 +69,9 @@ impl OnlineRecognizer {
         println!("  Decoder: {:?}", decoder);
         println!("  Joiner:  {:?}", joiner);
         println!("  Tokens:  {:?}", tokens);
+        if let Some(ref mt) = manifest.model_type {
+            println!("  ModelType: {}", mt);
+        }
 
         let c_encoder = CString::new(encoder.to_str().ok_or("Invalid encoder path")?).unwrap();
         let c_decoder = CString::new(decoder.to_str().ok_or("Invalid decoder path")?).unwrap();
@@ -76,6 +79,10 @@ impl OnlineRecognizer {
         let c_tokens = CString::new(tokens.to_str().ok_or("Invalid tokens path")?).unwrap();
         let c_provider = CString::new(manifest.provider.as_str()).unwrap_or_else(|_| CString::new("cpu").unwrap());
         let c_decoding = CString::new(manifest.decoding_method.as_str()).unwrap_or_else(|_| CString::new("greedy_search").unwrap());
+        let c_model_type = manifest
+            .model_type
+            .as_deref()
+            .and_then(|s| CString::new(s).ok());
 
         let mut config: SherpaOnnxOnlineRecognizerConfig = unsafe { std::mem::zeroed() };
         config.feat_config.sample_rate = manifest.sample_rate as i32;
@@ -87,6 +94,9 @@ impl OnlineRecognizer {
         config.model_config.num_threads = manifest.num_threads;
         config.model_config.provider = c_provider.as_ptr();
         config.model_config.debug = 0;
+        if let Some(ref mt) = c_model_type {
+            config.model_config.model_type = mt.as_ptr();
+        }
         config.decoding_method = c_decoding.as_ptr();
         config.max_active_paths = manifest.max_active_paths;
         config.enable_endpoint = 1;
