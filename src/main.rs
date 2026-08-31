@@ -1,5 +1,11 @@
+#![cfg_attr(
+    all(target_os = "windows", not(debug_assertions)),
+    windows_subsystem = "windows"
+)]
+
 use echolet::platform;
 use std::env;
+
 #[cfg(not(target_os = "macos"))]
 use crossbeam_channel::unbounded;
 #[cfg(not(target_os = "macos"))]
@@ -8,7 +14,7 @@ use echolet::actions::AppAction;
 use echolet::app::App;
 #[cfg(not(target_os = "macos"))]
 use echolet::paths;
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "linux")]
 use std::process::{Command, Stdio};
 
 #[cfg(not(target_os = "macos"))]
@@ -30,9 +36,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
     {
-        // 2. Determine execution mode: Default is Background (Detach), unless -f / --foreground is passed
+        // 2. Linux Daemon Self-Detach: Default is Background (Detach), unless -f / --foreground is passed
         let is_foreground = args.iter().any(|arg| arg == "-f" || arg == "--foreground");
 
         if !is_foreground {
@@ -58,19 +64,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("============================================================");
             return Ok(());
         }
+    }
 
-        // 3. Foreground Mode: Create unified Action Channel
+    #[cfg(not(target_os = "macos"))]
+    {
+        // 3. Main process execution (Linux Foreground or Windows Direct)
         let (action_tx, action_rx) = unbounded::<AppAction>();
 
         // 4. Set up OS signal handler (Ctrl+C -> AppAction::Quit)
         {
             let tx = action_tx.clone();
-            ctrlc::set_handler(move || {
+            let _ = ctrlc::set_handler(move || {
                 let _ = tx.send(AppAction::Quit);
-            })?;
+            });
         }
 
-        // 5. Initialize Platform Layer (registers hotkeys, IPC socket, single instance check, tray, virtual keyboard)
+        // 5. Initialize Platform Layer (registers hotkeys, IPC, single instance check, tray, text injection)
         let platform_runtime = match platform::init(action_tx.clone())? {
             Some(rt) => rt,
             None => return Ok(()), // Duplicate instance detected; exiting cleanly
@@ -82,7 +91,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("============================================================");
 
         // 6. Initialize and run Core App Engine
-        println!("\n>>> Ready! Focus any text field (ChatGPT in Chrome, VS Code, Terminal) <<<");
+        println!("\n>>> Ready! Focus any text field (Chrome, VS Code, Notepad, Terminal) <<<");
         println!(">>> Press [F10] or click Tray [Start Listening] to speak. <<<");
         println!(">>> Press [F10] again or click Tray [Stop Listening] to stop. <<<\n");
 

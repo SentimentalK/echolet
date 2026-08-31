@@ -15,20 +15,17 @@ fn main() {
         manifest_dir.join(".local-runtime/runtime/lib")
     };
 
-    // 2. Validate that required native shared libraries exist
-    let lib_name = if target_os == "macos" {
-        "libsherpa-onnx-c-api.dylib"
+    // 2. Validate that required native shared libraries / import libraries exist
+    let (lib_name, prep_script) = if target_os == "macos" {
+        ("libsherpa-onnx-c-api.dylib", "./scripts/macos/prepare-assets.sh")
+    } else if target_os == "windows" {
+        ("sherpa-onnx-c-api.lib", ".\\scripts\\windows\\prepare-assets.ps1")
     } else {
-        "libsherpa-onnx-c-api.so"
+        ("libsherpa-onnx-c-api.so", "./scripts/prepare-local-assets.sh")
     };
 
     let sherpa_c_api = native_lib_dir.join(lib_name);
     if !sherpa_c_api.exists() {
-        let prep_script = if target_os == "macos" {
-            "./scripts/macos/prepare-assets.sh"
-        } else {
-            "./scripts/prepare-local-assets.sh"
-        };
         panic!(
             "\n========================================================================\n\
              [Build Error] Echolet native runtime not found at:\n  {:?}\n\n\

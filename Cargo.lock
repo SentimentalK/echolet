@@ -759,6 +759,7 @@ dependencies = [
  "tar",
  "tokio",
  "ureq",
+ "windows-sys 0.59.0",
  "zbus 4.4.0",
 ]
 

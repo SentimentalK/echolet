@@ -20,6 +20,8 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
 
       - name: Cache Cargo dependencies
         uses: actions/cache@v4
@@ -30,9 +32,9 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-x64-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-
+            ${{ runner.os }}-x64-cargo-
 
       - name: Cache Echolet Base Model Archive
         uses: actions/cache@v4
@@ -41,6 +43,23 @@ jobs:
             dist/model-*.tar.zst
           key: echolet-base-model-${{ hashFiles('models/base-model.lock.json') }}
 
-      - name: "Notice: Windows CI Architecture Ready"
+      - name: Acquire Windows native runtime and frozen base model
+        shell: pwsh
         run: |
-          echo "Windows platform build step ready. Consumes same models/base-model.lock.json."
+          ./scripts/windows/prepare-assets.ps1 -Architecture x64
+
+      - name: Run automated test suite
+        shell: pwsh
+        run: |
+          cargo test --release -- --nocapture
+
+      - name: Build and verify Windows release package
+        shell: pwsh
+        run: |
+          ./scripts/windows/build-release.ps1 -Architecture x64
+
+      - name: Publish to GitHub Release
+        if: ${{ inputs.upload_release }}
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/echolet-windows-x64.zip
