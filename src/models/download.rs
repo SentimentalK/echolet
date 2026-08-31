@@ -11,6 +11,16 @@ pub fn download_and_install_model(
     entry: &RegistryModelEntry,
     target_dir: &Path,
 ) -> Result<ModelManifest, String> {
+    let source_url = entry.source.url.as_deref().ok_or_else(|| {
+        format!(
+            "Model {} is bundled or does not have a downloadable archive URL",
+            entry.id
+        )
+    })?;
+    let expected_sha256 = entry.source.sha256.as_deref().ok_or_else(|| {
+        format!("Model {} does not have an archive SHA256 checksum", entry.id)
+    })?;
+
     let tmp_parent = std::env::temp_dir().join("echolet-downloads");
     fs::create_dir_all(&tmp_parent).map_err(|e| format!("Failed to create temp dir: {}", e))?;
 
@@ -29,15 +39,15 @@ pub fn download_and_install_model(
 
     let archive_path = tmp_dir.join("model_archive.tar.bz2");
 
-    println!("[Model] Downloading {} from {}...", entry.display_title(), entry.source.url);
+    println!("[Model] Downloading {} from {}...", entry.display_title(), source_url);
 
     // 1. Download file and calculate SHA256 simultaneously
     let response = ureq::AgentBuilder::new()
         .timeout(std::time::Duration::from_secs(600))
         .build()
-        .get(&entry.source.url)
+        .get(source_url)
         .call()
-        .map_err(|e| format!("HTTP download failed for {}: {}", entry.source.url, e))?;
+        .map_err(|e| format!("HTTP download failed for {}: {}", source_url, e))?;
 
     let mut reader = response.into_reader();
     let mut file = File::create(&archive_path)
@@ -63,10 +73,10 @@ pub fn download_and_install_model(
     let calculated_sha256 = hex::encode(hasher.finalize());
     println!("[Model] Download finished. Calculated SHA256: {}", calculated_sha256);
 
-    if !calculated_sha256.eq_ignore_ascii_case(&entry.source.sha256) {
+    if !calculated_sha256.eq_ignore_ascii_case(expected_sha256) {
         return Err(format!(
             "SHA256 checksum mismatch for {}.\nExpected: {}\nGot:      {}",
-            entry.id, entry.source.sha256, calculated_sha256
+            entry.id, expected_sha256, calculated_sha256
         ));
     }
 

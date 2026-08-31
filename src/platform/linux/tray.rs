@@ -62,51 +62,69 @@ impl Tray for LinuxTray {
             .into(),
         );
 
-        // 2. Model Submenu
+        // 2. Model item (Single informational line when <= 1 model, dynamic submenu when > 1)
         let models = self.models_info.lock().unwrap().clone();
-        let mut sub_items: Vec<MenuItem<Self>> = Vec::new();
+        if models.len() <= 1 {
+            let active_label = models
+                .iter()
+                .find(|m| m.is_selected)
+                .map(|m| m.label.clone())
+                .or_else(|| models.first().map(|m| m.label.clone()))
+                .unwrap_or_else(|| "Chinese + English (X-ASR / 480ms) — 2026".to_string());
 
-        for m in models {
-            let action_tx = self.action_tx.clone();
-            let model_id = m.id.clone();
-            let is_selected = m.is_selected;
-            let is_downloading = m.is_downloading;
-
-            let label = if is_downloading {
-                format!("{} — Downloading...", m.label)
-            } else if is_selected {
-                format!("✓ {}", m.label)
-            } else if m.is_installed {
-                m.label.clone()
-            } else {
-                format!("{} — Download", m.label)
-            };
-
-            let item_enabled = !is_rec && !is_downloading && !is_selected;
-            let m_id = model_id.clone();
-
-            sub_items.push(
+            menu_items.push(
                 StandardItem {
-                    label,
-                    enabled: item_enabled,
-                    activate: Box::new(move |_| {
-                        let _ = action_tx.send(AppAction::SelectModel(m_id.clone()));
-                    }),
+                    label: format!("Model: {}", active_label),
+                    enabled: false,
+                    ..Default::default()
+                }
+                .into(),
+            );
+        } else {
+            let mut sub_items: Vec<MenuItem<Self>> = Vec::new();
+
+            for m in models {
+                let action_tx = self.action_tx.clone();
+                let model_id = m.id.clone();
+                let is_selected = m.is_selected;
+                let is_downloading = m.is_downloading;
+
+                let label = if is_downloading {
+                    format!("{} — Downloading...", m.label)
+                } else if is_selected {
+                    format!("✓ {}", m.label)
+                } else if m.is_installed {
+                    m.label.clone()
+                } else {
+                    format!("{} — Download", m.label)
+                };
+
+                let item_enabled = !is_rec && !is_downloading && !is_selected;
+                let m_id = model_id.clone();
+
+                sub_items.push(
+                    StandardItem {
+                        label,
+                        enabled: item_enabled,
+                        activate: Box::new(move |_| {
+                            let _ = action_tx.send(AppAction::SelectModel(m_id.clone()));
+                        }),
+                        ..Default::default()
+                    }
+                    .into(),
+                );
+            }
+
+            menu_items.push(
+                SubMenu {
+                    label: "Model".into(),
+                    enabled: !is_rec,
+                    submenu: sub_items,
                     ..Default::default()
                 }
                 .into(),
             );
         }
-
-        menu_items.push(
-            SubMenu {
-                label: "Model".into(),
-                enabled: !is_rec,
-                submenu: sub_items,
-                ..Default::default()
-            }
-            .into(),
-        );
 
         // 3. Hotkey: F10
         menu_items.push(

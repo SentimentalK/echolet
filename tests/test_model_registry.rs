@@ -49,7 +49,7 @@ fn test_registry_parsing_and_invariants() {
         registry.default_model_id,
         "echolet-xasr-zh-en-480ms-689ff18c584d29910da37b6fe904db0c1489c9d1"
     );
-    assert_eq!(registry.models.len(), 3, "Registry must contain exactly 3 verified models");
+    assert_eq!(registry.models.len(), 1, "Registry must contain single default X-ASR model");
 
     // 1. X-ASR Bilingual Model (2026 Default Bundled)
     let xasr = registry
@@ -59,43 +59,20 @@ fn test_registry_parsing_and_invariants() {
         xasr.display_title(),
         "Chinese + English (X-ASR / 480ms) — 2026"
     );
+    assert!(xasr.source.bundled);
+    assert_eq!(
+        xasr.source.repository.as_deref(),
+        Some("https://huggingface.co/GilgameshWind/X-ASR-zh-en")
+    );
+    assert_eq!(
+        xasr.source.revision.as_deref(),
+        Some("689ff18c584d29910da37b6fe904db0c1489c9d1")
+    );
     assert_eq!(xasr.files.encoder, "encoder-480ms.onnx");
     assert_eq!(xasr.files.decoder, "decoder-480ms.onnx");
     assert_eq!(xasr.files.joiner, "joiner-480ms.onnx");
     assert_eq!(xasr.files.tokens, "tokens.txt");
     assert_eq!(xasr.runtime.model_type, Some("zipformer2".into()));
-
-    // 2. English Model (Nemotron 2026)
-    let en = registry
-        .get_model("sherpa-onnx-nemotron-speech-streaming-en-0.6b-560ms-int8-2026-04-25")
-        .expect("Missing Nemotron en model");
-    assert_eq!(
-        en.display_title(),
-        "English (Nemotron 0.6B / 560ms) — 2026-04-25"
-    );
-    assert_eq!(
-        en.source.sha256,
-        "78e2b79fcf7271553a74402a76b771b09ea40117a39566a79f52235b23db6358"
-    );
-    assert_eq!(en.files.encoder, "encoder.int8.onnx");
-    assert_eq!(en.files.decoder, "decoder.int8.onnx");
-    assert_eq!(en.files.joiner, "joiner.int8.onnx");
-    assert_eq!(en.files.tokens, "tokens.txt");
-
-    // 3. Chinese Model (2025)
-    let zh = registry
-        .get_model("sherpa-onnx-streaming-zipformer-zh-int8-2025-06-30")
-        .expect("Missing zh model");
-    assert_eq!(
-        zh.display_title(),
-        "Chinese (Zipformer-int8) — 2025-06-30"
-    );
-    assert_eq!(
-        zh.source.sha256,
-        "5a2832047ea1f97dd0dc595b816c230c4bafad65cfc0341fa57517cadc50afd0"
-    );
-    assert_eq!(zh.files.encoder, "encoder.int8.onnx");
-    assert_eq!(zh.files.tokens, "tokens.txt");
 }
 
 #[test]

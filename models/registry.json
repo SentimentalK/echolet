@@ -9,8 +9,9 @@
       "language": "zh-en",
       "family": "online-transducer",
       "source": {
-        "url": "https://huggingface.co/GilgameshWind/X-ASR-zh-en",
-        "sha256": "689ff18c584d29910da37b6fe904db0c1489c9d1"
+        "bundled": true,
+        "repository": "https://huggingface.co/GilgameshWind/X-ASR-zh-en",
+        "revision": "689ff18c584d29910da37b6fe904db0c1489c9d1"
       },
       "files": {
         "encoder": "encoder-480ms.onnx",
@@ -20,56 +21,6 @@
       },
       "runtime": {
         "model_type": "zipformer2",
-        "sample_rate": 16000,
-        "feature_dim": 80,
-        "num_threads": 1,
-        "provider": "cpu",
-        "decoding_method": "greedy_search",
-        "max_active_paths": 4
-      }
-    },
-    {
-      "id": "sherpa-onnx-nemotron-speech-streaming-en-0.6b-560ms-int8-2026-04-25",
-      "display_name": "English (Nemotron 0.6B / 560ms)",
-      "version": "2026-04-25",
-      "language": "en",
-      "family": "online-transducer",
-      "source": {
-        "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-nemotron-speech-streaming-en-0.6b-560ms-int8-2026-04-25.tar.bz2",
-        "sha256": "78e2b79fcf7271553a74402a76b771b09ea40117a39566a79f52235b23db6358"
-      },
-      "files": {
-        "encoder": "encoder.int8.onnx",
-        "decoder": "decoder.int8.onnx",
-        "joiner": "joiner.int8.onnx",
-        "tokens": "tokens.txt"
-      },
-      "runtime": {
-        "sample_rate": 16000,
-        "feature_dim": 80,
-        "num_threads": 1,
-        "provider": "cpu",
-        "decoding_method": "greedy_search",
-        "max_active_paths": 4
-      }
-    },
-    {
-      "id": "sherpa-onnx-streaming-zipformer-zh-int8-2025-06-30",
-      "display_name": "Chinese (Zipformer-int8)",
-      "version": "2025-06-30",
-      "language": "zh",
-      "family": "online-transducer",
-      "source": {
-        "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-zh-int8-2025-06-30.tar.bz2",
-        "sha256": "5a2832047ea1f97dd0dc595b816c230c4bafad65cfc0341fa57517cadc50afd0"
-      },
-      "files": {
-        "encoder": "encoder.int8.onnx",
-        "decoder": "decoder.onnx",
-        "joiner": "joiner.int8.onnx",
-        "tokens": "tokens.txt"
-      },
-      "runtime": {
         "sample_rate": 16000,
         "feature_dim": 80,
         "num_threads": 1,

@@ -1,0 +1,49 @@
+name: Windows Build & Test
+
+on:
+  workflow_call:
+    inputs:
+      upload_release:
+        type: boolean
+        default: false
+        description: 'Upload to GitHub Release'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    name: Windows x86_64 Build & Test
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Cache Echolet Base Model Archive
+        uses: actions/cache@v4
+        with:
+          path: |
+            dist/echolet-model-*.tar.zst
+          key: echolet-base-model-${{ hashFiles('models/base-model.lock.json') }}
+
+      - name: Notice: Windows CI Architecture Ready
+        run: |
+          echo "Windows platform build step ready. Consumes same models/base-model.lock.json."

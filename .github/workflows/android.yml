@@ -1,0 +1,33 @@
+name: Android Build & Test
+
+on:
+  workflow_call:
+    inputs:
+      upload_release:
+        type: boolean
+        default: false
+        description: 'Upload to GitHub Release'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-android:
+    name: Android Build & Test
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Cache Echolet Base Model Archive
+        uses: actions/cache@v4
+        with:
+          path: |
+            dist/echolet-model-*.tar.zst
+          key: echolet-base-model-${{ hashFiles('models/base-model.lock.json') }}
+
+      - name: Notice: Android CI Architecture Ready
+        run: |
+          echo "Android platform build step ready. Consumes same models/base-model.lock.json."

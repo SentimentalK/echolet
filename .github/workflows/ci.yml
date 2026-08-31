@@ -1,0 +1,92 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  detect-changes:
+    name: Detect Changed Paths
+    runs-on: ubuntu-24.04
+    outputs:
+      core: ${{ steps.filter.outputs.core }}
+      linux: ${{ steps.filter.outputs.linux }}
+      windows: ${{ steps.filter.outputs.windows }}
+      macos: ${{ steps.filter.outputs.macos }}
+      android: ${{ steps.filter.outputs.android }}
+      model: ${{ steps.filter.outputs.model }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Path Filters
+        uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            core:
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'build.rs'
+              - 'src/*.rs'
+              - 'src/models/**'
+              - 'src/platform/mod.rs'
+              - 'licenses/**'
+            linux:
+              - 'src/platform/linux/**'
+              - 'scripts/linux/**'
+              - 'scripts/download-official-assets.sh'
+              - 'scripts/acquire-base-model.sh'
+              - 'scripts/stage-release.sh'
+              - '.github/workflows/linux.yml'
+            windows:
+              - 'src/platform/windows/**'
+              - 'scripts/windows/**'
+              - '.github/workflows/windows.yml'
+            macos:
+              - 'src/platform/macos/**'
+              - 'scripts/macos/**'
+              - '.github/workflows/macos.yml'
+            android:
+              - 'android/**'
+              - '.github/workflows/android.yml'
+            model:
+              - 'models/base-model.lock.json'
+
+  linux:
+    name: Linux CI
+    needs: detect-changes
+    if: needs.detect-changes.outputs.core == 'true' || needs.detect-changes.outputs.model == 'true' || needs.detect-changes.outputs.linux == 'true' || github.event_name == 'workflow_dispatch'
+    uses: ./.github/workflows/linux.yml
+    with:
+      upload_release: false
+
+  windows:
+    name: Windows CI
+    needs: detect-changes
+    if: needs.detect-changes.outputs.core == 'true' || needs.detect-changes.outputs.model == 'true' || needs.detect-changes.outputs.windows == 'true' || github.event_name == 'workflow_dispatch'
+    uses: ./.github/workflows/windows.yml
+    with:
+      upload_release: false
+
+  macos:
+    name: macOS CI
+    needs: detect-changes
+    if: needs.detect-changes.outputs.core == 'true' || needs.detect-changes.outputs.model == 'true' || needs.detect-changes.outputs.macos == 'true' || github.event_name == 'workflow_dispatch'
+    uses: ./.github/workflows/macos.yml
+    with:
+      upload_release: false
+
+  android:
+    name: Android CI
+    needs: detect-changes
+    if: needs.detect-changes.outputs.core == 'true' || needs.detect-changes.outputs.model == 'true' || needs.detect-changes.outputs.android == 'true' || github.event_name == 'workflow_dispatch'
+    uses: ./.github/workflows/android.yml
+    with:
+      upload_release: false

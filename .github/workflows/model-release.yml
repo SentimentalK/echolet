@@ -1,0 +1,74 @@
+name: Model Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      revision:
+        description: 'Echolet Model Revision (e.g. r1, r2)'
+        required: true
+        default: 'r1'
+
+permissions:
+  contents: write
+
+jobs:
+  package-and-publish-model:
+    name: Package & Publish Echolet Base Model
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install compression & verification tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y zstd jq curl
+
+      - name: Package base model artifact (.tar.zst)
+        run: |
+          ./scripts/package-base-model.sh "${{ github.event.inputs.revision }}"
+
+      - name: Identify archive and compute checksum
+        id: meta
+        run: |
+          PKG_NAME="echolet-model-xasr-zh-en-480ms-${{ github.event.inputs.revision }}"
+          ARCHIVE_PATH="dist/${PKG_NAME}.tar.zst"
+          SHA256=$(sha256sum "${ARCHIVE_PATH}" | awk '{print $1}')
+          TAG="model-xasr-zh-en-480ms-${{ github.event.inputs.revision }}"
+          
+          echo "tag=${TAG}" >> $GITHUB_OUTPUT
+          echo "archive_path=${ARCHIVE_PATH}" >> $GITHUB_OUTPUT
+          echo "sha256=${SHA256}" >> $GITHUB_OUTPUT
+
+      - name: Upload artifact to workflow
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.meta.outputs.tag }}
+          path: ${{ steps.meta.outputs.archive_path }}
+          if-no-files-found: error
+
+      - name: Publish GitHub Model Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: "Echolet Base Model ${{ steps.meta.outputs.tag }}"
+          body: |
+            ## Echolet Base Model (${{ steps.meta.outputs.tag }})
+            
+            * **Model ID**: `xasr-zh-en-480ms`
+            * **Echolet Revision**: `${{ github.event.inputs.revision }}`
+            * **Archive**: `${{ steps.meta.outputs.archive_path }}`
+            * **Archive SHA256**: `${{ steps.meta.outputs.sha256 }}`
+            
+            ```json
+            {
+              "schema_version": 1,
+              "id": "xasr-zh-en-480ms",
+              "revision": "${{ github.event.inputs.revision }}",
+              "archive": "${{ steps.meta.outputs.tag }}.tar.zst",
+              "url": "https://github.com/${{ github.repository }}/releases/download/${{ steps.meta.outputs.tag }}/${{ steps.meta.outputs.tag }}.tar.zst",
+              "sha256": "${{ steps.meta.outputs.sha256 }}"
+            }
+            ```
+          files: ${{ steps.meta.outputs.archive_path }}

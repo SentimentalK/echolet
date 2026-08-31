@@ -1,0 +1,76 @@
+name: Linux Build & Test
+
+on:
+  workflow_call:
+    inputs:
+      upload_release:
+        type: boolean
+        default: false
+        description: 'Upload to GitHub Release'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-linux:
+    name: Linux x86_64 Build & Test
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev pkg-config zstd jq curl
+
+      - name: Cache Cargo dependencies and build cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Cache Echolet Base Model Archive
+        uses: actions/cache@v4
+        with:
+          path: |
+            dist/echolet-model-*.tar.zst
+            /tmp/echolet-model-*.tar.zst
+          key: echolet-base-model-${{ hashFiles('models/base-model.lock.json') }}
+
+      - name: Acquire native runtime and frozen base model
+        run: |
+          ./scripts/download-official-assets.sh
+
+      - name: Run automated test suite
+        run: |
+          cargo test --release -- --nocapture
+
+      - name: Build and verify Linux release bundle
+        run: |
+          ./scripts/linux/build-release.sh
+
+      - name: Upload Linux artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: echolet-linux-x64
+          path: dist/echolet-linux-x64.tar.gz
+          if-no-files-found: error
+
+      - name: Publish to GitHub Release
+        if: ${{ inputs.upload_release }}
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/echolet-linux-x64.tar.gz

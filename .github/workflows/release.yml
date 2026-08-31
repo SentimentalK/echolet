@@ -1,0 +1,35 @@
+name: Application Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release-linux:
+    name: Release Linux
+    uses: ./.github/workflows/linux.yml
+    with:
+      upload_release: true
+
+  release-windows:
+    name: Release Windows
+    uses: ./.github/workflows/windows.yml
+    with:
+      upload_release: true
+
+  release-macos:
+    name: Release macOS
+    uses: ./.github/workflows/macos.yml
+    with:
+      upload_release: true
+
+  release-android:
+    name: Release Android
+    uses: ./.github/workflows/android.yml
+    with:
+      upload_release: true
