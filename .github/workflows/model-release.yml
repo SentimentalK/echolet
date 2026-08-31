@@ -70,12 +70,6 @@ jobs:
           ./scripts/download-official-assets.sh
           cargo test --release -- --nocapture
 
-      - name: Upload artifact to workflow run
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ steps.meta.outputs.tag }}
-          path: ${{ steps.meta.outputs.archive_path }}
-          if-no-files-found: error
 
       - name: Verify release immutability (fail only if asset already attached)
         if: (github.event_name == 'push' && github.ref == 'refs/heads/master') || (github.event_name == 'workflow_dispatch' && github.event.inputs.publish_release == 'true')
