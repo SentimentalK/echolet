@@ -11,8 +11,22 @@ on:
 
 jobs:
   build-macos:
-    name: macOS Build & Test
-    runs-on: macos-latest
+    name: macOS ${{ matrix.name }} Build & Test
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            name: Apple Silicon
+            runner: macos-15
+            target: aarch64-apple-darwin
+            artifact: echolet-macos-arm64
+          - arch: x64
+            name: Intel
+            runner: macos-15-intel
+            target: x86_64-apple-darwin
+            artifact: echolet-macos-x64
 
     steps:
       - name: Checkout repository
@@ -20,8 +34,14 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
 
-      - name: Cache Cargo dependencies
+      - name: Install macOS system dependencies
+        run: |
+          brew install zstd jq curl
+
+      - name: Cache Cargo dependencies and build cache
         uses: actions/cache@v4
         with:
           path: |
@@ -30,9 +50,9 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-${{ matrix.arch }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-
+            ${{ runner.os }}-${{ matrix.arch }}-cargo-
 
       - name: Cache Echolet Base Model Archive
         uses: actions/cache@v4
@@ -41,6 +61,20 @@ jobs:
             dist/model-*.tar.zst
           key: echolet-base-model-${{ hashFiles('models/base-model.lock.json') }}
 
-      - name: "Notice: macOS CI Architecture Ready"
+      - name: Acquire native runtime and frozen base model
         run: |
-          echo "macOS platform build step ready. Consumes same models/base-model.lock.json."
+          ./scripts/macos/prepare-assets.sh ${{ matrix.arch }}
+
+      - name: Run automated test suite
+        run: |
+          cargo test --release -- --nocapture
+
+      - name: Build and verify macOS release bundle
+        run: |
+          ./scripts/macos/build-release.sh ${{ matrix.arch }}
+
+      - name: Publish to GitHub Release
+        if: ${{ inputs.upload_release }}
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/${{ matrix.artifact }}.zip

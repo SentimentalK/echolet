@@ -17,6 +17,12 @@ pub fn resource_root() -> PathBuf {
 
     if let Ok(exe_path) = env::current_exe() {
         if let Some(app_dir) = exe_path.parent() {
+            // Check macOS .app bundle layout (Echolet.app/Contents/MacOS/echolet -> Echolet.app/Contents/Resources)
+            let macos_resources = app_dir.join("../Resources");
+            if macos_resources.join("models").exists() {
+                return macos_resources.canonicalize().unwrap_or(macos_resources);
+            }
+
             // Check production bundle layout (resource_root is next to binary)
             if app_dir.join("models").exists() {
                 return app_dir.to_path_buf();
@@ -44,7 +50,13 @@ pub fn resource_root() -> PathBuf {
 }
 
 pub fn runtime_lib_dir() -> PathBuf {
-    resource_root().join("runtime/lib")
+    let res = resource_root();
+    // In macOS .app bundle, Resources/../Frameworks exists
+    let frameworks = res.join("../Frameworks");
+    if frameworks.exists() {
+        return frameworks.canonicalize().unwrap_or(frameworks);
+    }
+    res.join("runtime/lib")
 }
 
 pub fn bundled_models_dir() -> PathBuf {

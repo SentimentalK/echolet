@@ -8,6 +8,18 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LOCK_FILE="${REPO_ROOT}/models/base-model.lock.json"
 TARGET_DIR="${1:-${REPO_ROOT}/.local-runtime/models/bilingual-zh-en}"
 
+compute_sha256() {
+    local file_path="$1"
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "${file_path}" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "${file_path}" | awk '{print $1}'
+    else
+        echo "[Error] Neither sha256sum nor shasum found on system!" >&2
+        exit 1
+    fi
+}
+
 if [[ ! -f "${LOCK_FILE}" ]]; then
     echo "[Error] Model lock file not found at: ${LOCK_FILE}" >&2
     exit 1
@@ -53,7 +65,7 @@ CANDIDATE_PATHS=(
 
 for cand in "${CANDIDATE_PATHS[@]}"; do
     if [[ -f "${cand}" ]]; then
-        cand_sha=$(sha256sum "${cand}" | awk '{print $1}')
+        cand_sha=$(compute_sha256 "${cand}")
         if [[ "${cand_sha}" == "${EXPECTED_SHA256}" ]]; then
             echo "--> Found verified local archive at: ${cand}"
             ARCHIVE_PATH="${cand}"
@@ -67,13 +79,17 @@ if [[ -z "${ARCHIVE_PATH}" ]]; then
     CAND_DOWNLOAD="${TMP_WORK_DIR}/${ARCHIVE_NAME}"
     echo "--> Downloading official model archive from: ${ARCHIVE_URL}..."
     if ! curl -L --fail --retry 3 --retry-delay 2 -s -o "${CAND_DOWNLOAD}" "${ARCHIVE_URL}"; then
+        if [[ "${ECHOLET_MODEL_STRICT:-0}" == "1" ]]; then
+            echo "[Error] Failed to download immutable base model from: ${ARCHIVE_URL} in strict mode!" >&2
+            exit 1
+        fi
         echo "[Notice] Echolet Release Asset not reachable yet. Building deterministic local package..."
         "${REPO_ROOT}/scripts/package-base-model.sh" "${MODEL_REV}"
         CAND_DOWNLOAD="${REPO_ROOT}/dist/${ARCHIVE_NAME}"
     fi
 
     echo "--> Verifying SHA256 checksum of model archive..."
-    calc_sha=$(sha256sum "${CAND_DOWNLOAD}" | awk '{print $1}')
+    calc_sha=$(compute_sha256 "${CAND_DOWNLOAD}")
     if [[ "${calc_sha}" != "${EXPECTED_SHA256}" ]]; then
         echo "[Error] SHA256 checksum mismatch for ${ARCHIVE_NAME}!" >&2
         echo "        Expected: ${EXPECTED_SHA256}" >&2
@@ -84,11 +100,16 @@ if [[ -z "${ARCHIVE_PATH}" ]]; then
     ARCHIVE_PATH="${CAND_DOWNLOAD}"
 fi
 
-# 4. Extract verified archive
+# 4. Extract verified archive (portable BSD/GNU tar + zstd pipe)
 echo "--> Extracting model archive into ${TARGET_DIR}..."
 EXTRACT_DIR="${TMP_WORK_DIR}/extracted"
 mkdir -p "${EXTRACT_DIR}"
-tar --zstd -xf "${ARCHIVE_PATH}" -C "${EXTRACT_DIR}"
+
+if command -v zstd >/dev/null 2>&1; then
+    zstd -dc "${ARCHIVE_PATH}" | tar -xf - -C "${EXTRACT_DIR}"
+else
+    tar --zstd -xf "${ARCHIVE_PATH}" -C "${EXTRACT_DIR}"
+fi
 
 PACKAGE_SUBDIR="${EXTRACT_DIR}/model-${MODEL_ID}-${MODEL_REV}"
 if [[ ! -d "${PACKAGE_SUBDIR}" ]]; then
