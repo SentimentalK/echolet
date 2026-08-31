@@ -34,13 +34,30 @@ fi
 # 3. Check dynamic library resolution (otool -L)
 if command -v otool >/dev/null 2>&1; then
     echo "--> Checking dynamic library dependencies via otool..."
-    OTOOL_OUTPUT=$(otool -L "${APP_DIR}/Contents/MacOS/echolet" 2>&1)
-    echo "${OTOOL_OUTPUT}"
 
-    if echo "${OTOOL_OUTPUT}" | grep -E "/Users/|/home/|\.local-runtime|/usr/local/Cellar|/opt/homebrew" >/dev/null; then
-        echo "[Error] Leaked developer or build paths detected in binary dependencies!" >&2
-        exit 1
-    fi
+    check_dependencies() {
+        local binary="$1"
+        local output deps
+
+        output=$(otool -L "${binary}" 2>&1)
+        echo "${output}"
+
+        # First line is the target binary itself, not a dependency.
+        deps=$(printf '%s\n' "${output}" | sed '1d')
+
+        if printf '%s\n' "${deps}" | grep -E "/Users/|/home/|\.local-runtime|/usr/local/Cellar|/opt/homebrew" >/dev/null; then
+            echo "[Error] Leaked developer or build paths detected in: ${binary}!" >&2
+            exit 1
+        fi
+    }
+
+    check_dependencies "${APP_DIR}/Contents/MacOS/echolet"
+
+    for dylib in "${APP_DIR}/Contents/Frameworks"/*.dylib*; do
+        if [[ -f "${dylib}" ]]; then
+            check_dependencies "${dylib}"
+        fi
+    done
 fi
 
 # 4. Check model files, manifest, and registry
