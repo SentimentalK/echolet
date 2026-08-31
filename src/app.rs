@@ -1,6 +1,6 @@
 use crate::actions::AppAction;
 use crate::asr::{OnlineRecognizer, OnlineStream};
-use crate::audio::{AudioChunk, AudioInput};
+use crate::audio::{AudioChunk, AudioInput, AudioSource, AudioStarter};
 use crate::beep::{beep_start, beep_stop};
 use crate::diff::PartialSession;
 use crate::models::{download_and_install_model, ModelManager};
@@ -10,13 +10,19 @@ use crossbeam_channel::{unbounded, Receiver, Sender};
 use std::sync::Arc;
 use std::time::Duration;
 
+fn default_audio_starter() -> AudioStarter {
+    Box::new(|tx| AudioInput::start(tx).map(|ai| Box::new(ai) as Box<dyn AudioSource>))
+}
+
 pub struct App {
     pub state: AppState,
     pub model_manager: ModelManager,
     _recognizer: Arc<OnlineRecognizer>,
     stream: OnlineStream,
     session: PartialSession,
-    _audio_input: Option<AudioInput>,
+    _audio_source: Option<Box<dyn AudioSource>>,
+    audio_starter: AudioStarter,
+    audio_tx: Sender<AudioChunk>,
     audio_rx: Receiver<AudioChunk>,
     action_rx: Receiver<AppAction>,
     action_tx: Option<Sender<AppAction>>,
@@ -30,9 +36,9 @@ impl App {
         action_rx: Receiver<AppAction>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let (audio_tx, audio_rx) = unbounded::<AudioChunk>();
-        let audio_input = AudioInput::start(audio_tx)?;
-        println!("[Audio] Microphone capture active (continuous stream).");
-        Self::new_with_audio(platform, action_rx, audio_rx, Some(audio_input))
+        let starter = default_audio_starter();
+        println!("[Audio] Microphone deferred until Listening starts.");
+        Self::new_internal(platform, None, action_rx, audio_rx, audio_tx, starter, None)
     }
 
     pub fn new_with_tx(
@@ -41,9 +47,17 @@ impl App {
         action_rx: Receiver<AppAction>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let (audio_tx, audio_rx) = unbounded::<AudioChunk>();
-        let audio_input = AudioInput::start(audio_tx)?;
-        println!("[Audio] Microphone capture active (continuous stream).");
-        Self::new_internal(platform, Some(action_tx), action_rx, audio_rx, Some(audio_input))
+        let starter = default_audio_starter();
+        println!("[Audio] Microphone deferred until Listening starts.");
+        Self::new_internal(
+            platform,
+            Some(action_tx),
+            action_rx,
+            audio_rx,
+            audio_tx,
+            starter,
+            None,
+        )
     }
 
     pub fn new_with_audio(
@@ -52,7 +66,39 @@ impl App {
         audio_rx: Receiver<AudioChunk>,
         audio_input: Option<AudioInput>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        Self::new_internal(platform, None, action_rx, audio_rx, audio_input)
+        let (audio_tx, _) = unbounded::<AudioChunk>();
+        let starter: AudioStarter = Box::new(|_tx| Ok(Box::new(()) as Box<dyn AudioSource>));
+        let initial_source: Option<Box<dyn AudioSource>> =
+            audio_input.map(|ai| Box::new(ai) as Box<dyn AudioSource>);
+        Self::new_internal(
+            platform,
+            None,
+            action_rx,
+            audio_rx,
+            audio_tx,
+            starter,
+            initial_source,
+        )
+    }
+
+    pub fn new_with_starter(
+        platform: PlatformRuntime,
+        action_tx: Option<Sender<AppAction>>,
+        action_rx: Receiver<AppAction>,
+        audio_rx: Receiver<AudioChunk>,
+        audio_tx: Sender<AudioChunk>,
+        starter: AudioStarter,
+        initial_source: Option<Box<dyn AudioSource>>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::new_internal(
+            platform,
+            action_tx,
+            action_rx,
+            audio_rx,
+            audio_tx,
+            starter,
+            initial_source,
+        )
     }
 
     pub fn new_internal(
@@ -60,17 +106,25 @@ impl App {
         action_tx: Option<Sender<AppAction>>,
         action_rx: Receiver<AppAction>,
         audio_rx: Receiver<AudioChunk>,
-        audio_input: Option<AudioInput>,
+        audio_tx: Sender<AudioChunk>,
+        audio_starter: AudioStarter,
+        audio_source: Option<Box<dyn AudioSource>>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        let model_manager = ModelManager::new().map_err(|e| format!("Failed to initialize ModelManager: {}", e))?;
-        let active_model = model_manager.get_active_model().map_err(|e| format!("Failed to get active model: {}", e))?;
+        let model_manager = ModelManager::new()
+            .map_err(|e| format!("Failed to initialize ModelManager: {}", e))?;
+        let active_model = model_manager
+            .get_active_model()
+            .map_err(|e| format!("Failed to get active model: {}", e))?;
 
         println!(
             "[ASR] Active model: {} ({}) at {:?}",
             active_model.manifest.display_name, active_model.id, active_model.dir
         );
 
-        let recognizer = Arc::new(OnlineRecognizer::from_manifest(&active_model.dir, &active_model.manifest)?);
+        let recognizer = Arc::new(OnlineRecognizer::from_manifest(
+            &active_model.dir,
+            &active_model.manifest,
+        )?);
         let stream = recognizer.create_stream()?;
         println!("[ASR] Recognizer initialized successfully.");
 
@@ -84,13 +138,19 @@ impl App {
             _recognizer: recognizer,
             stream,
             session: PartialSession::new(),
-            _audio_input: audio_input,
+            _audio_source: audio_source,
+            audio_starter,
+            audio_tx,
             audio_rx,
             action_rx,
             action_tx,
             platform,
             last_logged_text: String::new(),
         })
+    }
+
+    pub fn is_audio_active(&self) -> bool {
+        self._audio_source.is_some()
     }
 
     pub fn notify_models(&self) {
@@ -101,6 +161,23 @@ impl App {
         if self.state.listening {
             return;
         }
+
+        // 1. Open microphone on demand
+        match (self.audio_starter)(self.audio_tx.clone()) {
+            Ok(source) => {
+                self._audio_source = Some(source);
+                println!("[Audio] Microphone capture started.");
+            }
+            Err(err) => {
+                eprintln!(
+                    "[Audio] Failed to open microphone: {}. Remaining in Standby.",
+                    err
+                );
+                return;
+            }
+        }
+
+        // 2. Transition state
         self.finalize_current_segment();
         self.state.listening = true;
         beep_start();
@@ -112,7 +189,18 @@ impl App {
         if !self.state.listening {
             return;
         }
+
+        // 1. Finalize current segment
         self.finalize_current_segment();
+
+        // 2. Drop audio capture stream (releases cpal::Stream & hardware device)
+        self._audio_source = None;
+
+        // 3. Drain residual audio chunks from channel
+        while self.audio_rx.try_recv().is_ok() {}
+        println!("[Audio] Microphone capture stopped and released.");
+
+        // 4. Transition state
         self.state.listening = false;
         beep_stop();
         self.platform.handle.set_listening(false);
@@ -153,16 +241,17 @@ impl App {
                 candidate.id, candidate.dir
             );
 
-            let new_rec = match OnlineRecognizer::from_manifest(&candidate.dir, &candidate.manifest) {
-                Ok(rec) => Arc::new(rec),
-                Err(err) => {
-                    eprintln!(
+            let new_rec =
+                match OnlineRecognizer::from_manifest(&candidate.dir, &candidate.manifest) {
+                    Ok(rec) => Arc::new(rec),
+                    Err(err) => {
+                        eprintln!(
                         "[Model] Error: Failed to initialize candidate model '{}': {}. Retaining active model.",
                         model_id, err
                     );
-                    return false;
-                }
-            };
+                        return false;
+                    }
+                };
 
             let new_stream = match new_rec.create_stream() {
                 Ok(st) => st,
@@ -207,7 +296,10 @@ impl App {
             let dl_model_id = model_id.to_string();
 
             std::thread::spawn(move || {
-                println!("[Model] Background download thread started for '{}'...", dl_model_id);
+                println!(
+                    "[Model] Background download thread started for '{}'...",
+                    dl_model_id
+                );
                 let result = download_and_install_model(&entry, &target_dir);
                 let (success, error) = match result {
                     Ok(_) => (true, None),
@@ -249,7 +341,10 @@ impl App {
             } => {
                 self.model_manager.downloading.remove(&model_id);
                 if success {
-                    println!("[Model] Download finished for '{}'. Updating installed models...", model_id);
+                    println!(
+                        "[Model] Download finished for '{}'. Updating installed models...",
+                        model_id
+                    );
                     self.model_manager.discover_installed();
                     self.notify_models();
                     if !self.state.listening {

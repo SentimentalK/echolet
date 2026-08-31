@@ -1,6 +1,7 @@
 use crossbeam_channel::unbounded;
 use echolet::actions::AppAction;
 use echolet::app::App;
+use echolet::audio::{AudioChunk, AudioSource, AudioStarter};
 use echolet::platform::{PlatformHandle, PlatformRuntime, TextInjector};
 use echolet::state::AppState;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -68,6 +69,48 @@ fn create_test_app() -> (
     (app, action_tx, listening_history, shutdown_called, diffs)
 }
 
+fn create_test_app_with_starter(
+    starter: AudioStarter,
+) -> (
+    App,
+    crossbeam_channel::Sender<AppAction>,
+    Arc<Mutex<Vec<bool>>>,
+) {
+    let (action_tx, action_rx) = unbounded::<AppAction>();
+    let listening_history = Arc::new(Mutex::new(Vec::new()));
+    let shutdown_called = Arc::new(AtomicBool::new(false));
+    let diffs = Arc::new(Mutex::new(Vec::new()));
+
+    let fake_handle = Box::new(FakePlatformHandle {
+        listening_history: listening_history.clone(),
+        shutdown_called: shutdown_called.clone(),
+    });
+
+    let fake_injector = Box::new(FakeInjector {
+        diffs: diffs.clone(),
+    });
+
+    let platform = PlatformRuntime {
+        injector: fake_injector,
+        handle: fake_handle,
+        _resources: Box::new(()),
+    };
+
+    let (audio_tx, audio_rx) = unbounded::<AudioChunk>();
+    let app = App::new_with_starter(
+        platform,
+        Some(action_tx.clone()),
+        action_rx,
+        audio_rx,
+        audio_tx,
+        starter,
+        None,
+    )
+    .expect("Failed to create App with custom starter");
+
+    (app, action_tx, listening_history)
+}
+
 #[test]
 fn test_app_state_defaults() {
     let state = AppState::new();
@@ -128,7 +171,10 @@ fn test_quit_action_terminates_running() {
     app.tick();
 
     assert!(!app.state.running, "Quit action must set running = false");
-    assert!(shutdown.load(Ordering::SeqCst), "Quit action must notify platform shutdown");
+    assert!(
+        shutdown.load(Ordering::SeqCst),
+        "Quit action must notify platform shutdown"
+    );
 }
 
 #[test]
@@ -143,5 +189,69 @@ fn test_endpoint_segment_finalization_invariant() {
     app.finalize_current_segment();
 
     // Invariant check: listening MUST remain true across sentence boundaries
-    assert!(app.state.listening, "Listening state must remain TRUE after endpoint finalization");
+    assert!(
+        app.state.listening,
+        "Listening state must remain TRUE after endpoint finalization"
+    );
+}
+
+#[test]
+fn test_mic_dynamic_lifecycle_transitions() {
+    let (mut app, action_tx, history, _, _) = create_test_app();
+
+    // 1. Initial state: Standby, microphone is NOT open
+    assert!(!app.state.listening);
+    assert!(!app.is_audio_active());
+
+    // 2. Start listening: microphone opens on demand
+    action_tx.send(AppAction::StartListening).unwrap();
+    app.tick();
+    assert!(app.state.listening);
+    assert!(app.is_audio_active());
+
+    // 3. Stop listening: microphone is dropped and released
+    action_tx.send(AppAction::StopListening).unwrap();
+    app.tick();
+    assert!(!app.state.listening);
+    assert!(!app.is_audio_active());
+
+    // 4. Toggle back to listening: microphone re-opens cleanly
+    action_tx.send(AppAction::ToggleListening).unwrap();
+    app.tick();
+    assert!(app.state.listening);
+    assert!(app.is_audio_active());
+
+    // 5. Toggle to stop: microphone dropped again
+    action_tx.send(AppAction::ToggleListening).unwrap();
+    app.tick();
+    assert!(!app.state.listening);
+    assert!(!app.is_audio_active());
+}
+
+#[test]
+fn test_mic_start_failure_graceful_fallback() {
+    // Inject an AudioStarter that simulates hardware error (e.g. mic unplugged / device busy)
+    let failing_starter: AudioStarter =
+        Box::new(|_tx| Err("Device busy or disconnected".to_string()));
+
+    let (mut app, action_tx, history) = create_test_app_with_starter(failing_starter);
+
+    assert!(!app.state.listening);
+    assert!(!app.is_audio_active());
+
+    // Attempt to start listening
+    action_tx.send(AppAction::StartListening).unwrap();
+    app.tick();
+
+    // Invariant: Failure to open mic must keep app safely in Standby without crashing
+    assert!(
+        !app.state.listening,
+        "App must remain in Standby when mic open fails"
+    );
+    assert!(
+        !app.is_audio_active(),
+        "Audio capture must not be active when mic open fails"
+    );
+    // UI history should only have the initial false, no state change occurred
+    assert_eq!(*history.lock().unwrap(), vec![false]);
 }

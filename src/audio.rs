@@ -6,10 +6,20 @@ pub struct AudioChunk {
     pub sample_rate: u32,
 }
 
+pub trait AudioSource: 'static {
+    // Dropping this instance stops and releases the underlying audio capture stream
+}
+
+pub type AudioStarter =
+    Box<dyn Fn(Sender<AudioChunk>) -> Result<Box<dyn AudioSource>, String>>;
+
 pub struct AudioInput {
     _stream: cpal::Stream,
     pub sample_rate: u32,
 }
+
+impl AudioSource for AudioInput {}
+impl AudioSource for () {}
 
 impl AudioInput {
     pub fn start(tx: Sender<AudioChunk>) -> Result<Self, String> {
