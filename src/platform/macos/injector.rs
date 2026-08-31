@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 use crate::platform::macos::ui::MacUiCommand;
 use crate::platform::TextInjector;
 use cocoa::base::{id, nil};
@@ -13,14 +15,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
-#[repr(C)]
-struct __CGEventSource;
-type CGEventSourceRef = *mut __CGEventSource;
-
-#[repr(C)]
-struct __CGEvent;
-type CGEventRef = *mut __CGEvent;
-
+type CGEventSourceRef = *mut c_void;
+type CGEventRef = *mut c_void;
 type CGKeyCode = u16;
 type CGEventTapLocation = u32;
 type CGEventFlags = u64;

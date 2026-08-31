@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 use crate::actions::AppAction;
 use crate::paths;
 use crate::platform::macos::hotkey::register_global_f10;
@@ -5,15 +7,14 @@ use crate::platform::macos::injector::execute_diff;
 use crate::platform::PlatformHandle;
 use cocoa::appkit::{
     NSApp, NSApplication, NSApplicationActivationPolicyAccessory, NSButton,
-    NSEventModifierFlags, NSMenu, NSMenuItem, NSStatusBar, NSStatusItem,
-    NSVariableStatusItemLength,
+    NSMenu, NSMenuItem, NSStatusBar, NSStatusItem, NSVariableStatusItemLength,
 };
 use cocoa::base::{id, nil, selector};
-use cocoa::foundation::{NSAutoreleasePool, NSPoint, NSRect, NSSize, NSString};
+use cocoa::foundation::{NSAutoreleasePool, NSString};
 use core_foundation::base::kCFAllocatorDefault;
 use core_foundation::date::CFAbsoluteTimeGetCurrent;
 use core_foundation::runloop::{
-    kCFRunLoopCommonModes, CFRunLoopAddTimer, CFRunLoopGetCurrent, CFRunLoopRef,
+    kCFRunLoopCommonModes, CFRunLoopAddTimer, CFRunLoopGetCurrent,
     CFRunLoopTimerContext, CFRunLoopTimerCreate, CFRunLoopTimerRef,
 };
 use crossbeam_channel::{Receiver, Sender};

@@ -51,7 +51,6 @@ pub fn start_control_listener(
     let listener = UnixListener::bind(&sock)?;
     let running = Arc::new(AtomicBool::new(true));
     let running_clone = running.clone();
-    let sock_clone = sock.clone();
 
     thread::Builder::new()
         .name("echolet-mac-ipc".into())

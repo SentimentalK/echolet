@@ -52,6 +52,12 @@ fn main() {
         .unwrap_or(false);
 
     if target_os == "macos" {
+        println!("cargo:rustc-link-lib=framework=Carbon");
+        println!("cargo:rustc-link-lib=framework=Cocoa");
+        println!("cargo:rustc-link-lib=framework=CoreGraphics");
+        println!("cargo:rustc-link-lib=framework=CoreFoundation");
+        println!("cargo:rustc-link-lib=framework=ApplicationServices");
+
         if is_bundle_build {
             println!("cargo:rustc-link-arg=-Wl,-rpath,@executable_path/../Frameworks");
         } else {

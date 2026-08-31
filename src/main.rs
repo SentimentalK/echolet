@@ -1,12 +1,17 @@
-use crossbeam_channel::unbounded;
-use echolet::actions::AppAction;
-use echolet::app::App;
-use echolet::paths;
 use echolet::platform;
 use std::env;
 #[cfg(not(target_os = "macos"))]
+use crossbeam_channel::unbounded;
+#[cfg(not(target_os = "macos"))]
+use echolet::actions::AppAction;
+#[cfg(not(target_os = "macos"))]
+use echolet::app::App;
+#[cfg(not(target_os = "macos"))]
+use echolet::paths;
+#[cfg(not(target_os = "macos"))]
 use std::process::{Command, Stdio};
 
+#[cfg(not(target_os = "macos"))]
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
