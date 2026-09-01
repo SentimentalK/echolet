@@ -1,6 +1,7 @@
 use crate::actions::AppAction;
 use crate::paths;
 use crate::platform::windows::hotkey::{register_f10, unregister_f10, HOTKEY_F10_ID};
+use crate::platform::windows::icon;
 use crate::platform::PlatformHandle;
 use crossbeam_channel::{Receiver, Sender};
 use std::mem::size_of;
@@ -16,11 +17,11 @@ use windows_sys::Win32::UI::Shell::{
     NIM_MODIFY, NOTIFYICONDATAW,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu,
-    DestroyWindow, DispatchMessageW, GetCursorPos, GetMessageW, LoadIconW, MSG,
+    AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyIcon, DestroyMenu,
+    DestroyWindow, DispatchMessageW, GetCursorPos, GetMessageW, HICON, MSG,
     PostMessageW, PostQuitMessage, RegisterClassW, RegisterWindowMessageW,
     SetForegroundWindow, TrackPopupMenuEx, TranslateMessage, HWND_MESSAGE, HMENU,
-    IDI_APPLICATION, MF_DISABLED, MF_GRAYED, MF_SEPARATOR, MF_STRING, TPM_NONOTIFY,
+    MF_DISABLED, MF_GRAYED, MF_SEPARATOR, MF_STRING, TPM_NONOTIFY,
     TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_APP, WM_CONTEXTMENU, WM_DESTROY, WM_HOTKEY,
     WM_LBUTTONUP, WM_RBUTTONUP, WNDCLASSW, SW_SHOWNORMAL,
 };
@@ -114,6 +115,8 @@ struct UiState {
     history_enabled: bool,
     model_name: String,
     taskbar_created_msg: u32,
+    icon_standby: HICON,
+    icon_listening: HICON,
 }
 
 static mut UI_STATE_PTR: *mut UiState = ptr::null_mut();
@@ -130,7 +133,12 @@ unsafe extern "system" fn wnd_proc(
     let state = &mut *UI_STATE_PTR;
 
     if msg == state.taskbar_created_msg {
-        update_tray_icon(hwnd, state.listening, NIM_ADD);
+        let icon = if state.listening {
+            state.icon_listening
+        } else {
+            state.icon_standby
+        };
+        update_tray_icon(hwnd, state.listening, NIM_ADD, icon);
         return 0;
     }
 
@@ -140,7 +148,12 @@ unsafe extern "system" fn wnd_proc(
                 match cmd {
                     WindowsUiCommand::SetListening(listening) => {
                         state.listening = listening;
-                        update_tray_icon(hwnd, listening, NIM_MODIFY);
+                        let icon = if listening {
+                            state.icon_listening
+                        } else {
+                            state.icon_standby
+                        };
+                        update_tray_icon(hwnd, listening, NIM_MODIFY, icon);
                     }
                     WindowsUiCommand::UpdateHistoryState(enabled) => {
                         state.history_enabled = enabled;
@@ -183,8 +196,14 @@ unsafe extern "system" fn wnd_proc(
             0
         }
         WM_DESTROY => {
-            update_tray_icon(hwnd, false, NIM_DELETE);
+            update_tray_icon(hwnd, false, NIM_DELETE, state.icon_standby);
             unregister_f10(hwnd);
+            if !state.icon_standby.is_null() {
+                DestroyIcon(state.icon_standby);
+            }
+            if !state.icon_listening.is_null() {
+                DestroyIcon(state.icon_listening);
+            }
             PostQuitMessage(0);
             0
         }
@@ -196,14 +215,14 @@ fn to_wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
-unsafe fn update_tray_icon(hwnd: HWND, listening: bool, action: u32) {
+unsafe fn update_tray_icon(hwnd: HWND, listening: bool, action: u32, icon: HICON) {
     let mut nid: NOTIFYICONDATAW = std::mem::zeroed();
     nid.cbSize = size_of::<NOTIFYICONDATAW>() as u32;
     nid.hWnd = hwnd;
     nid.uID = TRAY_ICON_ID;
     nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
     nid.uCallbackMessage = WM_TRAY_CALLBACK;
-    nid.hIcon = LoadIconW(ptr::null_mut(), IDI_APPLICATION);
+    nid.hIcon = icon;
 
     let tip = if listening {
         "Echolet (Listening - Press F10 to stop)"
@@ -373,6 +392,12 @@ pub fn spawn_ui_thread(
 
             let taskbar_msg = RegisterWindowMessageW(to_wide("TaskbarCreated").as_ptr());
 
+            let icon_standby = icon::create_echolet_icon(false);
+            let icon_listening = icon::create_echolet_icon(true);
+            if icon_standby.is_null() || icon_listening.is_null() {
+                eprintln!("[Platform] Failed to create custom tray icon(s).");
+            }
+
             let mut state = UiState {
                 action_tx,
                 cmd_rx,
@@ -380,12 +405,14 @@ pub fn spawn_ui_thread(
                 history_enabled: false,
                 model_name: "Chinese + English (X-ASR / 480ms)".into(),
                 taskbar_created_msg: taskbar_msg,
+                icon_standby,
+                icon_listening,
             };
 
             UI_STATE_PTR = &mut state;
 
-            // 1. Add tray icon
-            update_tray_icon(hwnd, false, NIM_ADD);
+            // 1. Add tray icon (standby state)
+            update_tray_icon(hwnd, false, NIM_ADD, state.icon_standby);
 
             // 2. Register F10 hotkey
             register_f10(hwnd);

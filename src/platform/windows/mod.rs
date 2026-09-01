@@ -1,5 +1,6 @@
 pub mod control;
 pub mod hotkey;
+pub mod icon;
 pub mod injector;
 pub mod singleton;
 pub mod ui;
