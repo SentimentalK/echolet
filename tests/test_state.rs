@@ -1,7 +1,7 @@
 use crossbeam_channel::unbounded;
 use echolet::actions::AppAction;
 use echolet::app::App;
-use echolet::audio::{AudioChunk, AudioSource, AudioStarter};
+use echolet::audio::{AudioChunk, AudioStarter};
 use echolet::platform::{PlatformHandle, PlatformRuntime, TextInjector};
 use echolet::state::AppState;
 use std::path::{Path, PathBuf};
@@ -229,7 +229,7 @@ fn test_endpoint_segment_finalization_invariant() {
 
 #[test]
 fn test_mic_dynamic_lifecycle_transitions() {
-    let (mut app, action_tx, history, _, _, _, _) = create_test_app();
+    let (mut app, action_tx, _history, _, _, _, _) = create_test_app();
 
     // 1. Initial state: Standby, microphone is NOT open
     assert!(!app.state.listening);

@@ -51,6 +51,7 @@ jobs:
       - name: Run automated test suite
         shell: pwsh
         run: |
+          $env:PATH = "$PWD\.local-runtime\runtime\lib;$env:PATH"
           cargo test --release -- --nocapture
 
       - name: Build and verify Windows release package
