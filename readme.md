@@ -1,15 +1,15 @@
 # Echolet
 
 <p align="center">
-  <strong>Fast, private, local voice typing for your desktop.</strong><br>
-  Press <kbd>F10</kbd>, speak, and text flows natively into your active application.
+  <strong>Local AI Voice Typing for Windows, macOS & Linux</strong><br>
+  Real-time, private, on-device speech-to-text. Press <kbd>F10</kbd>, speak, and text flows directly into your active app.
 </p>
 
 <p align="center">
+  <img src="https://img.shields.io/badge/AI-Local%20AI-blueviolet?style=flat-square" alt="Local AI">
+  <img src="https://img.shields.io/badge/Inference-100%25%20On--Device-success?style=flat-square" alt="100% On-Device">
   <a href="https://github.com/SentimentalK/echolet/releases"><img src="https://img.shields.io/github/v/release/SentimentalK/echolet?include_prereleases&style=flat-square" alt="Release"></a>
-  <a href="https://github.com/SentimentalK/echolet/actions"><img src="https://img.shields.io/github/actions/workflow/status/SentimentalK/echolet/ci.yml?branch=master&style=flat-square" alt="CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg?style=flat-square" alt="License"></a>
-  <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey?style=flat-square" alt="Platform">
 </p>
 
 <p align="center">
@@ -20,10 +20,10 @@
 
 ## Highlights
 
-- **100% Local & Private**: No cloud dependencies, no subscriptions, and zero audio uploads. Everything runs locally on your CPU.
-- **Native OS Text Injection**: Injects transcribed text directly into any active editor, browser, terminal, or text field without copy-pasting.
-- **Bilingual & Tech-Friendly**: Powered by the [X-ASR](https://github.com/GilgameshWind) Zipformer streaming model. Seamlessly recognizes mixed Chinese and English as well as technical developer terms (e.g., *"Check 这个 Docker 容器的 logs"*).
-- **Real-Time Streaming & Diff Correction**: Words appear in real-time as you speak, with instant diff-based backtracking and automatic corrections.
+- **100% On-Device AI**: Speech recognition runs locally on your CPU. No cloud inference, no API key, no account, and zero audio uploads.
+- **Native OS Text Injection**: Injects transcribed text directly into any focused editor, browser, terminal, or app without copy-pasting.
+- **Powered by Local AI**: Runs the [X-ASR](https://github.com/GilgameshWind) bilingual Zipformer streaming speech model entirely on CPU, seamlessly recognizing mixed Chinese/English and developer terminology (e.g., *"Check 这个 Docker 容器的 logs"*).
+- **Real-Time Streaming & Diff Correction**: Words stream onto the screen as you speak, with instant diff-based backtracking and automatic corrections.
 - **Cross-Platform**: Lightweight background utility with system tray integration on Windows, macOS, and Linux.
 
 ---
@@ -33,14 +33,16 @@
 ### 1. Download
 Download the latest pre-built package for your operating system from [GitHub Releases](https://github.com/SentimentalK/echolet/releases).
 
-| Platform | Package | Notes |
+| Platform | Package | Architecture |
 | :--- | :--- | :--- |
-| **Windows** | `echolet-windows-x86_64.zip` | Extract and run `echolet.exe` |
-| **macOS (Apple Silicon)** | `echolet-macos-aarch64.tar.gz` | Grants Accessibility & Microphone permissions |
-| **Linux (x86_64)** | `echolet-linux-x86_64.tar.gz` | Supports GNOME, KDE, X11, and Wayland |
+| **Windows** | `echolet-windows-x64.zip` | x86_64 |
+| **macOS** | `echolet-macos-arm64.zip` | Apple Silicon (M1/M2/M3/M4) |
+| **macOS** | `echolet-macos-x64.zip` | Intel x86_64 |
+| **Linux** | `echolet-linux-x64.tar.gz` | x86_64 |
+| **Linux** | `echolet-linux-arm64.tar.gz` | ARM64 |
 
 ### 2. Launch & Use
-1. **Launch**: Run `echolet`. It will start minimized in your system tray / notification area.
+1. **Launch**: Run `echolet`. It starts minimized in your system tray / menu bar.
 2. **Focus**: Click into any text field (VS Code, browser, terminal, Slack, Notepad, etc.).
 3. **Voice Type**:
    - Press <kbd>F10</kbd> (or click the tray menu) to **Start Listening**.
@@ -99,7 +101,7 @@ echolet -f
 [ Microphone ] ──> [ sherpa-onnx / X-ASR ] ──> [ Diff Correction Engine ] ──> [ OS Keystroke Injection ]
 ```
 
-- **Core Engine**: Written in [Rust](https://www.rust-lang.org/) for memory safety, near-instant startup, and minimal resource usage.
+- **Core Engine**: Written in [Rust](https://www.rust-lang.org/) for memory safety, instant startup, and minimal CPU footprint.
 - **Inference Runtime**: Powered by [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) using [ONNX Runtime](https://onnxruntime.ai/).
 - **Acoustic Model**: [X-ASR](https://github.com/GilgameshWind) bilingual Zipformer streaming model (480ms chunk), optimized for mixed Chinese/English speech and coding terminology.
 - **Diff Correction**: Live real-time diff tracker that emits dynamic backspaces and character insertions to adjust partial recognitions on the fly.
@@ -108,7 +110,7 @@ echolet -f
 
 ## Privacy & Configuration
 
-- **Audio Privacy**: Audio data is processed strictly in memory and discarded immediately after transcription. No audio is ever recorded or uploaded.
+- **Audio Privacy**: Audio data is processed strictly in memory and discarded immediately after transcription. No audio is ever stored or uploaded.
 - **Configuration**: Stored at `~/.echolet/config.json`.
 - **History Storage**: Transcription history is disabled by default. You can opt-in via tray menu settings or configuration.
 

@@ -1,15 +1,15 @@
 # Echolet
 
 <p align="center">
-  <strong>快速、私密、纯本地运行的桌面端语音输入法。</strong><br>
-  按下 <kbd>F10</kbd>，开口说话，文字即可实时上屏至当前激活的任何应用。
+  <strong>适用于 Windows、macOS 与 Linux 的本地端侧 AI 语音输入法</strong><br>
+  实时、私密、完全离线端侧语音转文字。按下 <kbd>F10</kbd>，开口说话，文字直接上屏至当前激活的应用。
 </p>
 
 <p align="center">
+  <img src="https://img.shields.io/badge/AI-Local%20AI-blueviolet?style=flat-square" alt="Local AI">
+  <img src="https://img.shields.io/badge/Inference-100%25%20On--Device-success?style=flat-square" alt="100% On-Device">
   <a href="https://github.com/SentimentalK/echolet/releases"><img src="https://img.shields.io/github/v/release/SentimentalK/echolet?include_prereleases&style=flat-square" alt="Release"></a>
-  <a href="https://github.com/SentimentalK/echolet/actions"><img src="https://img.shields.io/github/actions/workflow/status/SentimentalK/echolet/ci.yml?branch=master&style=flat-square" alt="CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg?style=flat-square" alt="License"></a>
-  <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey?style=flat-square" alt="Platform">
 </p>
 
 <p align="center">
@@ -20,9 +20,9 @@
 
 ## 核心特性
 
-- **100% 本地离线 & 隐私安全**：无需云端连接、无订阅制、零音频上传。模型完全在本地 CPU 上运行。
+- **100% 端侧 AI 离线运行**：语音识别模型完全在本地 CPU 上运行，无需云端推理、无 API 密钥、无账号绑定、无订阅制、零音频上传。
 - **原生文本无缝上屏**：直接向当前聚焦的代码编辑器、浏览器、终端或任意文本框模拟输入，无需手动复制粘贴。
-- **中英混读 & 开发者友好**：搭载 [X-ASR](https://github.com/GilgameshWind) Zipformer 流式模型，流畅识别中英文混合语句及技术开发词汇（例如：“Check 这个 Docker 容器的 logs”）。
+- **本地 AI 模型驱动**：搭载 [X-ASR](https://github.com/GilgameshWind) Zipformer 中英双语流式模型，纯本地 CPU 推理，流畅识别中英文混合语句及技术开发词汇（例如：“Check 这个 Docker 容器的 logs”）。
 - **实时流式响应 & 智能 Diff 回改**：边说边出字，识别过程中根据语义上下文自动退格修正早期预测，文字自然流畅。
 - **全平台支持**：支持 Windows、macOS 与 Linux，轻量常驻系统托盘。
 
@@ -33,14 +33,16 @@
 ### 1. 下载安装
 前往 [GitHub Releases](https://github.com/SentimentalK/echolet/releases) 页面下载适合您系统的预编译压缩包。
 
-| 操作系统 | 软件包 | 说明 |
+| 操作系统 | 软件包 | 架构 |
 | :--- | :--- | :--- |
-| **Windows** | `echolet-windows-x86_64.zip` | 解压后直接运行 `echolet.exe` |
-| **macOS (Apple Silicon)** | `echolet-macos-aarch64.tar.gz` | 首次运行需授权辅助功能与麦克风权限 |
-| **Linux (x86_64)** | `echolet-linux-x86_64.tar.gz` | 支持 GNOME、KDE、X11 及 Wayland 环境 |
+| **Windows** | `echolet-windows-x64.zip` | x86_64 |
+| **macOS** | `echolet-macos-arm64.zip` | Apple Silicon (M1/M2/M3/M4) |
+| **macOS** | `echolet-macos-x64.zip` | Intel x86_64 |
+| **Linux** | `echolet-linux-x64.tar.gz` | x86_64 |
+| **Linux** | `echolet-linux-arm64.tar.gz` | ARM64 |
 
 ### 2. 启动与使用
-1. **启动程序**：直接运行 `echolet`，程序将自动最小化并在系统托盘常驻。
+1. **启动程序**：直接运行 `echolet`，程序将自动最小化并在系统托盘 / 菜单栏常驻。
 2. **定位光标**：点击任意需要输入的文本区域（如 VS Code、浏览器、终端、聊天窗口等）。
 3. **语音打字**：
    - 按下 <kbd>F10</kbd>（或点击托盘菜单）**开始录音**。
@@ -57,7 +59,7 @@ Echolet 使用 `uinput` 实现 X11 / Wayland 环境下的低延迟虚拟按键�
   ```bash
   echolet setup-uinput
   ```
-  *(根据终端提示将当前用户加入 `input` 用户组并重载 udev 规则，必要时注销重新登录)*。
+  *(根据终端提示将当前用户加入 `input` 用户组并重载 udev规则，必要时注销重新登录)*。
 - **前台调试模式**：
   ```bash
   echolet -f
@@ -99,7 +101,7 @@ echolet -f
 [ 麦克风音频采集 ] ──> [ sherpa-onnx / X-ASR 离线推理 ] ──> [ Diff 差异对比引擎 ] ──> [ 系统原生按键/剪贴板模拟 ]
 ```
 
-- **核心语言**：基于 [Rust](https://www.rust-lang.org/) 构建，具备极低的内存占用、秒级即时响应与出色的系统稳定性。
+- **核心语言**：基于 [Rust](https://www.rust-lang.org/) 构建，具备极低的内存与 CPU 占用、秒级即时响应与出色的系统稳定性。
 - **推理引擎**：基于 [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) 与 [ONNX Runtime](https://onnxruntime.ai/) 进行高效率 CPU 离线计算。
 - **声学与语言模型**：采用 [X-ASR](https://github.com/GilgameshWind) 双语 Zipformer 流式模型（480ms 分块），针对中英混杂与技术开发场景专门优化。
 - **Diff 修正引擎**：实时计算前后识别文本的最长公共前缀与差异，自动发送退格键与新增字符，实现流式回退修正。
