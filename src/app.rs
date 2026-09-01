@@ -121,6 +121,7 @@ impl App {
         let history_dir = paths::history_dir();
         let history_manager = HistoryManager::new(config.history_enabled, history_dir);
 
+        crate::log::log("INFO", "initializing ModelManager");
         let model_manager = ModelManager::new()
             .map_err(|e| format!("Failed to initialize ModelManager: {}", e))?;
         let active_model = model_manager
@@ -132,11 +133,13 @@ impl App {
             active_model.manifest.display_name, active_model.id, active_model.dir
         );
 
+        crate::log::log("INFO", &format!("loading ASR model: {}", active_model.id));
         let recognizer = Arc::new(OnlineRecognizer::from_manifest(
             &active_model.dir,
             &active_model.manifest,
         )?);
         let stream = recognizer.create_stream()?;
+        crate::log::log("INFO", "ASR recognizer initialized");
         println!("[ASR] Recognizer initialized successfully.");
 
         // Initial UI projection

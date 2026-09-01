@@ -7,6 +7,7 @@ pub mod config;
 pub mod diff;
 pub mod ffi;
 pub mod history;
+pub mod log;
 pub mod models;
 pub mod paths;
 pub mod platform;

@@ -32,6 +32,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         // On macOS, run directly in current process (Main Thread NSApplication + Core Worker Thread)
         // bypassing Linux daemon-style self-detach.
+        echolet::log::init();
         platform::macos::run_app()?;
         return Ok(());
     }
@@ -69,6 +70,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(not(target_os = "macos"))]
     {
         // 3. Main process execution (Linux Foreground or Windows Direct)
+        echolet::log::init();
         let (action_tx, action_rx) = unbounded::<AppAction>();
 
         // 4. Set up OS signal handler (Ctrl+C -> AppAction::Quit)
@@ -80,9 +82,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         // 5. Initialize Platform Layer (registers hotkeys, IPC, single instance check, tray, text injection)
+        echolet::log::log("INFO", "initializing platform layer");
         let platform_runtime = match platform::init(action_tx.clone())? {
             Some(rt) => rt,
-            None => return Ok(()), // Duplicate instance detected; exiting cleanly
+            None => {
+                echolet::log::log("INFO", "duplicate instance detected; exiting");
+                return Ok(()); // Duplicate instance detected; exiting cleanly
+            }
         };
 
         println!("============================================================");
