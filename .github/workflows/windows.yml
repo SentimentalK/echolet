@@ -51,7 +51,24 @@ jobs:
       - name: Run automated test suite
         shell: pwsh
         run: |
-          $env:PATH = "$PWD\.local-runtime\runtime\lib;$env:PATH"
+          # 1. Diagnostic: check bundled runtime DLLs and versions
+          Get-ChildItem ".local-runtime\runtime\bin\*.dll"
+          $ort = Get-Item ".local-runtime\runtime\bin\onnxruntime.dll"
+          Write-Host "Bundled ORT version: $($ort.VersionInfo.FileVersion)"
+          Write-Host "Checking for onnxruntime.dll in system PATH:"
+          where.exe onnxruntime.dll
+
+          # 2. Build tests without running
+          cargo test --release --no-run
+
+          # 3. Ensure test executables load app-local pinned DLLs instead of system32 DLLs
+          New-Item -ItemType Directory -Force -Path "target\release" | Out-Null
+          New-Item -ItemType Directory -Force -Path "target\release\deps" | Out-Null
+          Copy-Item ".local-runtime\runtime\bin\*.dll" "target\release\" -Force
+          Copy-Item ".local-runtime\runtime\bin\*.dll" "target\release\deps\" -Force
+
+          # 4. Prepend runtime lib/bin to PATH and run tests
+          $env:PATH = "$PWD\.local-runtime\runtime\lib;$PWD\.local-runtime\runtime\bin;$env:PATH"
           cargo test --release -- --nocapture
 
       - name: Build and verify Windows release package
