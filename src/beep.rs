@@ -26,19 +26,32 @@ fn play_tone(freq: f32, duration_ms: u64, volume: f32) {
     let host = cpal::default_host();
     let device = match host.default_output_device() {
         Some(d) => d,
-        None => return,
+        None => {
+            eprintln!("[Beep] No default output device found; tone not played.");
+            return;
+        }
     };
 
+    let device_name = device.name().unwrap_or_else(|_| "Unknown".to_string());
     let config = match device.default_output_config() {
         Ok(c) => c,
-        Err(_) => return,
+        Err(e) => {
+            eprintln!("[Beep] Failed to get output config for '{}': {}", device_name, e);
+            return;
+        }
     };
 
     let sample_rate = config.sample_rate().0;
     let channels = config.channels() as usize;
+    let sample_format = config.sample_format();
     if channels == 0 || sample_rate == 0 {
+        eprintln!("[Beep] Invalid output config: rate={}, channels={}", sample_rate, channels);
         return;
     }
+    println!(
+        "[Beep] Playing tone: freq={}Hz, {}ms, vol={} -> device='{}', rate={}Hz, channels={}, fmt={:?}",
+        freq, duration_ms, volume, device_name, sample_rate, channels, sample_format
+    );
 
     let total_frames = (sample_rate as u64 * duration_ms / 1000) as usize;
     let attack_frames = (sample_rate as usize * 5 / 1000).max(1);
@@ -113,8 +126,19 @@ fn play_tone(freq: f32, duration_ms: u64, volume: f32) {
     };
 
     if let Ok(stream) = stream {
-        if stream.play().is_ok() {
-            thread::sleep(Duration::from_millis(duration_ms + 30));
+        match stream.play() {
+            Ok(()) => {
+                // Hold the stream alive well past the tone so it can actually pass through
+                // WASAPI shared-mode output latency (~50-200ms), otherwise a 70-80ms beep
+                // gets dropped before reaching the speaker.
+                thread::sleep(Duration::from_millis(duration_ms + 300));
+                println!("[Beep] Tone playback finished.");
+            }
+            Err(e) => {
+                eprintln!("[Beep] stream.play() failed on '{}': {}", device_name, e);
+            }
         }
+    } else {
+        eprintln!("[Beep] Failed to build output stream on '{}' (fmt={:?}).", device_name, sample_format);
     }
 }

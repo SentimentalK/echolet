@@ -28,6 +28,9 @@ pub struct HistoryManager {
 
 impl HistoryManager {
     pub fn new(enabled: bool, history_dir: PathBuf) -> Self {
+        if enabled {
+            let _ = fs::create_dir_all(&history_dir);
+        }
         Self {
             enabled,
             history_dir,
@@ -38,6 +41,9 @@ impl HistoryManager {
     pub fn set_enabled(&mut self, enabled: bool) {
         if self.enabled && !enabled {
             self.flush();
+        }
+        if enabled && !self.enabled {
+            let _ = fs::create_dir_all(&self.history_dir);
         }
         self.enabled = enabled;
     }
