@@ -77,10 +77,20 @@ try {
     Write-Host "--> Base Model SHA256 verified: OK"
 
     Write-Host "--> Extracting Base Model into .local-runtime/models/bilingual-zh-en/..."
+    $ModelExtractDir = "$TempDir\model-extract"
+    New-Item -ItemType Directory -Force -Path $ModelExtractDir | Out-Null
     if (Get-Command zstd -ErrorAction SilentlyContinue) {
-        zstd -d -c $CachedArchive | tar.exe -xf - -C $ModelDir
+        zstd -d -c $CachedArchive | tar.exe -xf - -C $ModelExtractDir
     } else {
-        tar.exe --zstd -xf $CachedArchive -C $ModelDir
+        tar.exe --zstd -xf $CachedArchive -C $ModelExtractDir
+    }
+
+    # Flatten: tarball contains a top-level directory (e.g. model-xasr-zh-en-480ms-r1/)
+    $InnerDirs = Get-ChildItem -Directory -Path $ModelExtractDir
+    if ($InnerDirs.Count -eq 1) {
+        Copy-Item -Path "$($InnerDirs[0].FullName)\*" -Destination $ModelDir -Recurse -Force
+    } else {
+        Copy-Item -Path "$ModelExtractDir\*" -Destination $ModelDir -Recurse -Force
     }
 
     # 3. Download test wav for stream testing
