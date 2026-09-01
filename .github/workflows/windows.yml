@@ -67,9 +67,9 @@ jobs:
           Copy-Item ".local-runtime\runtime\bin\*.dll" "target\release\" -Force
           Copy-Item ".local-runtime\runtime\bin\*.dll" "target\release\deps\" -Force
 
-          # 4. Prepend runtime lib/bin to PATH and run tests
+          # 4. Prepend runtime lib/bin to PATH and run tests serially
           $env:PATH = "$PWD\.local-runtime\runtime\lib;$PWD\.local-runtime\runtime\bin;$env:PATH"
-          cargo test --release -- --nocapture
+          cargo test --release -- --nocapture --test-threads=1
 
       - name: Build and verify Windows release package
         shell: pwsh
