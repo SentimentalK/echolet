@@ -5,12 +5,18 @@ use std::thread;
 use std::time::Duration;
 
 pub fn beep_start() {
+    if std::env::var_os("ECHOLET_DISABLE_BEEP").is_some() {
+        return;
+    }
     thread::spawn(|| {
         play_tone(1000.0, 70, 0.25); // High pitch beep (1000Hz, 70ms)
     });
 }
 
 pub fn beep_stop() {
+    if std::env::var_os("ECHOLET_DISABLE_BEEP").is_some() {
+        return;
+    }
     thread::spawn(|| {
         play_tone(450.0, 80, 0.25); // Low pitch beep (450Hz, 80ms)
     });
