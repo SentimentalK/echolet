@@ -20,7 +20,26 @@ if (!(Test-Path $ExePath) -or (Get-Item $ExePath).Length -eq 0) {
     exit 1
 }
 
-# 2. Check essential DLL files
+# 2. Check embedded application icon in executable
+Write-Host "--> Checking embedded application icon in executable..."
+Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+
+public class IconCheckHelper {
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
+    public static extern uint ExtractIconEx(string lpszFile, int nIconIndex, IntPtr[] phiconLarge, IntPtr[] phiconSmall, uint nIcons);
+}
+"@ -ErrorAction SilentlyContinue
+
+$IconCount = [IconCheckHelper]::ExtractIconEx($ExePath, -1, $null, $null, 0)
+Write-Host "    Detected embedded icon count in echolet.exe: $IconCount"
+if ($IconCount -eq 0) {
+    Write-Error "[Error] $ExePath has no embedded application icon! Application icon resource is missing."
+    exit 1
+}
+
+# 3. Check essential DLL files
 Write-Host "--> Checking essential native DLLs..."
 $RequiredDlls = @(
     "sherpa-onnx-c-api.dll",
@@ -34,14 +53,23 @@ foreach ($dll in $RequiredDlls) {
     }
 }
 
-# 3. Check PE dependencies if dumpbin is available
+# 4. Check PE dependencies and resource section if dumpbin is available
 if (Get-Command dumpbin.exe -ErrorAction SilentlyContinue) {
     Write-Host "--> Checking PE dependencies with dumpbin..."
     $DumpOutput = dumpbin.exe /dependents $ExePath
     Write-Host $DumpOutput
+
+    Write-Host "--> Checking PE headers for resource section (.rsrc)..."
+    $HeaderOutput = dumpbin.exe /headers $ExePath
+    if ($HeaderOutput -match "\.rsrc") {
+        Write-Host "    Found .rsrc section in PE headers via dumpbin."
+    } else {
+        Write-Error "[Error] Missing .rsrc section in $ExePath according to dumpbin!"
+        exit 1
+    }
 }
 
-# 4. Check model files, manifest, and registry
+# 5. Check model files, manifest, and registry
 Write-Host "--> Checking model manifest, registry, and files..."
 if (!(Test-Path "$AppDir\model.json")) {
     Write-Error "[Error] Missing model.json manifest!"
@@ -66,20 +94,20 @@ foreach ($mf in $ModelFiles) {
     }
 }
 
-# 5. Ensure test_wavs is excluded
+# 6. Ensure test_wavs is excluded
 if (Test-Path "$AppDir\models\bilingual-zh-en\test_wavs") {
     Write-Error "[Error] test_wavs directory found in production release!"
     exit 1
 }
 
-# 6. Ensure no development residue (*.pdb, *.lib, *.exp)
+# 7. Ensure no development residue (*.pdb, *.lib, *.exp)
 $Residue = Get-ChildItem -Path $AppDir -Recurse -Include *.pdb, *.lib, *.exp
 if ($Residue.Count -gt 0) {
     Write-Error "[Error] Development residue (*.pdb, *.lib, *.exp) found in production folder: $($Residue.FullName)"
     exit 1
 }
 
-# 7. Check license files
+# 8. Check license files
 Write-Host "--> Checking license notices..."
 $Licenses = @(
     "sherpa-onnx-LICENSE",

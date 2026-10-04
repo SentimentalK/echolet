@@ -50,6 +50,7 @@ jobs:
               - 'Cargo.toml'
               - 'Cargo.lock'
               - 'build.rs'
+              - 'assets/**'
               - 'src/main.rs'
               - 'src/paths.rs'
               - 'src/platform/mod.rs'
@@ -65,6 +66,7 @@ jobs:
             windows:
               - 'src/platform/windows/**'
               - 'scripts/windows/**'
+              - 'assets/windows/**'
               - '.github/workflows/windows.yml'
             macos:
               - 'src/platform/macos/**'

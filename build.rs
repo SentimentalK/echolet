@@ -73,5 +73,10 @@ fn main() {
             println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN/../../../.local-runtime/runtime/lib");
         }
         println!("cargo:rustc-link-arg=-Wl,-z,origin");
+    } else if target_os == "windows" {
+        println!("cargo:rerun-if-changed=assets/windows/echolet.ico");
+        let mut res = winresource::WindowsResource::new();
+        res.set_icon("assets/windows/echolet.ico");
+        res.compile().expect("Failed to compile Windows application icon resource");
     }
 }
