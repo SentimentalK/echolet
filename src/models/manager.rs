@@ -1,4 +1,5 @@
 use crate::config::EcholetConfig;
+use crate::models::download::{download_and_install_model_with_progress, ProgressCallback};
 use crate::models::manifest::ModelManifest;
 use crate::models::registry::ModelRegistry;
 use crate::paths;
@@ -182,6 +183,55 @@ impl ModelManager {
 
     pub fn get_user_install_dir(&self, model_id: &str) -> PathBuf {
         self.user_models_dir.join(model_id)
+    }
+
+    /// Productized API: downloads and atomically installs a registry model by ID.
+    ///
+    /// The manager exclusively owns the `downloading` state for this model:
+    /// * a duplicate concurrent download for the same ID is rejected;
+    /// * the ID is inserted before any work and removed on every exit path.
+    ///
+    /// On success the freshly installed model is registered from its actual
+    /// on-disk manifest. The active model is intentionally **not** changed; the
+    /// caller must explicitly call [`ModelManager::set_active_model`].
+    pub fn install_registry_model(
+        &mut self,
+        model_id: &str,
+        progress: Option<ProgressCallback<'_>>,
+    ) -> Result<InstalledModel, String> {
+        if self.downloading.contains(model_id) {
+            return Err(format!("Model '{}' is already downloading", model_id));
+        }
+
+        let entry = self
+            .registry
+            .get_model(model_id)
+            .cloned()
+            .ok_or_else(|| format!("Model '{}' not found in registry", model_id))?;
+
+        let target_dir = self.get_user_install_dir(model_id);
+        self.downloading.insert(model_id.to_string());
+
+        let result = download_and_install_model_with_progress(&entry, &target_dir, progress);
+
+        // Always clear downloading state, regardless of outcome.
+        self.downloading.remove(model_id);
+
+        let downloaded_manifest = result?;
+
+        // Prefer the manifest actually written on disk, falling back to the one
+        // produced by the downloader.
+        let manifest =
+            ModelManifest::from_file(&target_dir.join("model.json")).unwrap_or(downloaded_manifest);
+        let installed = InstalledModel {
+            id: manifest.id.clone(),
+            dir: target_dir,
+            manifest,
+            is_bundled: false,
+        };
+        self.installed
+            .insert(installed.id.clone(), installed.clone());
+        Ok(installed)
     }
 
     pub fn register_installed(&mut self, manifest: ModelManifest, dir: PathBuf) {
