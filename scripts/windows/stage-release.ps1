@@ -99,7 +99,7 @@ if ($TokensFiles.Count -gt 0) {
     exit 1
 }
 
-if (Test-Path "$AppDir\models\test_wavs" -or (Test-Path "$AppDir\models\bilingual-zh-en\test_wavs")) {
+if ((Test-Path "$AppDir\models\test_wavs") -or (Test-Path "$AppDir\models\bilingual-zh-en\test_wavs")) {
     Write-Error "[Error] test_wavs directory found in production release!"
     exit 1
 }
