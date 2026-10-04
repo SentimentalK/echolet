@@ -23,8 +23,8 @@ pub struct App {
     pub config: EcholetConfig,
     pub model_manager: ModelManager,
     pub history_manager: HistoryManager,
-    _recognizer: Arc<OnlineRecognizer>,
-    stream: OnlineStream,
+    stream: Option<OnlineStream>,
+    _recognizer: Option<Arc<OnlineRecognizer>>,
     session: PartialSession,
     _audio_source: Option<Box<dyn AudioSource>>,
     audio_starter: AudioStarter,
@@ -122,9 +122,57 @@ impl App {
         let history_manager = HistoryManager::new(config.history_enabled, history_dir);
 
         crate::log::log("INFO", "initializing ModelManager");
-        let model_manager = ModelManager::new()
-            .map_err(|e| format!("Failed to initialize ModelManager: {}", e))?;
-        let active_model = model_manager
+        let model_manager =
+            ModelManager::new().map_err(|e| format!("Failed to initialize ModelManager: {}", e))?;
+
+        // Initial UI projection
+        platform.handle.set_listening(false);
+        platform.handle.update_history_state(config.history_enabled);
+        notify_platform_models(&platform, &model_manager);
+
+        let mut app = Self {
+            state: AppState::new(),
+            config,
+            model_manager,
+            history_manager,
+            stream: None,
+            _recognizer: None,
+            session: PartialSession::new(),
+            _audio_source: audio_source,
+            audio_starter,
+            audio_tx,
+            audio_rx,
+            action_rx,
+            action_tx,
+            platform,
+            last_logged_text: String::new(),
+            current_utterance_start: None,
+        };
+
+        // Eagerly load the active model runtime on startup (preserving current baseline behavior)
+        app.ensure_model_loaded()?;
+
+        Ok(app)
+    }
+
+    pub fn is_model_loaded(&self) -> bool {
+        self._recognizer.is_some() && self.stream.is_some()
+    }
+
+    /// Ensures the active ASR model and stream are loaded and ready for recognition.
+    /// Returns Ok(()) immediately if recognizer and stream are already valid.
+    /// Otherwise, loads the active model from ModelManager, creates recognizer and stream,
+    /// and only publishes them after both succeed. On failure, leaves App in a clean unloaded state.
+    pub fn ensure_model_loaded(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        if self.is_model_loaded() {
+            return Ok(());
+        }
+
+        // Clean up any partial/inconsistent state before attempting load
+        self.unload_model();
+
+        let active_model = self
+            .model_manager
             .get_active_model()
             .map_err(|e| format!("Failed to get active model: {}", e))?;
 
@@ -142,29 +190,32 @@ impl App {
         crate::log::log("INFO", "ASR recognizer initialized");
         println!("[ASR] Recognizer initialized successfully.");
 
-        // Initial UI projection
-        platform.handle.set_listening(false);
-        platform.handle.update_history_state(config.history_enabled);
-        notify_platform_models(&platform, &model_manager);
+        // Publish only after both recognizer and stream creation succeed
+        self._recognizer = Some(recognizer);
+        self.stream = Some(stream);
+        Ok(())
+    }
 
-        Ok(Self {
-            state: AppState::new(),
-            config,
-            model_manager,
-            history_manager,
-            _recognizer: recognizer,
-            stream,
-            session: PartialSession::new(),
-            _audio_source: audio_source,
-            audio_starter,
-            audio_tx,
-            audio_rx,
-            action_rx,
-            action_tx,
-            platform,
-            last_logged_text: String::new(),
-            current_utterance_start: None,
-        })
+    /// Safely unloads the active model and stream runtime.
+    /// Only legal when not Listening.
+    /// Finalizes and clears partial ASR session state, explicitly drops OnlineStream before
+    /// the App's recognizer Arc, and is idempotent.
+    pub fn unload_model(&mut self) -> bool {
+        if self.state.listening {
+            eprintln!("[ASR] unload_model requested while Listening; ignoring until Standby.");
+            return false;
+        }
+
+        self.finalize_current_segment();
+        self.session = PartialSession::new();
+
+        // Explicitly drop stream BEFORE recognizer Arc to maintain strict native lifetime ordering
+        drop(self.stream.take());
+        drop(self._recognizer.take());
+
+        crate::log::log("INFO", "ASR model unloaded");
+        println!("[ASR] Model unloaded successfully.");
+        true
     }
 
     pub fn is_audio_active(&self) -> bool {
@@ -180,7 +231,16 @@ impl App {
             return;
         }
 
-        // 1. Open microphone on demand
+        // 1. Ensure model runtime is loaded before opening microphone / entering Listening
+        if let Err(err) = self.ensure_model_loaded() {
+            eprintln!(
+                "[ASR] Failed to ensure model is loaded before listening: {}. Remaining in Standby.",
+                err
+            );
+            return;
+        }
+
+        // 2. Open microphone on demand
         match (self.audio_starter)(self.audio_tx.clone()) {
             Ok(source) => {
                 self._audio_source = Some(source);
@@ -195,7 +255,7 @@ impl App {
             }
         }
 
-        // 2. Transition state
+        // 3. Transition state
         self.finalize_current_segment();
         self.state.listening = true;
         beep_start();
@@ -249,7 +309,9 @@ impl App {
     /// Finalizes the current partial utterance without altering the listening state.
     pub fn finalize_current_segment(&mut self) {
         self.session.finalize();
-        self.stream.reset();
+        if let Some(ref stream) = self.stream {
+            stream.reset();
+        }
         self.last_logged_text.clear();
         self.current_utterance_start = None;
     }
@@ -263,7 +325,10 @@ impl App {
         }
 
         if self.model_manager.active_model_id == model_id {
-            return true;
+            if self.is_model_loaded() {
+                return true;
+            }
+            return self.ensure_model_loaded().is_ok();
         }
 
         // If installed, perform transactional switch
@@ -273,17 +338,17 @@ impl App {
                 candidate.id, candidate.dir
             );
 
-            let new_rec =
-                match OnlineRecognizer::from_manifest(&candidate.dir, &candidate.manifest) {
-                    Ok(rec) => Arc::new(rec),
-                    Err(err) => {
-                        eprintln!(
-                        "[Model] Error: Failed to initialize candidate model '{}': {}. Retaining active model.",
-                        model_id, err
-                    );
-                        return false;
-                    }
-                };
+            let new_rec = match OnlineRecognizer::from_manifest(&candidate.dir, &candidate.manifest)
+            {
+                Ok(rec) => Arc::new(rec),
+                Err(err) => {
+                    eprintln!(
+                            "[Model] Error: Failed to initialize candidate model '{}': {}. Retaining active model.",
+                            model_id, err
+                        );
+                    return false;
+                }
+            };
 
             let new_stream = match new_rec.create_stream() {
                 Ok(st) => st,
@@ -296,9 +361,12 @@ impl App {
                 }
             };
 
-            // Transactional swap
-            self._recognizer = new_rec;
-            self.stream = new_stream;
+            // Transactional swap: explicitly drop previous stream before previous recognizer Arc
+            drop(self.stream.take());
+            drop(self._recognizer.take());
+
+            self._recognizer = Some(new_rec);
+            self.stream = Some(new_stream);
             self.session.finalize();
             self.session = PartialSession::new();
             self.last_logged_text.clear();
@@ -427,56 +495,63 @@ impl App {
         let mut got_audio = false;
         while let Ok(chunk) = self.audio_rx.try_recv() {
             if self.state.listening && !chunk.samples.is_empty() {
-                self.stream
-                    .accept_waveform(chunk.sample_rate as i32, &chunk.samples);
-                got_audio = true;
+                if let Some(ref stream) = self.stream {
+                    stream.accept_waveform(chunk.sample_rate as i32, &chunk.samples);
+                    got_audio = true;
+                } else {
+                    eprintln!("[ASR] Invariant violation: Listening is true but stream is absent.");
+                }
             }
         }
 
         // 3. Decode ASR and inject diffs if listening
         if self.state.listening && got_audio {
-            self.stream.decode_all_ready();
+            if let Some(ref stream) = self.stream {
+                stream.decode_all_ready();
 
-            let current_text = self.stream.get_result();
-            let is_endpoint = self.stream.is_endpoint();
+                let current_text = stream.get_result();
+                let is_endpoint = stream.is_endpoint();
 
-            // Track utterance start timestamp when first non-empty text appears
-            if !current_text.is_empty() && self.current_utterance_start.is_none() {
-                self.current_utterance_start = Some(Local::now());
-            }
-
-            if let Some(diff) = self.session.update(&current_text) {
-                if !current_text.is_empty() && current_text != self.last_logged_text {
-                    println!(
-                        "[Typing] Partial: \"{}\" | Diff: (BS: {}, Suffix: \"{}\")",
-                        current_text, diff.backspaces, diff.new_suffix
-                    );
-                    self.last_logged_text = current_text.clone();
+                // Track utterance start timestamp when first non-empty text appears
+                if !current_text.is_empty() && self.current_utterance_start.is_none() {
+                    self.current_utterance_start = Some(Local::now());
                 }
 
-                // Inject into active focused window via platform text injector
-                self.platform
-                    .injector
-                    .apply_diff(diff.backspaces, &diff.new_suffix);
-            }
+                if let Some(diff) = self.session.update(&current_text) {
+                    if !current_text.is_empty() && current_text != self.last_logged_text {
+                        println!(
+                            "[Typing] Partial: \"{}\" | Diff: (BS: {}, Suffix: \"{}\")",
+                            current_text, diff.backspaces, diff.new_suffix
+                        );
+                        self.last_logged_text = current_text.clone();
+                    }
 
-            // Endpoint commits current sentence segment while listening state remains active.
-            if is_endpoint {
-                if !self.last_logged_text.is_empty() {
-                    println!(
-                        "[Endpoint] Finalized sentence: \"{}\" (Listening stays active)",
-                        self.last_logged_text
-                    );
-                    let end_time = Local::now();
-                    let start_time = self.current_utterance_start.take().unwrap_or(end_time);
-                    self.history_manager.on_utterance(
-                        start_time,
-                        end_time,
-                        &self.last_logged_text,
-                        &self.model_manager.active_model_id,
-                    );
+                    // Inject into active focused window via platform text injector
+                    self.platform
+                        .injector
+                        .apply_diff(diff.backspaces, &diff.new_suffix);
                 }
-                self.finalize_current_segment();
+
+                // Endpoint commits current sentence segment while listening state remains active.
+                if is_endpoint {
+                    if !self.last_logged_text.is_empty() {
+                        println!(
+                            "[Endpoint] Finalized sentence: \"{}\" (Listening stays active)",
+                            self.last_logged_text
+                        );
+                        let end_time = Local::now();
+                        let start_time = self.current_utterance_start.take().unwrap_or(end_time);
+                        self.history_manager.on_utterance(
+                            start_time,
+                            end_time,
+                            &self.last_logged_text,
+                            &self.model_manager.active_model_id,
+                        );
+                    }
+                    self.finalize_current_segment();
+                }
+            } else {
+                eprintln!("[ASR] Invariant violation: Listening is true but stream is absent during decode.");
             }
         }
     }
@@ -492,15 +567,16 @@ impl App {
 impl Drop for App {
     fn drop(&mut self) {
         self.history_manager.flush();
+        // Explicitly drop stream BEFORE recognizer Arc to maintain strict native lifetime ordering
+        drop(self.stream.take());
+        drop(self._recognizer.take());
     }
 }
 
 fn notify_platform_models(platform: &PlatformRuntime, manager: &ModelManager) {
     let installed_ids: Vec<String> = manager.installed.keys().cloned().collect();
     let downloading_ids: Vec<String> = manager.downloading.iter().cloned().collect();
-    platform.handle.update_models(
-        &manager.active_model_id,
-        &installed_ids,
-        &downloading_ids,
-    );
+    platform
+        .handle
+        .update_models(&manager.active_model_id, &installed_ids, &downloading_ids);
 }

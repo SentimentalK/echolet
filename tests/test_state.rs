@@ -1,7 +1,7 @@
 use crossbeam_channel::unbounded;
 use echolet::actions::AppAction;
 use echolet::app::App;
-use echolet::audio::{AudioChunk, AudioStarter};
+use echolet::audio::{AudioChunk, AudioSource, AudioStarter};
 use echolet::platform::{PlatformHandle, PlatformRuntime, TextInjector};
 use echolet::state::AppState;
 use std::path::{Path, PathBuf};
@@ -320,4 +320,202 @@ fn test_app_history_toggle_and_open_folder_actions() {
         *hist_history.lock().unwrap(),
         vec![initial_state, !initial_state, initial_state]
     );
+}
+
+#[test]
+fn test_optional_recognizer_lifecycle_unload_and_reload() {
+    let (mut app, _, _, _, _, _, _) = create_test_app();
+
+    // 1. Initial eager-loaded state
+    assert!(
+        app.is_model_loaded(),
+        "App must eagerly load active model on startup"
+    );
+
+    // 2. Unload model
+    let unloaded = app.unload_model();
+    assert!(unloaded, "unload_model must succeed when in Standby");
+    assert!(!app.is_model_loaded(), "Model must be unloaded");
+
+    // 3. Idempotency of unload_model
+    let unloaded_again = app.unload_model();
+    assert!(
+        unloaded_again,
+        "Repeated unload_model must be idempotent and succeed"
+    );
+    assert!(!app.is_model_loaded());
+
+    // 4. Safe operations while unloaded
+    app.finalize_current_segment();
+    app.tick();
+    assert!(!app.is_model_loaded());
+
+    // 5. Reload via ensure_model_loaded
+    let reload_res = app.ensure_model_loaded();
+    assert!(
+        reload_res.is_ok(),
+        "ensure_model_loaded must succeed to reload active model"
+    );
+    assert!(
+        app.is_model_loaded(),
+        "Model must be loaded after ensure_model_loaded"
+    );
+
+    // 6. Idempotency of ensure_model_loaded (already valid)
+    let reload_again = app.ensure_model_loaded();
+    assert!(
+        reload_again.is_ok(),
+        "ensure_model_loaded must be idempotent when already loaded"
+    );
+    assert!(app.is_model_loaded());
+
+    // 7. Repeated unload -> reload cycles
+    for cycle in 1..=3 {
+        assert!(app.unload_model(), "Cycle {}: unload must succeed", cycle);
+        assert!(
+            !app.is_model_loaded(),
+            "Cycle {}: model must be unloaded",
+            cycle
+        );
+        assert!(
+            app.ensure_model_loaded().is_ok(),
+            "Cycle {}: reload must succeed",
+            cycle
+        );
+        assert!(
+            app.is_model_loaded(),
+            "Cycle {}: model must be loaded",
+            cycle
+        );
+    }
+}
+
+#[test]
+fn test_unload_rejected_while_listening() {
+    let (mut app, _, _, _, _, _, _) = create_test_app();
+
+    app.start_listening();
+    assert!(app.state.listening);
+    assert!(app.is_model_loaded());
+
+    // Invariant: unload_model must be rejected while Listening
+    let unloaded = app.unload_model();
+    assert!(!unloaded, "unload_model must return false while listening");
+    assert!(app.is_model_loaded(), "Model must remain loaded");
+    assert!(app.state.listening, "Listening state must remain active");
+
+    app.stop_listening();
+    assert!(!app.state.listening);
+
+    // After stopping, unload succeeds
+    assert!(app.unload_model());
+    assert!(!app.is_model_loaded());
+}
+
+#[test]
+fn test_start_listening_auto_reloads_if_unloaded() {
+    let (mut app, _, _, _, _, _, _) = create_test_app();
+
+    // Start from unloaded state
+    assert!(app.unload_model());
+    assert!(!app.is_model_loaded());
+
+    // start_listening must ensure model is loaded before entering Listening
+    app.start_listening();
+    assert!(
+        app.is_model_loaded(),
+        "start_listening must load runtime before listening"
+    );
+    assert!(app.state.listening);
+    assert!(app.is_audio_active());
+
+    app.stop_listening();
+    assert!(!app.state.listening);
+    assert!(!app.is_audio_active());
+}
+
+#[test]
+fn test_select_model_while_unloaded_and_transactional_safety() {
+    let (mut app, _, _, _, _, _, _) = create_test_app();
+
+    let active_id = app.model_manager.active_model_id.clone();
+    assert!(app.unload_model());
+    assert!(!app.is_model_loaded());
+
+    // Selecting currently active model while unloaded should reload it
+    let switched = app.select_model(&active_id);
+    assert!(
+        switched,
+        "select_model for active model while unloaded must succeed"
+    );
+    assert!(
+        app.is_model_loaded(),
+        "Model must be loaded after selecting active model"
+    );
+
+    // Unload again
+    assert!(app.unload_model());
+    assert!(!app.is_model_loaded());
+
+    // Selecting nonexistent model while unloaded should fail safely and retain unloaded state
+    let failed_switch = app.select_model("nonexistent-model-xyz");
+    assert!(
+        !failed_switch,
+        "select_model for nonexistent model must fail"
+    );
+    assert!(
+        !app.is_model_loaded(),
+        "Model must remain unloaded on candidate failure"
+    );
+    assert_eq!(
+        app.model_manager.active_model_id, active_id,
+        "Active model ID must remain unchanged"
+    );
+}
+
+#[test]
+fn test_tick_safe_when_unloaded_even_if_corrupted_listening_flag() {
+    let (action_tx, action_rx) = unbounded::<AppAction>();
+    let (audio_tx, audio_rx) = unbounded::<AudioChunk>();
+    let starter: AudioStarter = Box::new(|_tx| Ok(Box::new(()) as Box<dyn AudioSource>));
+    let platform = PlatformRuntime {
+        injector: Box::new(FakeInjector {
+            diffs: Arc::new(Mutex::new(Vec::new())),
+        }),
+        handle: Box::new(FakePlatformHandle {
+            listening_history: Arc::new(Mutex::new(Vec::new())),
+            history_state_history: Arc::new(Mutex::new(Vec::new())),
+            opened_folders: Arc::new(Mutex::new(Vec::new())),
+            shutdown_called: Arc::new(AtomicBool::new(false)),
+        }),
+        _resources: Box::new(()),
+    };
+
+    let mut app = App::new_with_starter(
+        platform,
+        Some(action_tx),
+        action_rx,
+        audio_rx,
+        audio_tx.clone(),
+        starter,
+        None,
+    )
+    .expect("Failed to create App");
+
+    assert!(app.unload_model());
+    assert!(!app.is_model_loaded());
+
+    // Force an invariant violation where listening is true but runtime is unloaded
+    app.state.listening = true;
+
+    // Send audio chunk
+    let chunk = AudioChunk {
+        samples: vec![0.0; 160],
+        sample_rate: 16000,
+    };
+    audio_tx.send(chunk).unwrap();
+
+    // tick() must not panic or dereference absent stream
+    app.tick();
+    assert!(!app.is_model_loaded());
 }
