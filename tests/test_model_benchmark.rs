@@ -1,4 +1,6 @@
-use echolet::diagnostics::benchmark::run_in_process_benchmark;
+use echolet::diagnostics::benchmark::{
+    build_child_args, is_benchmark_invocation, run_in_process_benchmark,
+};
 use echolet::diagnostics::memory::{
     get_current_rss, parse_statm_rss_pages, parse_status_vm_rss_bytes, ProcessRss,
 };
@@ -64,10 +66,97 @@ fn test_get_current_rss_smoke() {
 }
 
 #[test]
+fn test_child_args_construction() {
+    // 1. From main binary invocation (e.g. echolet benchmark / bench / --benchmark)
+    let args_bench = vec!["echolet".to_string(), "benchmark".to_string()];
+    assert_eq!(
+        build_child_args(&args_bench),
+        vec!["benchmark", "--child-fresh"]
+    );
+
+    let args_bench_short = vec![
+        "echolet".to_string(),
+        "bench".to_string(),
+        "--json".to_string(),
+    ];
+    assert_eq!(
+        build_child_args(&args_bench_short),
+        vec!["bench", "--child-fresh"]
+    );
+
+    let args_bench_flag = vec![
+        "/usr/local/bin/echolet".to_string(),
+        "--benchmark".to_string(),
+    ];
+    assert_eq!(
+        build_child_args(&args_bench_flag),
+        vec!["--benchmark", "--child-fresh"]
+    );
+
+    // 2. From dedicated binary invocation (e.g. model_benchmark)
+    let args_dedicated = vec!["model_benchmark".to_string()];
+    assert_eq!(build_child_args(&args_dedicated), vec!["--child-fresh"]);
+
+    let args_dedicated_json = vec![
+        "target/release/model_benchmark".to_string(),
+        "--json".to_string(),
+    ];
+    assert_eq!(
+        build_child_args(&args_dedicated_json),
+        vec!["--child-fresh"]
+    );
+}
+
+#[test]
+fn test_benchmark_cli_routing() {
+    // 1. Valid benchmark entrypoints that should route into benchmark CLI
+    assert!(is_benchmark_invocation(&[
+        "echolet".into(),
+        "benchmark".into()
+    ]));
+    assert!(is_benchmark_invocation(&["echolet".into(), "bench".into()]));
+    assert!(is_benchmark_invocation(&[
+        "echolet".into(),
+        "--benchmark".into()
+    ]));
+
+    // 2. Internal child-fresh flag must also be captured so child invocation never
+    // falls through into normal background daemon self-detach or GUI startup.
+    assert!(is_benchmark_invocation(&[
+        "echolet".into(),
+        "--child-fresh".into()
+    ]));
+
+    // 3. Regular non-benchmark subcommands or flags must not be intercepted
+    assert!(!is_benchmark_invocation(&["echolet".into()]));
+    assert!(!is_benchmark_invocation(&[
+        "echolet".into(),
+        "toggle".into()
+    ]));
+    assert!(!is_benchmark_invocation(&["echolet".into(), "stop".into()]));
+    assert!(!is_benchmark_invocation(&[
+        "echolet".into(),
+        "--foreground".into()
+    ]));
+}
+
+#[test]
 fn test_model_lifecycle_benchmark_smoke() {
-    // Observational smoke test: verifies that the benchmark harness compiles, executes the real
-    // model lifecycle (ModelManager -> OnlineRecognizer -> OnlineStream -> Unload -> Reload),
-    // and produces valid observations without enforcing fragile machine-dependent thresholds.
+    // Ordinary CI validates benchmark harness compilation and unit logic cheaply.
+    // Heavy real 500MB model loading / multi-cycle benchmark is explicitly opt-in
+    // (via ECHOLET_BENCHMARK_SMOKE=1) so normal CI runs across Linux, macOS, and Windows
+    // are not materially inflated.
+    let opt_in = std::env::var("ECHOLET_BENCHMARK_SMOKE")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+
+    if !opt_in {
+        println!(
+            "[Notice] Skipping heavy model lifecycle smoke test during ordinary cargo test. Set ECHOLET_BENCHMARK_SMOKE=1 to run."
+        );
+        return;
+    }
+
     let result =
         run_in_process_benchmark(1).expect("Benchmark smoke run must succeed using active model");
 
@@ -110,6 +199,8 @@ fn test_model_lifecycle_benchmark_smoke() {
 
     if let Some(f10) = result.f10_latency {
         assert!(f10.unloaded_total_ms > 0.0);
+        assert!(f10.unloaded_model_ready_ms > 0.0);
         assert!(f10.warm_total_ms >= 0.0);
+        assert!(f10.warm_model_ready_ms >= 0.0);
     }
 }

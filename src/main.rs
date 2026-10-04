@@ -24,9 +24,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().collect();
 
     // Developer benchmark entrypoint (PROJECT-041 Stage 1 / J3)
-    if args.len() > 1 && (args[1] == "benchmark" || args[1] == "bench" || args[1] == "--benchmark")
-    {
-        return echolet::diagnostics::benchmark::run_cli(&args[1..]);
+    if echolet::diagnostics::benchmark::is_benchmark_invocation(&args) {
+        return echolet::diagnostics::benchmark::run_cli(&args);
     }
 
     // 1. Handle subcommands (toggle, stop, status, setup-uinput)

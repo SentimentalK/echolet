@@ -175,6 +175,7 @@ pub fn run_in_process_benchmark(
 fn measure_f10_latency() -> Result<F10LatencyResult, Box<dyn std::error::Error>> {
     use crate::actions::AppAction;
     use crate::app::App;
+    use crate::audio::{AudioChunk, AudioSource, AudioStarter};
     use crate::config::EcholetConfig;
     use crate::platform::{PlatformHandle, PlatformRuntime, TextInjector};
     use crossbeam_channel::unbounded;
@@ -200,35 +201,54 @@ fn measure_f10_latency() -> Result<F10LatencyResult, Box<dyn std::error::Error>>
     };
 
     let (_, action_rx) = unbounded::<AppAction>();
-    let (_, audio_rx) = unbounded();
+    let (audio_tx, audio_rx) = unbounded::<AudioChunk>();
 
-    let mut config = EcholetConfig::load();
-    config.preload_model_on_startup = false;
-    config.history_enabled = false;
+    // Hermetic benchmark config:
+    // Only inherit selected_model if set in user config, but enforce preload=false, history=false, idle_unload=None
+    let active_model_id = EcholetConfig::load().selected_model;
+    let config = EcholetConfig {
+        selected_model: active_model_id,
+        history_enabled: false,
+        preload_model_on_startup: false,
+        model_idle_unload_minutes: None,
+    };
 
-    let mut app = App::new_with_audio(platform, action_rx, audio_rx, None)?;
+    let starter: AudioStarter = Box::new(|_tx| Ok(Box::new(()) as Box<dyn AudioSource>));
+
+    let mut app = App::new_with_starter_and_config(
+        platform,
+        None,
+        action_rx,
+        audio_rx,
+        audio_tx,
+        starter,
+        None,
+        Some(config),
+    )?;
+
+    // Ensure unloaded starting baseline
     app.unload_model();
 
     // 1. Cold start_listening (runtime unloaded)
-    let t_cold = Instant::now();
-    app.start_listening();
-    let unloaded_total_ms = t_cold.elapsed().as_secs_f64() * 1000.0;
+    let cold_metrics = app
+        .start_listening()
+        .ok_or("Failed to start listening during cold benchmark step")?;
     app.stop_listening();
 
     // 2. Warm start_listening (runtime already loaded)
-    let t_warm = Instant::now();
-    app.start_listening();
-    let warm_total_ms = t_warm.elapsed().as_secs_f64() * 1000.0;
+    let warm_metrics = app
+        .start_listening()
+        .ok_or("Failed to start listening during warm benchmark step")?;
     app.stop_listening();
 
     // Ensure final state is clean
     app.unload_model();
 
     Ok(F10LatencyResult {
-        unloaded_model_ready_ms: unloaded_total_ms,
-        unloaded_total_ms,
-        warm_model_ready_ms: warm_total_ms,
-        warm_total_ms,
+        unloaded_model_ready_ms: cold_metrics.model_ready_ms,
+        unloaded_total_ms: cold_metrics.total_ms,
+        warm_model_ready_ms: warm_metrics.model_ready_ms,
+        warm_total_ms: warm_metrics.total_ms,
     })
 }
 
@@ -342,6 +362,32 @@ pub fn print_benchmark_table(result: &BenchmarkRunResult) {
     println!("=========================================================================================================\n");
 }
 
+/// Returns true if the CLI argument list represents a benchmark invocation
+/// (including internal child-fresh benchmark execution).
+pub fn is_benchmark_invocation(args: &[String]) -> bool {
+    if args.len() < 2 {
+        return false;
+    }
+    let sub = &args[1];
+    sub == "benchmark" || sub == "bench" || sub == "--benchmark" || sub == "--child-fresh"
+}
+
+/// Constructs arguments for the isolated child process.
+/// If invoked via a subcommand on the main binary (e.g. `echolet benchmark`),
+/// preserves the subcommand so the child routes back into benchmark mode.
+/// If invoked via dedicated binary (e.g. `model_benchmark`), passes `--child-fresh` directly.
+pub fn build_child_args(args: &[String]) -> Vec<String> {
+    let mut child_args = Vec::new();
+    if let Some(subcmd) = args
+        .iter()
+        .find(|&a| a == "benchmark" || a == "bench" || a == "--benchmark")
+    {
+        child_args.push(subcmd.clone());
+    }
+    child_args.push("--child-fresh".to_string());
+    child_args
+}
+
 pub fn run_cli(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let is_child = args.iter().any(|a| a == "--child-fresh");
     let is_json = args.iter().any(|a| a == "--json");
@@ -350,7 +396,7 @@ pub fn run_cli(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Echolet Model Lifecycle Benchmark Tool");
         println!();
-        println!("Usage: model_benchmark [OPTIONS]");
+        println!("Usage: model_benchmark [OPTIONS] or echolet benchmark [OPTIONS]");
         println!();
         println!("Options:");
         println!("  --json         Output benchmark results as JSON");
@@ -380,7 +426,8 @@ pub fn run_cli(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     // Default Parent Process mode: spawn a clean fresh child process to guarantee
     // genuine cold process load and untainted process RSS.
     let exe = env::current_exe()?;
-    let output = Command::new(&exe).arg("--child-fresh").output();
+    let child_args = build_child_args(args);
+    let output = Command::new(&exe).args(&child_args).output();
 
     match output {
         Ok(out) if out.status.success() => {

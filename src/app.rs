@@ -17,6 +17,13 @@ use std::time::Duration;
 fn default_audio_starter() -> AudioStarter {
     Box::new(|tx| AudioInput::start(tx).map(|ai| Box::new(ai) as Box<dyn AudioSource>))
 }
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StartListeningMetrics {
+    pub total_ms: f64,
+    pub model_ready_ms: f64,
+    pub was_model_loaded: bool,
+    pub mic_open_ms: f64,
+}
 
 pub struct App {
     pub state: AppState,
@@ -392,9 +399,9 @@ impl App {
         }
     }
 
-    pub fn start_listening(&mut self) {
+    pub fn start_listening(&mut self) -> Option<StartListeningMetrics> {
         if self.state.listening {
-            return;
+            return None;
         }
 
         let t_start = std::time::Instant::now();
@@ -409,7 +416,7 @@ impl App {
                 "[ASR] Failed to ensure model is loaded before listening: {}. Remaining in Standby.",
                 err
             );
-            return;
+            return None;
         }
         let t_model_ready = t_start.elapsed();
 
@@ -426,7 +433,7 @@ impl App {
                     err
                 );
                 self.schedule_idle_unload();
-                return;
+                return None;
             }
         }
         let mic_duration = t_mic_start.elapsed();
@@ -456,6 +463,13 @@ impl App {
             mic_duration.as_secs_f64() * 1000.0,
         );
         println!("\n[Action] >>> Listening STARTED (Speaking...) <<<");
+
+        Some(StartListeningMetrics {
+            total_ms: total_transition_duration.as_secs_f64() * 1000.0,
+            model_ready_ms: t_model_ready.as_secs_f64() * 1000.0,
+            was_model_loaded: was_loaded,
+            mic_open_ms: mic_duration.as_secs_f64() * 1000.0,
+        })
     }
 
     pub fn stop_listening(&mut self) {
@@ -632,7 +646,9 @@ impl App {
     pub fn handle_action(&mut self, action: AppAction) {
         match action {
             AppAction::ToggleListening => self.toggle_listening(),
-            AppAction::StartListening => self.start_listening(),
+            AppAction::StartListening => {
+                self.start_listening();
+            }
             AppAction::StopListening => self.stop_listening(),
             AppAction::Quit => {
                 println!("\n[App] Quit action received. Exiting...");
