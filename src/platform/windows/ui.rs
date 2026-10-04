@@ -18,18 +18,17 @@ use windows_sys::Win32::UI::Shell::{
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyIcon, DestroyMenu,
-    DestroyWindow, DispatchMessageW, GetCursorPos, GetMessageW, HICON, MSG,
-    PostMessageW, PostQuitMessage, RegisterClassW, RegisterWindowMessageW,
-    SetForegroundWindow, TrackPopupMenuEx, TranslateMessage, HWND_MESSAGE, HMENU,
-    MF_DISABLED, MF_GRAYED, MF_SEPARATOR, MF_STRING, TPM_NONOTIFY,
-    TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_APP, WM_CONTEXTMENU, WM_DESTROY, WM_HOTKEY,
-    WM_LBUTTONUP, WM_RBUTTONUP, WNDCLASSW, SW_SHOWNORMAL,
+    DestroyWindow, DispatchMessageW, GetCursorPos, GetMessageW, PostMessageW, PostQuitMessage,
+    RegisterClassW, RegisterWindowMessageW, SetForegroundWindow, TrackPopupMenuEx,
+    TranslateMessage, HICON, HMENU, HWND_MESSAGE, MF_DISABLED, MF_GRAYED, MF_SEPARATOR, MF_STRING,
+    MSG, SW_SHOWNORMAL, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_APP, WM_CONTEXTMENU,
+    WM_DESTROY, WM_HOTKEY, WM_LBUTTONUP, WM_RBUTTONUP, WNDCLASSW,
 };
 
 pub enum WindowsUiCommand {
     SetListening(bool),
     UpdateModels {
-        active_id: String,
+        active_id: Option<String>,
         installed_ids: Vec<String>,
         downloading_ids: Vec<String>,
     },
@@ -71,12 +70,12 @@ impl PlatformHandle for WindowsPlatformHandle {
 
     fn update_models(
         &self,
-        active_id: &str,
+        active_id: Option<&str>,
         installed_ids: &[String],
         downloading_ids: &[String],
     ) {
         let _ = self.cmd_tx.send(WindowsUiCommand::UpdateModels {
-            active_id: active_id.to_string(),
+            active_id: active_id.map(|s| s.to_string()),
             installed_ids: installed_ids.to_vec(),
             downloading_ids: downloading_ids.to_vec(),
         });
@@ -84,14 +83,16 @@ impl PlatformHandle for WindowsPlatformHandle {
     }
 
     fn update_history_state(&self, enabled: bool) {
-        let _ = self.cmd_tx.send(WindowsUiCommand::UpdateHistoryState(enabled));
+        let _ = self
+            .cmd_tx
+            .send(WindowsUiCommand::UpdateHistoryState(enabled));
         self.notify_ui();
     }
 
     fn open_history_folder(&self, history_dir: &Path) {
-        let _ = self
-            .cmd_tx
-            .send(WindowsUiCommand::OpenHistoryFolder(history_dir.to_path_buf()));
+        let _ = self.cmd_tx.send(WindowsUiCommand::OpenHistoryFolder(
+            history_dir.to_path_buf(),
+        ));
         self.notify_ui();
     }
 }
@@ -113,7 +114,7 @@ struct UiState {
     cmd_rx: Receiver<WindowsUiCommand>,
     listening: bool,
     history_enabled: bool,
-    model_name: String,
+    model_name: Option<String>,
     taskbar_created_msg: u32,
     icon_standby: HICON,
     icon_listening: HICON,
@@ -261,7 +262,10 @@ unsafe fn show_tray_menu(hwnd: HWND, state: &UiState) {
     AppendMenuW(hmenu, MF_SEPARATOR, 0, ptr::null());
 
     // 2. Model Info
-    let model_text = format!("Model: {}", state.model_name);
+    let model_text = match &state.model_name {
+        Some(name) => format!("Model: {}", name),
+        None => "Model: None installed".to_string(),
+    };
     AppendMenuW(
         hmenu,
         MF_STRING | MF_DISABLED | MF_GRAYED,
@@ -403,7 +407,7 @@ pub fn spawn_ui_thread(
                 cmd_rx,
                 listening: false,
                 history_enabled: false,
-                model_name: "Chinese + English (X-ASR / 480ms)".into(),
+                model_name: None,
                 taskbar_created_msg: taskbar_msg,
                 icon_standby,
                 icon_listening,

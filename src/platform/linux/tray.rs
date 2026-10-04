@@ -66,13 +66,20 @@ impl Tray for LinuxTray {
 
         // 2. Model item (Single informational line when <= 1 model, dynamic submenu when > 1)
         let models = self.models_info.lock().unwrap().clone();
+        let any_installed = models.iter().any(|m| m.is_installed);
+        let selected_model = models.iter().find(|m| m.is_selected);
+
         if models.len() <= 1 {
-            let active_label = models
-                .iter()
-                .find(|m| m.is_selected)
-                .map(|m| m.label.clone())
-                .or_else(|| models.first().map(|m| m.label.clone()))
-                .unwrap_or_else(|| "Chinese + English (X-ASR / 480ms) — 2026".to_string());
+            let active_label = if let Some(selected) = selected_model {
+                selected.label.clone()
+            } else if !any_installed {
+                "None installed".to_string()
+            } else {
+                models
+                    .first()
+                    .map(|m| m.label.clone())
+                    .unwrap_or_else(|| "None installed".to_string())
+            };
 
             menu_items.push(
                 StandardItem {
@@ -84,6 +91,17 @@ impl Tray for LinuxTray {
             );
         } else {
             let mut sub_items: Vec<MenuItem<Self>> = Vec::new();
+
+            if !any_installed && selected_model.is_none() {
+                sub_items.push(
+                    StandardItem {
+                        label: "Model: None installed".into(),
+                        enabled: false,
+                        ..Default::default()
+                    }
+                    .into(),
+                );
+            }
 
             for m in models {
                 let action_tx = self.action_tx.clone();
@@ -101,7 +119,7 @@ impl Tray for LinuxTray {
                     format!("{} — Download", m.label)
                 };
 
-                let item_enabled = !is_rec && !is_downloading && !is_selected;
+                let item_enabled = !is_rec && !is_downloading && !is_selected && m.is_installed;
                 let m_id = model_id.clone();
 
                 sub_items.push(
@@ -239,13 +257,13 @@ impl PlatformHandle for LinuxPlatformHandle {
 
     fn update_models(
         &self,
-        active_id: &str,
+        active_id: Option<&str>,
         installed_ids: &[String],
         downloading_ids: &[String],
     ) {
         let mut new_info = Vec::new();
         for entry in &self.registry.models {
-            let is_selected = entry.id == active_id;
+            let is_selected = active_id.map_or(false, |act| entry.id == act);
             let is_installed = installed_ids.iter().any(|id| id == &entry.id);
             let is_downloading = downloading_ids.iter().any(|id| id == &entry.id);
 
@@ -288,7 +306,10 @@ impl PlatformHandle for LinuxPlatformHandle {
             .arg(history_dir)
             .spawn();
         if let Err(err) = res {
-            eprintln!("[Platform] Failed to open folder {:?}: {}", history_dir, err);
+            eprintln!(
+                "[Platform] Failed to open folder {:?}: {}",
+                history_dir, err
+            );
         }
     }
 }
@@ -335,9 +356,7 @@ pub fn spawn_linux_tray(action_tx: Sender<AppAction>) -> LinuxPlatformHandle {
         .ok();
 
     let tray_handle = if let Some(ref runtime) = rt {
-        runtime.block_on(async {
-            tray.spawn().await.ok()
-        })
+        runtime.block_on(async { tray.spawn().await.ok() })
     } else {
         None
     };
@@ -407,5 +426,87 @@ fn create_circle_icon(filled: bool, size: i32) -> Icon {
         width: size,
         height: size,
         data,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_linux_tray_no_model_projection_and_menu() {
+        let registry_content = include_str!("../../../models/registry.json");
+        let registry = ModelRegistry::from_str(registry_content).unwrap();
+
+        let (action_tx, _) = crossbeam_channel::unbounded();
+        let handle = LinuxPlatformHandle {
+            is_listening: Arc::new(AtomicBool::new(false)),
+            history_enabled: Arc::new(AtomicBool::new(false)),
+            models_info: Arc::new(Mutex::new(Vec::new())),
+            registry,
+            tray_handle: None,
+            rt: None,
+        };
+
+        // Update models with NO active model and NO installed models
+        handle.update_models(None, &[], &[]);
+
+        let info = handle.models_info.lock().unwrap().clone();
+        assert!(!info.is_empty());
+        for item in &info {
+            assert!(
+                !item.is_selected,
+                "No entry must be marked selected when active_id is None"
+            );
+            assert!(!item.is_installed, "No entry must be marked installed");
+        }
+
+        // Test menu generation with LinuxTray
+        let tray = LinuxTray {
+            is_listening: handle.is_listening.clone(),
+            history_enabled: handle.history_enabled.clone(),
+            models_info: handle.models_info.clone(),
+            action_tx,
+        };
+
+        let menu_items = tray.menu();
+        let mut found_no_model_label = false;
+        for item in menu_items {
+            match item {
+                MenuItem::Standard(std_item) => {
+                    if std_item.label.contains("Model: None installed") {
+                        found_no_model_label = true;
+                    }
+                    assert!(
+                        !std_item
+                            .label
+                            .contains("Chinese + English (X-ASR / 480ms) — 2026"),
+                        "Menu must NOT fall back to hardcoded X-ASR label: {}",
+                        std_item.label
+                    );
+                }
+                MenuItem::SubMenu(sub) => {
+                    if sub.label == "Model" {
+                        for sub_item in sub.submenu {
+                            if let MenuItem::Standard(s) = sub_item {
+                                if s.label.contains("Model: None installed") {
+                                    found_no_model_label = true;
+                                }
+                                assert!(
+                                    !s.label.starts_with("✓"),
+                                    "No entry must have checkmark: {}",
+                                    s.label
+                                );
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        assert!(
+            found_no_model_label,
+            "Linux tray menu must display 'Model: None installed'"
+        );
     }
 }

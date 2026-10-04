@@ -63,9 +63,9 @@ pub fn run_in_process_benchmark(
 
     let model_manager =
         ModelManager::new().map_err(|e| format!("Failed to initialize ModelManager: {}", e))?;
-    let active_model = model_manager
-        .get_active_model()
-        .map_err(|e| format!("Failed to get active model: {}", e))?;
+    let active_model = model_manager.get_active_model().map_err(|_| {
+        "No model installed to benchmark. Install/select a model first.".to_string()
+    })?;
 
     // --- Step 1: Fresh Process Load ---
     let t_fresh_total_start = Instant::now();
@@ -228,6 +228,10 @@ fn measure_f10_latency() -> Result<F10LatencyResult, Box<dyn std::error::Error>>
 
     // Ensure unloaded starting baseline
     app.unload_model();
+
+    if app.model_manager.active_model_id.is_none() {
+        return Err("No model installed to benchmark. Install/select a model first.".into());
+    }
 
     // 1. Cold start_listening (runtime unloaded)
     let cold_metrics = app

@@ -6,16 +6,16 @@ use crate::platform::macos::hotkey::register_global_f10;
 use crate::platform::macos::injector::execute_diff;
 use crate::platform::PlatformHandle;
 use cocoa::appkit::{
-    NSApp, NSApplication, NSApplicationActivationPolicyAccessory, NSButton,
-    NSMenu, NSMenuItem, NSStatusBar, NSStatusItem, NSVariableStatusItemLength,
+    NSApp, NSApplication, NSApplicationActivationPolicyAccessory, NSButton, NSMenu, NSMenuItem,
+    NSStatusBar, NSStatusItem, NSVariableStatusItemLength,
 };
 use cocoa::base::{id, nil, selector};
 use cocoa::foundation::{NSAutoreleasePool, NSString};
 use core_foundation::base::kCFAllocatorDefault;
 use core_foundation::date::CFAbsoluteTimeGetCurrent;
 use core_foundation::runloop::{
-    kCFRunLoopCommonModes, CFRunLoopAddTimer, CFRunLoopGetCurrent,
-    CFRunLoopTimerContext, CFRunLoopTimerCreate, CFRunLoopTimerRef,
+    kCFRunLoopCommonModes, CFRunLoopAddTimer, CFRunLoopGetCurrent, CFRunLoopTimerContext,
+    CFRunLoopTimerCreate, CFRunLoopTimerRef,
 };
 use crossbeam_channel::{Receiver, Sender};
 use objc::declare::ClassDecl;
@@ -30,7 +30,7 @@ use std::sync::Arc;
 pub enum MacUiCommand {
     SetListening(bool),
     UpdateModels {
-        active_id: String,
+        active_id: Option<String>,
         installed_ids: Vec<String>,
         downloading_ids: Vec<String>,
     },
@@ -64,12 +64,12 @@ impl PlatformHandle for MacPlatformHandle {
 
     fn update_models(
         &self,
-        active_id: &str,
+        active_id: Option<&str>,
         installed_ids: &[String],
         downloading_ids: &[String],
     ) {
         let _ = self.cmd_tx.send(MacUiCommand::UpdateModels {
-            active_id: active_id.to_string(),
+            active_id: active_id.map(|s| s.to_string()),
             installed_ids: installed_ids.to_vec(),
             downloading_ids: downloading_ids.to_vec(),
         });
@@ -141,10 +141,7 @@ fn register_menu_delegate_class() -> &'static Class {
                 sel!(onOpenHistoryFolder:),
                 on_open_history_folder as extern "C" fn(&Object, Sel, id),
             );
-            decl.add_method(
-                sel!(onQuit:),
-                on_quit as extern "C" fn(&Object, Sel, id),
-            );
+            decl.add_method(sel!(onQuit:), on_quit as extern "C" fn(&Object, Sel, id));
         }
 
         let registered = decl.register();
@@ -163,16 +160,13 @@ pub struct MacUi {
     delegate: id,
     listening: bool,
     history_enabled: bool,
-    model_name: String,
+    model_name: Option<String>,
     running: Arc<AtomicBool>,
 }
 
 static mut MAC_UI_PTR: *mut MacUi = std::ptr::null_mut();
 
-extern "C" fn timer_callback(
-    _timer: CFRunLoopTimerRef,
-    _info: *mut c_void,
-) {
+extern "C" fn timer_callback(_timer: CFRunLoopTimerRef, _info: *mut c_void) {
     unsafe {
         if !MAC_UI_PTR.is_null() {
             (*MAC_UI_PTR).drain_commands();
@@ -205,7 +199,7 @@ impl MacUi {
                 delegate,
                 listening: false,
                 history_enabled: false,
-                model_name: "Chinese + English (X-ASR / 480ms)".into(),
+                model_name: None,
                 running: Arc::new(AtomicBool::new(true)),
             };
 
@@ -287,7 +281,10 @@ impl MacUi {
             let _: () = msg_send![menu, addItem:NSMenuItem::separatorItem(nil)];
 
             // 2. Model info row
-            let model_label = format!("Model: {}", self.model_name);
+            let model_label = match &self.model_name {
+                Some(name) => format!("Model: {}", name),
+                None => "Model: None installed".to_string(),
+            };
             let model_str = NSString::alloc(nil).init_str(&model_label);
             let item: id = msg_send![menu, addItemWithTitle:model_str action:selector("none") keyEquivalent:key_equiv];
             let _: () = msg_send![item, setEnabled:false];

@@ -11,10 +11,11 @@ pub trait PlatformHandle: Send + Sync {
     fn shutdown(&self);
     fn update_models(
         &self,
-        _active_id: &str,
+        _active_id: Option<&str>,
         _installed_ids: &[String],
         _downloading_ids: &[String],
-    ) {}
+    ) {
+    }
     fn update_history_state(&self, _enabled: bool) {}
     fn open_history_folder(&self, _history_dir: &Path) {}
 }
@@ -53,7 +54,9 @@ pub fn handle_subcommand(args: &[String]) -> Result<bool, Box<dyn std::error::Er
     }
 }
 
-pub fn init(action_tx: Sender<AppAction>) -> Result<Option<PlatformRuntime>, Box<dyn std::error::Error>> {
+pub fn init(
+    action_tx: Sender<AppAction>,
+) -> Result<Option<PlatformRuntime>, Box<dyn std::error::Error>> {
     #[cfg(target_os = "linux")]
     {
         linux::init(action_tx)

@@ -504,7 +504,11 @@ fn test_start_listening_auto_reloads_if_unloaded() {
 fn test_select_model_while_unloaded_and_transactional_safety() {
     let (mut app, _, _, _, _, _, _) = create_test_app();
 
-    let active_id = app.model_manager.active_model_id.clone();
+    let active_id = app
+        .model_manager
+        .active_model_id
+        .clone()
+        .expect("Model must be active in baseline");
     assert!(app.unload_model());
     assert!(!app.is_model_loaded());
 
@@ -534,7 +538,8 @@ fn test_select_model_while_unloaded_and_transactional_safety() {
         "Model must remain unloaded on candidate failure"
     );
     assert_eq!(
-        app.model_manager.active_model_id, active_id,
+        app.model_manager.active_model_id,
+        Some(active_id),
         "Active model ID must remain unchanged"
     );
 }
@@ -792,7 +797,11 @@ fn test_model_switch_invalidates_stale_deadline() {
     let (mut app, _, _, _, _, _, _) = create_test_app_with_config(config);
 
     assert!(app.is_model_loaded());
-    let active_id = app.model_manager.active_model_id.clone();
+    let active_id = app
+        .model_manager
+        .active_model_id
+        .clone()
+        .expect("Model must be active in baseline");
 
     // Expire the deadline for active model
     app.set_idle_unload_deadline(Some(std::time::Instant::now() - Duration::from_secs(10)));

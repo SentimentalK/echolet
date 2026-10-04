@@ -174,13 +174,37 @@ impl App {
         audio_source: Option<Box<dyn AudioSource>>,
         custom_config: Option<EcholetConfig>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        let config = custom_config.unwrap_or_else(EcholetConfig::load);
-        let history_dir = paths::history_dir();
-        let history_manager = HistoryManager::new(config.history_enabled, history_dir);
-
         crate::log::log("INFO", "initializing ModelManager");
         let model_manager =
             ModelManager::new().map_err(|e| format!("Failed to initialize ModelManager: {}", e))?;
+
+        Self::new_with_manager_and_config(
+            platform,
+            action_tx,
+            action_rx,
+            audio_rx,
+            audio_tx,
+            audio_starter,
+            audio_source,
+            custom_config,
+            model_manager,
+        )
+    }
+
+    pub fn new_with_manager_and_config(
+        platform: PlatformRuntime,
+        action_tx: Option<Sender<AppAction>>,
+        action_rx: Receiver<AppAction>,
+        audio_rx: Receiver<AudioChunk>,
+        audio_tx: Sender<AudioChunk>,
+        audio_starter: AudioStarter,
+        audio_source: Option<Box<dyn AudioSource>>,
+        custom_config: Option<EcholetConfig>,
+        model_manager: ModelManager,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let config = custom_config.unwrap_or_else(EcholetConfig::load);
+        let history_dir = paths::history_dir();
+        let history_manager = HistoryManager::new(config.history_enabled, history_dir);
 
         // Initial UI projection
         platform.handle.set_listening(false);
@@ -210,11 +234,23 @@ impl App {
 
         // If preload is requested, load active model during startup and begin idle deadline
         if app.config.preload_model_on_startup {
-            app.ensure_model_loaded()?;
-            app.schedule_idle_unload();
+            if app.model_manager.active_model_id.is_some() {
+                app.ensure_model_loaded()?;
+                app.schedule_idle_unload();
+            } else {
+                crate::log::log(
+                    "INFO",
+                    "preload requested but no active model installed; remaining unloaded",
+                );
+                println!("[ASR] Preload requested but no model is installed. Remaining unloaded.");
+            }
         }
 
         Ok(app)
+    }
+
+    pub fn has_active_model(&self) -> bool {
+        self.model_manager.active_model_id.is_some()
     }
 
     pub fn is_model_loaded(&self) -> bool {
@@ -335,7 +371,10 @@ impl App {
     }
 
     pub fn schedule_idle_unload(&mut self) {
-        if self.state.listening || !self.is_model_loaded() {
+        if self.state.listening
+            || !self.is_model_loaded()
+            || self.model_manager.active_model_id.is_none()
+        {
             self.cancel_idle_unload();
             return;
         }
@@ -343,12 +382,12 @@ impl App {
         match self.config.model_idle_unload_minutes {
             Some(0) => {
                 self.idle_unload_deadline = Some(std::time::Instant::now());
-                self.idle_unload_model_id = Some(self.model_manager.active_model_id.clone());
+                self.idle_unload_model_id = self.model_manager.active_model_id.clone();
             }
             Some(minutes) => {
                 let duration = Duration::from_secs(minutes as u64 * 60);
                 self.idle_unload_deadline = Some(std::time::Instant::now() + duration);
-                self.idle_unload_model_id = Some(self.model_manager.active_model_id.clone());
+                self.idle_unload_model_id = self.model_manager.active_model_id.clone();
             }
             None => {
                 self.cancel_idle_unload();
@@ -363,7 +402,7 @@ impl App {
 
         if let Some(deadline) = self.idle_unload_deadline {
             if let Some(ref scheduled_model) = self.idle_unload_model_id {
-                if scheduled_model != &self.model_manager.active_model_id {
+                if self.model_manager.active_model_id.as_ref() != Some(scheduled_model) {
                     // Stale deadline from previous model
                     self.cancel_idle_unload();
                     return;
@@ -395,12 +434,19 @@ impl App {
     pub fn expire_idle_unload_deadline(&mut self) {
         self.idle_unload_deadline = Some(std::time::Instant::now() - Duration::from_secs(1));
         if self.idle_unload_model_id.is_none() {
-            self.idle_unload_model_id = Some(self.model_manager.active_model_id.clone());
+            self.idle_unload_model_id = self.model_manager.active_model_id.clone();
         }
     }
 
     pub fn start_listening(&mut self) -> Option<StartListeningMetrics> {
         if self.state.listening {
+            return None;
+        }
+
+        if self.model_manager.active_model_id.is_none() {
+            let msg = "No model installed. Install/select a model first.";
+            crate::log::log("WARN", msg);
+            eprintln!("[ASR] {}", msg);
             return None;
         }
 
@@ -481,12 +527,14 @@ impl App {
         if !self.last_logged_text.is_empty() {
             let end_time = Local::now();
             let start_time = self.current_utterance_start.take().unwrap_or(end_time);
-            self.history_manager.on_utterance(
-                start_time,
-                end_time,
-                &self.last_logged_text,
-                &self.model_manager.active_model_id,
-            );
+            if let Some(ref active_id) = self.model_manager.active_model_id {
+                self.history_manager.on_utterance(
+                    start_time,
+                    end_time,
+                    &self.last_logged_text,
+                    active_id,
+                );
+            }
         }
         self.history_manager.flush();
 
@@ -536,7 +584,7 @@ impl App {
             return false;
         }
 
-        if self.model_manager.active_model_id == model_id {
+        if self.model_manager.active_model_id.as_deref() == Some(model_id) {
             if self.is_model_loaded() {
                 self.schedule_idle_unload();
                 return true;
@@ -762,12 +810,14 @@ impl App {
                         );
                         let end_time = Local::now();
                         let start_time = self.current_utterance_start.take().unwrap_or(end_time);
-                        self.history_manager.on_utterance(
-                            start_time,
-                            end_time,
-                            &self.last_logged_text,
-                            &self.model_manager.active_model_id,
-                        );
+                        if let Some(ref active_id) = self.model_manager.active_model_id {
+                            self.history_manager.on_utterance(
+                                start_time,
+                                end_time,
+                                &self.last_logged_text,
+                                active_id,
+                            );
+                        }
                     }
                     self.finalize_current_segment();
                 }
@@ -800,7 +850,9 @@ impl Drop for App {
 fn notify_platform_models(platform: &PlatformRuntime, manager: &ModelManager) {
     let installed_ids: Vec<String> = manager.installed.keys().cloned().collect();
     let downloading_ids: Vec<String> = manager.downloading.iter().cloned().collect();
-    platform
-        .handle
-        .update_models(&manager.active_model_id, &installed_ids, &downloading_ids);
+    platform.handle.update_models(
+        manager.active_model_id.as_deref(),
+        &installed_ids,
+        &downloading_ids,
+    );
 }

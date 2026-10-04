@@ -17,7 +17,7 @@ pub struct InstalledModel {
 pub struct ModelManager {
     pub registry: ModelRegistry,
     pub installed: HashMap<String, InstalledModel>,
-    pub active_model_id: String,
+    pub active_model_id: Option<String>,
     pub downloading: HashSet<String>,
     pub bundled_models_dir: PathBuf,
     pub user_models_dir: PathBuf,
@@ -27,8 +27,19 @@ pub struct ModelManager {
 impl ModelManager {
     pub fn new() -> Result<Self, String> {
         let res_root = paths::resource_root();
-        let registry_path = res_root.join("models/registry.json");
+        Self::new_with_paths(
+            res_root.join("models"),
+            paths::user_models_dir(),
+            paths::user_config_path(),
+        )
+    }
 
+    pub fn new_with_paths(
+        bundled_models_dir: PathBuf,
+        user_models_dir: PathBuf,
+        config_path: PathBuf,
+    ) -> Result<Self, String> {
+        let registry_path = bundled_models_dir.join("registry.json");
         let registry = if registry_path.exists() {
             ModelRegistry::from_file(&registry_path)?
         } else {
@@ -37,14 +48,10 @@ impl ModelManager {
             ModelRegistry::from_str(default_str)?
         };
 
-        let bundled_models_dir = res_root.join("models");
-        let user_models_dir = paths::user_models_dir();
-        let config_path = paths::user_config_path();
-
         let mut manager = Self {
             registry,
             installed: HashMap::new(),
-            active_model_id: String::new(),
+            active_model_id: None,
             downloading: HashSet::new(),
             bundled_models_dir,
             user_models_dir,
@@ -52,35 +59,35 @@ impl ModelManager {
         };
 
         manager.discover_installed();
+        manager.resolve_active_model();
 
-        // Resolve active model: Config -> Default bundled -> First available
-        let saved_config = manager.load_config();
+        Ok(manager)
+    }
+
+    /// Resolves active model: saved selected model if installed -> registry default if installed -> first installed.
+    /// If no models are installed, leaves active model absent (None).
+    pub fn resolve_active_model(&mut self) -> Option<String> {
+        let saved_config = self.load_config();
         let chosen_id = saved_config
             .and_then(|c| {
-                if manager.installed.contains_key(&c.selected_model) {
+                if self.installed.contains_key(&c.selected_model) {
                     Some(c.selected_model)
                 } else {
                     None
                 }
             })
             .or_else(|| {
-                let default_id = manager.registry.default_model_id.clone();
-                if manager.installed.contains_key(&default_id) {
+                let default_id = self.registry.default_model_id.clone();
+                if self.installed.contains_key(&default_id) {
                     Some(default_id)
                 } else {
                     None
                 }
             })
-            .or_else(|| manager.installed.keys().next().cloned())
-            .ok_or_else(|| {
-                format!(
-                    "No installed models found in bundled dir {:?} or user dir {:?}",
-                    manager.bundled_models_dir, manager.user_models_dir
-                )
-            })?;
+            .or_else(|| self.installed.keys().next().cloned());
 
-        manager.active_model_id = chosen_id;
-        Ok(manager)
+        self.active_model_id = chosen_id.clone();
+        chosen_id
     }
 
     pub fn discover_installed(&mut self) {
@@ -151,10 +158,18 @@ impl ModelManager {
         }
     }
 
+    pub fn active_model_id(&self) -> Option<&str> {
+        self.active_model_id.as_deref()
+    }
+
     pub fn get_active_model(&self) -> Result<&InstalledModel, String> {
+        let active_id = self
+            .active_model_id
+            .as_deref()
+            .ok_or_else(|| "No active model installed".to_string())?;
         self.installed
-            .get(&self.active_model_id)
-            .ok_or_else(|| format!("Active model '{}' is not installed", self.active_model_id))
+            .get(active_id)
+            .ok_or_else(|| format!("Active model '{}' is not installed", active_id))
     }
 
     pub fn get_model(&self, id: &str) -> Option<&InstalledModel> {
@@ -187,7 +202,7 @@ impl ModelManager {
         if !self.installed.contains_key(model_id) {
             return Err(format!("Model '{}' is not installed", model_id));
         }
-        self.active_model_id = model_id.to_string();
+        self.active_model_id = Some(model_id.to_string());
         let _ = self.save_config();
         Ok(self.installed.get(model_id).unwrap())
     }
@@ -202,7 +217,9 @@ impl ModelManager {
 
     pub fn save_config(&self) -> Result<(), String> {
         let mut config = EcholetConfig::load_from(&self.config_path);
-        config.selected_model = self.active_model_id.clone();
+        if let Some(ref active) = self.active_model_id {
+            config.selected_model = active.clone();
+        }
         config.save_to(&self.config_path)
     }
 }

@@ -1,8 +1,8 @@
 use crossbeam_channel::unbounded;
 use echolet::actions::AppAction;
 use echolet::app::App;
-use echolet::models::manifest::ModelManifest;
 use echolet::models::manager::ModelManager;
+use echolet::models::manifest::ModelManifest;
 use echolet::models::registry::ModelRegistry;
 use echolet::platform::{PlatformHandle, PlatformRuntime, TextInjector};
 use std::fs;
@@ -31,25 +31,33 @@ impl PlatformHandle for FakePlatformHandle {
 
     fn update_models(
         &self,
-        active_id: &str,
+        active_id: Option<&str>,
         _installed_ids: &[String],
         _downloading_ids: &[String],
     ) {
-        self.models_history.lock().unwrap().push(active_id.to_string());
+        self.models_history
+            .lock()
+            .unwrap()
+            .push(active_id.unwrap_or("").to_string());
     }
 }
 
 #[test]
 fn test_registry_parsing_and_invariants() {
     let registry_content = include_str!("../models/registry.json");
-    let registry = ModelRegistry::from_str(registry_content).expect("Failed to parse registry.json");
+    let registry =
+        ModelRegistry::from_str(registry_content).expect("Failed to parse registry.json");
 
     assert_eq!(registry.schema_version, 1);
     assert_eq!(
         registry.default_model_id,
         "echolet-xasr-zh-en-480ms-689ff18c584d29910da37b6fe904db0c1489c9d1"
     );
-    assert_eq!(registry.models.len(), 1, "Registry must contain single default X-ASR model");
+    assert_eq!(
+        registry.models.len(),
+        1,
+        "Registry must contain single default X-ASR model"
+    );
 
     // 1. X-ASR Bilingual Model (2026 Default Bundled)
     let xasr = registry
@@ -77,7 +85,8 @@ fn test_registry_parsing_and_invariants() {
 
 #[test]
 fn test_manifest_validation_catches_missing_files() {
-    let tmp_dir = std::env::temp_dir().join(format!("echolet-test-manifest-{}", std::process::id()));
+    let tmp_dir =
+        std::env::temp_dir().join(format!("echolet-test-manifest-{}", std::process::id()));
     let _ = fs::remove_dir_all(&tmp_dir);
     fs::create_dir_all(&tmp_dir).unwrap();
 
@@ -102,7 +111,11 @@ fn test_manifest_validation_catches_missing_files() {
     fs::write(tmp_dir.join("encoder.onnx"), b"dummy").unwrap();
     fs::write(tmp_dir.join("decoder.onnx"), b"dummy").unwrap();
     let err2 = manifest.validate_files(&tmp_dir).unwrap_err();
-    assert!(err2.contains("missing Joiner ONNX model"), "Error: {}", err2);
+    assert!(
+        err2.contains("missing Joiner ONNX model"),
+        "Error: {}",
+        err2
+    );
 
     // Create remaining files
     fs::write(tmp_dir.join("joiner.onnx"), b"dummy").unwrap();
@@ -122,13 +135,17 @@ fn test_config_persistence_and_fallback() {
     manager.config_path = tmp_dir.join("config.json");
 
     // Save config
-    manager.active_model_id = "echolet-xasr-zh-en-480ms-689ff18c584d29910da37b6fe904db0c1489c9d1".into();
+    manager.active_model_id =
+        Some("echolet-xasr-zh-en-480ms-689ff18c584d29910da37b6fe904db0c1489c9d1".into());
     manager.save_config().expect("Failed to save config");
     assert!(manager.config_path.exists());
 
     // Load config
     let loaded = manager.load_config().expect("Failed to load config");
-    assert_eq!(loaded.selected_model, "echolet-xasr-zh-en-480ms-689ff18c584d29910da37b6fe904db0c1489c9d1");
+    assert_eq!(
+        loaded.selected_model,
+        "echolet-xasr-zh-en-480ms-689ff18c584d29910da37b6fe904db0c1489c9d1"
+    );
 
     let _ = fs::remove_dir_all(&tmp_dir);
 }
@@ -153,25 +170,38 @@ fn test_transactional_model_switch_and_listening_guard() {
     };
 
     let (_, audio_rx) = unbounded();
-    let mut app = App::new_with_audio(platform, action_rx, audio_rx, None)
-        .expect("Failed to create App");
+    let mut app =
+        App::new_with_audio(platform, action_rx, audio_rx, None).expect("Failed to create App");
 
     let initial_model = app.model_manager.active_model_id.clone();
-    assert!(!initial_model.is_empty(), "Initial active model must not be empty");
+    assert!(
+        initial_model.is_some(),
+        "Initial active model must not be absent"
+    );
 
     // 1. Guard check: Switching while Listening must be rejected
     app.start_listening();
     assert!(app.state.listening);
 
-    action_tx.send(AppAction::SelectModel("non-existent-model".into())).unwrap();
+    action_tx
+        .send(AppAction::SelectModel("non-existent-model".into()))
+        .unwrap();
     app.tick();
-    assert_eq!(app.model_manager.active_model_id, initial_model, "Model must not change while listening");
+    assert_eq!(
+        app.model_manager.active_model_id, initial_model,
+        "Model must not change while listening"
+    );
 
     app.stop_listening();
     assert!(!app.state.listening);
 
     // 2. Transactional safety check: Switching to invalid/uninstalled model must not crash or drop active recognizer
-    action_tx.send(AppAction::SelectModel("corrupted-model-id".into())).unwrap();
+    action_tx
+        .send(AppAction::SelectModel("corrupted-model-id".into()))
+        .unwrap();
     app.tick();
-    assert_eq!(app.model_manager.active_model_id, initial_model, "Active model must remain untouched on failure");
+    assert_eq!(
+        app.model_manager.active_model_id, initial_model,
+        "Active model must remain untouched on failure"
+    );
 }
