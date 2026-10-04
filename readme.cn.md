@@ -143,3 +143,5 @@ Echolet 采用 [Apache License 2.0](LICENSE) 开源许可证。
 - [k2-fsa/sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) - 新一代端到端语音识别框架。
 - [GilgameshWind / X-ASR](https://github.com/GilgameshWind) - 优秀的开源中英双语流式语音识别模型。
 - [Microsoft ONNX Runtime](https://onnxruntime.ai/) - 高性能跨平台机器学习推理引擎。
+- [Lucide](https://lucide.dev/) - 精美一致的开源图标库（audio-waveform 图标遵循 ISC License）。
+

@@ -84,7 +84,8 @@ Write-Host "--> Checking license notices..."
 $Licenses = @(
     "sherpa-onnx-LICENSE",
     "onnxruntime-LICENSE",
-    "model-LICENSE"
+    "model-LICENSE",
+    "lucide-LICENSE"
 )
 foreach ($lic in $Licenses) {
     $TargetLic = "$AppDir\licenses\$lic"

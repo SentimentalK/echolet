@@ -85,6 +85,7 @@ REQUIRED_FILES=(
     "${DIST_DIR}/licenses/sherpa-onnx-LICENSE"
     "${DIST_DIR}/licenses/onnxruntime-LICENSE"
     "${DIST_DIR}/licenses/model-LICENSE"
+    "${DIST_DIR}/licenses/lucide-LICENSE"
 )
 
 for file in "${REQUIRED_FILES[@]}"; do

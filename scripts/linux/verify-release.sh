@@ -107,6 +107,7 @@ LICENSES=(
     "sherpa-onnx-LICENSE"
     "onnxruntime-LICENSE"
     "model-LICENSE"
+    "lucide-LICENSE"
 )
 
 for lic in "${LICENSES[@]}"; do

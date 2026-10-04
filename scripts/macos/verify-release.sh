@@ -99,6 +99,7 @@ LICENSES=(
     "sherpa-onnx-LICENSE"
     "onnxruntime-LICENSE"
     "model-LICENSE"
+    "lucide-LICENSE"
 )
 
 for lic in "${LICENSES[@]}"; do
@@ -109,7 +110,14 @@ for lic in "${LICENSES[@]}"; do
     fi
 done
 
-# 7. Check code signature
+# 7. Check application icon
+echo "--> Checking application icon..."
+if [[ ! -f "${APP_DIR}/Contents/Resources/Echolet.icns" || ! -s "${APP_DIR}/Contents/Resources/Echolet.icns" ]]; then
+    echo "[Error] Missing or empty Echolet.icns in Contents/Resources!" >&2
+    exit 1
+fi
+
+# 8. Check code signature
 if command -v codesign >/dev/null 2>&1; then
     echo "--> Verifying code signature..."
     codesign --verify --deep --strict "${APP_DIR}"

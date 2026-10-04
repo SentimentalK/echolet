@@ -143,3 +143,4 @@ Special thanks to the following open-source projects and communities:
 - [k2-fsa/sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) - Next-generation speech recognition framework.
 - [GilgameshWind / X-ASR](https://github.com/GilgameshWind) - Bilingual Zipformer streaming speech recognition models.
 - [Microsoft ONNX Runtime](https://onnxruntime.ai/) - High-performance cross-platform ML engine.
+- [Lucide](https://lucide.dev/) - Beautiful & consistent icon toolkit (audio-waveform icon used under ISC License).

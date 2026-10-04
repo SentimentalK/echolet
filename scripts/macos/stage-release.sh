@@ -72,7 +72,13 @@ cp "${REPO_ROOT}/models/registry.json" "${APP_DIR}/Contents/Resources/models/reg
 echo "--> Copying licenses..."
 cp -a "${REPO_ROOT}/licenses"/* "${APP_DIR}/Contents/Resources/licenses/"
 
-# 10. Generate Info.plist
+# 10. Copy application icon
+if [[ -f "${REPO_ROOT}/assets/macos/Echolet.icns" ]]; then
+    echo "--> Copying application icon..."
+    cp "${REPO_ROOT}/assets/macos/Echolet.icns" "${APP_DIR}/Contents/Resources/Echolet.icns"
+fi
+
+# 11. Generate Info.plist
 echo "--> Writing Info.plist..."
 cat << 'EOF' > "${APP_DIR}/Contents/Info.plist"
 <?xml version="1.0" encoding="UTF-8"?>
@@ -87,6 +93,8 @@ cat << 'EOF' > "${APP_DIR}/Contents/Info.plist"
     <string>com.echolet.app</string>
     <key>CFBundleExecutable</key>
     <string>echolet</string>
+    <key>CFBundleIconFile</key>
+    <string>Echolet</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
@@ -101,7 +109,7 @@ cat << 'EOF' > "${APP_DIR}/Contents/Info.plist"
 </plist>
 EOF
 
-# 11. Nested Code Signing (Frameworks -> Executable -> App Bundle)
+# 12. Nested Code Signing (Frameworks -> Executable -> App Bundle)
 if command -v codesign >/dev/null 2>&1; then
     echo "--> Performing nested ad-hoc code signing..."
     for dylib in "${APP_DIR}/Contents/Frameworks"/*.dylib*; do
