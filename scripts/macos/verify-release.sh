@@ -60,36 +60,47 @@ if command -v otool >/dev/null 2>&1; then
     done
 fi
 
-# 4. Check model files, manifest, and registry
-echo "--> Checking model manifest, registry, and files..."
-if [[ ! -f "${APP_DIR}/Contents/Resources/model.json" ]]; then
-    echo "[Error] Missing model.json manifest!" >&2
-    exit 1
-fi
-
+# 4. Check model registry and catalog metadata
+echo "--> Checking model registry and catalog metadata..."
 if [[ ! -f "${APP_DIR}/Contents/Resources/models/registry.json" ]]; then
     echo "[Error] Missing models/registry.json!" >&2
     exit 1
 fi
 
-MODEL_FILES=(
-    "encoder-480ms.onnx"
-    "decoder-480ms.onnx"
-    "joiner-480ms.onnx"
-    "tokens.txt"
-)
+if grep -q '"bundled": true' "${APP_DIR}/Contents/Resources/models/registry.json"; then
+    echo "[Error] models/registry.json still marks model as bundled: true!" >&2
+    exit 1
+fi
+if ! grep -q '"bundled": false' "${APP_DIR}/Contents/Resources/models/registry.json"; then
+    echo "[Error] models/registry.json does not mark model as bundled: false!" >&2
+    exit 1
+fi
 
-for mf in "${MODEL_FILES[@]}"; do
-    TARGET_MF="${APP_DIR}/Contents/Resources/models/bilingual-zh-en/${mf}"
-    if [[ ! -f "${TARGET_MF}" || ! -s "${TARGET_MF}" ]]; then
-        echo "[Error] Missing or empty model file: ${TARGET_MF}" >&2
-        exit 1
-    fi
-done
+if [[ -f "${APP_DIR}/Contents/Resources/model.json" ]]; then
+    echo "[Error] root model.json found in macOS App Bundle!" >&2
+    exit 1
+fi
 
-# 5. Ensure test_wavs is excluded
-if [[ -d "${APP_DIR}/Contents/Resources/models/bilingual-zh-en/test_wavs" ]]; then
-    echo "[Error] test_wavs directory found in production release!" >&2
+# 5. Assert that model payload files/directories are absent
+echo "--> Verifying absence of model weight payload..."
+if [[ -d "${APP_DIR}/Contents/Resources/models/bilingual-zh-en" ]]; then
+    echo "[Error] models/bilingual-zh-en directory found in macOS App Bundle!" >&2
+    exit 1
+fi
+
+if find "${APP_DIR}" -name "*.onnx" | grep -q .; then
+    echo "[Error] ONNX model files found in macOS App Bundle!" >&2
+    find "${APP_DIR}" -name "*.onnx" >&2
+    exit 1
+fi
+
+if find "${APP_DIR}" -name "tokens.txt" | grep -q .; then
+    echo "[Error] tokens.txt found in macOS App Bundle!" >&2
+    exit 1
+fi
+
+if [[ -d "${APP_DIR}/Contents/Resources/models/test_wavs" || -d "${APP_DIR}/Contents/Resources/models/bilingual-zh-en/test_wavs" ]]; then
+    echo "[Error] test_wavs directory found in macOS App Bundle!" >&2
     exit 1
 fi
 
@@ -123,5 +134,9 @@ if command -v codesign >/dev/null 2>&1; then
     codesign --verify --deep --strict "${APP_DIR}"
     echo "--> Code signature verification: PASSED"
 fi
+
+# 9. Print final bundle size
+echo "--> Staged macOS App Bundle size:"
+du -sh "${APP_DIR}"
 
 echo "=== All Echolet macOS release verification checks PASSED! ==="

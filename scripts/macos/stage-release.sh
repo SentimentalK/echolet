@@ -28,10 +28,10 @@ echo "=== Building & Staging Echolet macOS App Bundle (${ARCH}) ==="
 echo "Repo root:  ${REPO_ROOT}"
 echo "App target: ${APP_DIR}"
 
-# 2. Ensure local staging assets exist
-if [[ ! -d "${LOCAL_RUNTIME}/runtime/lib" || ! -f "${LOCAL_RUNTIME}/models/bilingual-zh-en/encoder-480ms.onnx" ]]; then
-    echo "--> Local assets not found. Running prepare-assets.sh first..."
-    "${REPO_ROOT}/scripts/macos/prepare-assets.sh" "${ARCH}"
+# 2. Ensure local staging assets exist (runtime libraries only)
+if [[ ! -d "${LOCAL_RUNTIME}/runtime/lib" || ! -f "${LOCAL_RUNTIME}/runtime/lib/libsherpa-onnx-c-api.dylib" ]]; then
+    echo "--> Local runtime libraries not found. Running prepare-assets.sh --runtime-only first..."
+    "${REPO_ROOT}/scripts/macos/prepare-assets.sh" "${ARCH}" --runtime-only
 fi
 
 # 3. Build release binary with bundle RPATH (@executable_path/../Frameworks)
@@ -43,7 +43,7 @@ ECHOLET_BUNDLE_BUILD=1 cargo build --release
 rm -rf "${APP_DIR}"
 mkdir -p "${APP_DIR}/Contents/MacOS"
 mkdir -p "${APP_DIR}/Contents/Frameworks"
-mkdir -p "${APP_DIR}/Contents/Resources/models/bilingual-zh-en"
+mkdir -p "${APP_DIR}/Contents/Resources/models"
 mkdir -p "${APP_DIR}/Contents/Resources/licenses"
 
 # 5. Copy executable
@@ -55,30 +55,21 @@ chmod +x "${APP_DIR}/Contents/MacOS/echolet"
 echo "--> Copying native runtime libraries into Contents/Frameworks/..."
 cp -a "${LOCAL_RUNTIME}/runtime/lib"/*.dylib* "${APP_DIR}/Contents/Frameworks/"
 
-# 7. Copy models (excluding test_wavs)
-echo "--> Copying model files..."
-cp "${LOCAL_RUNTIME}/models/bilingual-zh-en/encoder-480ms.onnx" "${APP_DIR}/Contents/Resources/models/bilingual-zh-en/"
-cp "${LOCAL_RUNTIME}/models/bilingual-zh-en/decoder-480ms.onnx" "${APP_DIR}/Contents/Resources/models/bilingual-zh-en/"
-cp "${LOCAL_RUNTIME}/models/bilingual-zh-en/joiner-480ms.onnx" "${APP_DIR}/Contents/Resources/models/bilingual-zh-en/"
-cp "${LOCAL_RUNTIME}/models/bilingual-zh-en/tokens.txt" "${APP_DIR}/Contents/Resources/models/bilingual-zh-en/"
-
-# 8. Copy model manifest and registry
-echo "--> Copying manifest and registry..."
-cp "${REPO_ROOT}/model.json" "${APP_DIR}/Contents/Resources/model.json"
-cp "${REPO_ROOT}/model.json" "${APP_DIR}/Contents/Resources/models/bilingual-zh-en/model.json"
+# 7. Copy model catalog metadata (registry.json only, no weights)
+echo "--> Copying model registry..."
 cp "${REPO_ROOT}/models/registry.json" "${APP_DIR}/Contents/Resources/models/registry.json"
 
-# 9. Copy licenses
+# 8. Copy licenses
 echo "--> Copying licenses..."
 cp -a "${REPO_ROOT}/licenses"/* "${APP_DIR}/Contents/Resources/licenses/"
 
-# 10. Copy application icon
+# 9. Copy application icon
 if [[ -f "${REPO_ROOT}/assets/macos/Echolet.icns" ]]; then
     echo "--> Copying application icon..."
     cp "${REPO_ROOT}/assets/macos/Echolet.icns" "${APP_DIR}/Contents/Resources/Echolet.icns"
 fi
 
-# 11. Generate Info.plist
+# 10. Generate Info.plist
 echo "--> Writing Info.plist..."
 cat << 'EOF' > "${APP_DIR}/Contents/Info.plist"
 <?xml version="1.0" encoding="UTF-8"?>
@@ -109,7 +100,7 @@ cat << 'EOF' > "${APP_DIR}/Contents/Info.plist"
 </plist>
 EOF
 
-# 12. Nested Code Signing (Frameworks -> Executable -> App Bundle)
+# 11. Nested Code Signing (Frameworks -> Executable -> App Bundle)
 if command -v codesign >/dev/null 2>&1; then
     echo "--> Performing nested ad-hoc code signing..."
     for dylib in "${APP_DIR}/Contents/Frameworks"/*.dylib*; do
@@ -121,7 +112,55 @@ if command -v codesign >/dev/null 2>&1; then
     codesign --force --sign - "${APP_DIR}"
 fi
 
+# 12. Sanity check bundle completeness
+echo "--> Validating macOS app bundle structure..."
+REQUIRED_FILES=(
+    "${APP_DIR}/Contents/MacOS/echolet"
+    "${APP_DIR}/Contents/Info.plist"
+    "${APP_DIR}/Contents/Resources/models/registry.json"
+    "${APP_DIR}/Contents/Frameworks/libsherpa-onnx-c-api.dylib"
+    "${APP_DIR}/Contents/Frameworks/libonnxruntime.dylib"
+    "${APP_DIR}/Contents/Resources/licenses/sherpa-onnx-LICENSE"
+    "${APP_DIR}/Contents/Resources/licenses/onnxruntime-LICENSE"
+    "${APP_DIR}/Contents/Resources/licenses/model-LICENSE"
+    "${APP_DIR}/Contents/Resources/licenses/lucide-LICENSE"
+)
+
+for file in "${REQUIRED_FILES[@]}"; do
+    if [[ ! -f "${file}" ]]; then
+        echo "[Error] Missing expected bundle file: ${file}" >&2
+        exit 1
+    fi
+done
+
+# Ensure model payload files and directories are NOT in production bundle
+if [[ -f "${APP_DIR}/Contents/Resources/model.json" ]]; then
+    echo "[Error] root model.json found in macOS App Bundle!" >&2
+    exit 1
+fi
+
+if [[ -d "${APP_DIR}/Contents/Resources/models/bilingual-zh-en" ]]; then
+    echo "[Error] models/bilingual-zh-en directory found in macOS App Bundle!" >&2
+    exit 1
+fi
+
+if find "${APP_DIR}" -name "*.onnx" | grep -q .; then
+    echo "[Error] ONNX model files found in macOS App Bundle!" >&2
+    exit 1
+fi
+
+if find "${APP_DIR}" -name "tokens.txt" | grep -q .; then
+    echo "[Error] tokens.txt found in macOS App Bundle!" >&2
+    exit 1
+fi
+
+if [[ -d "${APP_DIR}/Contents/Resources/models/test_wavs" || -d "${APP_DIR}/Contents/Resources/models/bilingual-zh-en/test_wavs" ]]; then
+    echo "[Error] test_wavs directory found in macOS App Bundle!" >&2
+    exit 1
+fi
+
 echo "=== Echolet macOS App Bundle staged successfully at: ${APP_DIR} ==="
 ls -lh "${APP_DIR}/Contents/MacOS"
 ls -lh "${APP_DIR}/Contents/Frameworks"
-ls -lh "${APP_DIR}/Contents/Resources/models/bilingual-zh-en"
+ls -lh "${APP_DIR}/Contents/Resources/models"
+ls -lh "${APP_DIR}/Contents/Resources/licenses"

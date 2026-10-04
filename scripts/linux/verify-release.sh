@@ -68,35 +68,46 @@ if echo "${LDD_OUTPUT}" | grep "not found" >/dev/null; then
     exit 1
 fi
 
-# 4. Check model files, manifest, and registry
-echo "--> Checking model manifest, registry, and files..."
-if [[ ! -f "${DIST_DIR}/model.json" ]]; then
-    echo "[Error] Missing model.json manifest!" >&2
-    exit 1
-fi
-
+# 4. Check model registry and catalog metadata
+echo "--> Checking model registry and catalog metadata..."
 if [[ ! -f "${DIST_DIR}/models/registry.json" ]]; then
     echo "[Error] Missing models/registry.json!" >&2
     exit 1
 fi
 
-MODEL_FILES=(
-    "encoder-480ms.onnx"
-    "decoder-480ms.onnx"
-    "joiner-480ms.onnx"
-    "tokens.txt"
-)
+if grep -q '"bundled": true' "${DIST_DIR}/models/registry.json"; then
+    echo "[Error] models/registry.json still marks model as bundled: true!" >&2
+    exit 1
+fi
+if ! grep -q '"bundled": false' "${DIST_DIR}/models/registry.json"; then
+    echo "[Error] models/registry.json does not mark model as bundled: false!" >&2
+    exit 1
+fi
 
-for mf in "${MODEL_FILES[@]}"; do
-    TARGET_MF="${DIST_DIR}/models/bilingual-zh-en/${mf}"
-    if [[ ! -f "${TARGET_MF}" || ! -s "${TARGET_MF}" ]]; then
-        echo "[Error] Missing or empty model file: ${TARGET_MF}" >&2
-        exit 1
-    fi
-done
+if [[ -f "${DIST_DIR}/model.json" ]]; then
+    echo "[Error] root model.json found in production release!" >&2
+    exit 1
+fi
 
-# 5. Ensure test_wavs is excluded
-if [[ -d "${DIST_DIR}/models/bilingual-zh-en/test_wavs" ]]; then
+# 5. Assert that model payload files/directories are absent
+echo "--> Verifying absence of model weight payload..."
+if [[ -d "${DIST_DIR}/models/bilingual-zh-en" ]]; then
+    echo "[Error] models/bilingual-zh-en directory found in release bundle!" >&2
+    exit 1
+fi
+
+if find "${DIST_DIR}" -name "*.onnx" | grep -q .; then
+    echo "[Error] ONNX model files found in release bundle!" >&2
+    find "${DIST_DIR}" -name "*.onnx" >&2
+    exit 1
+fi
+
+if find "${DIST_DIR}" -name "tokens.txt" | grep -q .; then
+    echo "[Error] tokens.txt found in release bundle!" >&2
+    exit 1
+fi
+
+if [[ -d "${DIST_DIR}/models/test_wavs" || -d "${DIST_DIR}/models/bilingual-zh-en/test_wavs" ]]; then
     echo "[Error] test_wavs directory found in production release!" >&2
     exit 1
 fi
@@ -120,9 +131,13 @@ done
 
 # 7. Check for host path leakage in text files
 echo "--> Checking for host path leakage..."
-if grep -rn "/home/sentimentalk/sherpa-onnx" "${DIST_DIR}/model.json" "${DIST_DIR}/licenses" "${DIST_DIR}/models/registry.json" >/dev/null 2>&1; then
+if grep -rn "/home/sentimentalk/sherpa-onnx" "${DIST_DIR}/licenses" "${DIST_DIR}/models/registry.json" >/dev/null 2>&1; then
     echo "[Error] Host path leaked into release metadata/licenses!" >&2
     exit 1
 fi
+
+# 8. Print final bundle size
+echo "--> Staged package size:"
+du -sh "${DIST_DIR}"
 
 echo "=== All production release verification checks PASSED (${DIST_NAME})! ==="

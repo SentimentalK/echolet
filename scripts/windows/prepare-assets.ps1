@@ -1,6 +1,6 @@
-# PowerShell script to prepare native Windows x64 runtime and base model assets
 param(
-    [string]$Architecture = "x64"
+    [string]$Architecture = "x64",
+    [switch]$RuntimeOnly
 )
 
 $ErrorActionPreference = "Stop"
@@ -10,6 +10,14 @@ $StagingDir = "$RepoRoot\.local-runtime"
 $RuntimeLibDir = "$StagingDir\runtime\lib"
 $RuntimeBinDir = "$StagingDir\runtime\bin"
 $ModelDir = "$StagingDir\models\bilingual-zh-en"
+
+# Fast path for RuntimeOnly
+if ($RuntimeOnly) {
+    if ((Test-Path "$RuntimeLibDir\sherpa-onnx-c-api.lib") -and (Test-Path "$RuntimeBinDir\sherpa-onnx-c-api.dll") -and (Test-Path "$StagingDir\models\registry.json")) {
+        Write-Host "[Assets] .local-runtime/ runtime libraries and registry are already populated ($Architecture)."
+        exit 0
+    }
+}
 
 $SherpaVersion = "v1.13.6"
 $SherpaAsset = "sherpa-onnx-v1.13.6-win-x64-shared-MD-Release-lib.tar.bz2"
@@ -28,12 +36,15 @@ $TestWavUrl = "https://huggingface.co/csukuangfj/sherpa-onnx-streaming-zipformer
 $TestWavSha256 = "7d93384ca14702cc584a7a33fe2fed92e89e708549161cb12ea38c916882103b"
 
 Write-Host "=== Downloading & Verifying Official Echolet Windows Assets ($Architecture) ==="
-Write-Host "Repo root:   $RepoRoot"
-Write-Host "Staging dir: $StagingDir"
+Write-Host "Repo root:    $RepoRoot"
+Write-Host "Staging dir:  $StagingDir"
+Write-Host "Runtime only: $RuntimeOnly"
 
 New-Item -ItemType Directory -Force -Path $RuntimeLibDir | Out-Null
 New-Item -ItemType Directory -Force -Path $RuntimeBinDir | Out-Null
-New-Item -ItemType Directory -Force -Path "$ModelDir\test_wavs" | Out-Null
+if (-not $RuntimeOnly) {
+    New-Item -ItemType Directory -Force -Path "$ModelDir\test_wavs" | Out-Null
+}
 New-Item -ItemType Directory -Force -Path "$RepoRoot\dist" | Out-Null
 
 $TempDir = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), [System.Guid]::NewGuid().ToString())
@@ -61,59 +72,64 @@ try {
     Copy-Item -Path "$ExtractedLib\*.dll" -Destination $RuntimeLibDir -Force
     Copy-Item -Path "$ExtractedLib\*.dll" -Destination $RuntimeBinDir -Force
 
-    # 2. Acquire Echolet Base Model from lock file
-    $CachedArchive = Join-Path "$RepoRoot\dist" $ModelArchive
-    if (!(Test-Path $CachedArchive)) {
-        Write-Host "--> Downloading Echolet Base Model ($ModelArchive)..."
-        curl.exe -L --fail --retry 3 --retry-delay 2 -s -o $CachedArchive $ModelUrl
+    if (-not $RuntimeOnly) {
+        # 2. Acquire Echolet Base Model from lock file
+        $CachedArchive = Join-Path "$RepoRoot\dist" $ModelArchive
+        if (!(Test-Path $CachedArchive)) {
+            Write-Host "--> Downloading Echolet Base Model ($ModelArchive)..."
+            curl.exe -L --fail --retry 3 --retry-delay 2 -s -o $CachedArchive $ModelUrl
+        }
+
+        Write-Host "--> Verifying Echolet Base Model SHA256..."
+        $ModelCalcSha = (Get-FileHash -Algorithm SHA256 $CachedArchive).Hash.ToLower()
+        if ($ModelCalcSha -ne $ModelSha256.ToLower()) {
+            Write-Error "[Error] SHA256 mismatch for Base Model! Expected: $ModelSha256, Got: $ModelCalcSha"
+            exit 1
+        }
+        Write-Host "--> Base Model SHA256 verified: OK"
+
+        Write-Host "--> Extracting Base Model into .local-runtime/models/bilingual-zh-en/..."
+        $ModelExtractDir = "$TempDir\model-extract"
+        New-Item -ItemType Directory -Force -Path $ModelExtractDir | Out-Null
+        if (Get-Command zstd -ErrorAction SilentlyContinue) {
+            zstd -d -c $CachedArchive | tar.exe -xf - -C $ModelExtractDir
+        } else {
+            tar.exe --zstd -xf $CachedArchive -C $ModelExtractDir
+        }
+
+        # Flatten: tarball contains a top-level directory (e.g. model-xasr-zh-en-480ms-r1/)
+        $InnerDirs = Get-ChildItem -Directory -Path $ModelExtractDir
+        if ($InnerDirs.Count -eq 1) {
+            Copy-Item -Path "$($InnerDirs[0].FullName)\*" -Destination $ModelDir -Recurse -Force
+        } else {
+            Copy-Item -Path "$ModelExtractDir\*" -Destination $ModelDir -Recurse -Force
+        }
+
+        # 3. Download test wav for stream testing
+        $TestWavPath = "$ModelDir\test_wavs\0.wav"
+        if (!(Test-Path $TestWavPath)) {
+            Write-Host "--> Downloading test wav..."
+            curl.exe -L --fail --retry 3 --retry-delay 2 -s -o $TestWavPath $TestWavUrl
+        }
+        $WavCalcSha = (Get-FileHash -Algorithm SHA256 $TestWavPath).Hash.ToLower()
+        if ($WavCalcSha -ne $TestWavSha256.ToLower()) {
+            Write-Error "[Error] SHA256 mismatch for test wav!"
+            exit 1
+        }
+
+        # 4. Copy manifest
+        Copy-Item -Path "$RepoRoot\model.json" -Destination "$ModelDir\model.json" -Force
+        Copy-Item -Path "$RepoRoot\model.json" -Destination "$StagingDir\model.json" -Force
     }
 
-    Write-Host "--> Verifying Echolet Base Model SHA256..."
-    $ModelCalcSha = (Get-FileHash -Algorithm SHA256 $CachedArchive).Hash.ToLower()
-    if ($ModelCalcSha -ne $ModelSha256.ToLower()) {
-        Write-Error "[Error] SHA256 mismatch for Base Model! Expected: $ModelSha256, Got: $ModelCalcSha"
-        exit 1
-    }
-    Write-Host "--> Base Model SHA256 verified: OK"
-
-    Write-Host "--> Extracting Base Model into .local-runtime/models/bilingual-zh-en/..."
-    $ModelExtractDir = "$TempDir\model-extract"
-    New-Item -ItemType Directory -Force -Path $ModelExtractDir | Out-Null
-    if (Get-Command zstd -ErrorAction SilentlyContinue) {
-        zstd -d -c $CachedArchive | tar.exe -xf - -C $ModelExtractDir
-    } else {
-        tar.exe --zstd -xf $CachedArchive -C $ModelExtractDir
-    }
-
-    # Flatten: tarball contains a top-level directory (e.g. model-xasr-zh-en-480ms-r1/)
-    $InnerDirs = Get-ChildItem -Directory -Path $ModelExtractDir
-    if ($InnerDirs.Count -eq 1) {
-        Copy-Item -Path "$($InnerDirs[0].FullName)\*" -Destination $ModelDir -Recurse -Force
-    } else {
-        Copy-Item -Path "$ModelExtractDir\*" -Destination $ModelDir -Recurse -Force
-    }
-
-    # 3. Download test wav for stream testing
-    $TestWavPath = "$ModelDir\test_wavs\0.wav"
-    if (!(Test-Path $TestWavPath)) {
-        Write-Host "--> Downloading test wav..."
-        curl.exe -L --fail --retry 3 --retry-delay 2 -s -o $TestWavPath $TestWavUrl
-    }
-    $WavCalcSha = (Get-FileHash -Algorithm SHA256 $TestWavPath).Hash.ToLower()
-    if ($WavCalcSha -ne $TestWavSha256.ToLower()) {
-        Write-Error "[Error] SHA256 mismatch for test wav!"
-        exit 1
-    }
-
-    # 4. Copy manifest and registry
-    Copy-Item -Path "$RepoRoot\model.json" -Destination "$ModelDir\model.json" -Force
-    Copy-Item -Path "$RepoRoot\model.json" -Destination "$StagingDir\model.json" -Force
     New-Item -ItemType Directory -Force -Path "$StagingDir\models" | Out-Null
     Copy-Item -Path "$RepoRoot\models\registry.json" -Destination "$StagingDir\models\registry.json" -Force
 
     Write-Host "=== Official Windows assets staged successfully into .local-runtime/ ==="
     Get-ChildItem -Path $RuntimeLibDir
-    Get-ChildItem -Path $ModelDir
+    if (Test-Path $ModelDir) {
+        Get-ChildItem -Path $ModelDir
+    }
 }
 finally {
     Remove-Item -Recurse -Force $TempDir -ErrorAction SilentlyContinue

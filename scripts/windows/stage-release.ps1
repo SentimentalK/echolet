@@ -14,10 +14,10 @@ Write-Host "=== Building & Staging Echolet Windows Package ($Architecture) ==="
 Write-Host "Repo root:  $RepoRoot"
 Write-Host "App target: $AppDir"
 
-# 1. Ensure local staging assets exist
-if (!(Test-Path "$LocalRuntime\runtime\lib") -or !(Test-Path "$LocalRuntime\models\bilingual-zh-en\encoder-480ms.onnx")) {
-    Write-Host "--> Local assets not found. Running prepare-assets.ps1 first..."
-    & "$PSScriptRoot\prepare-assets.ps1" -Architecture $Architecture
+# 1. Ensure local staging assets exist (runtime libraries only)
+if (!(Test-Path "$LocalRuntime\runtime\lib\sherpa-onnx-c-api.lib") -or !(Test-Path "$LocalRuntime\runtime\bin\sherpa-onnx-c-api.dll")) {
+    Write-Host "--> Local runtime assets not found. Running prepare-assets.ps1 -RuntimeOnly first..."
+    & "$PSScriptRoot\prepare-assets.ps1" -Architecture $Architecture -RuntimeOnly
 }
 
 # 2. Build release binary
@@ -36,7 +36,7 @@ if (Test-Path $AppDir) {
 }
 
 New-Item -ItemType Directory -Force -Path $AppDir | Out-Null
-New-Item -ItemType Directory -Force -Path "$AppDir\models\bilingual-zh-en" | Out-Null
+New-Item -ItemType Directory -Force -Path "$AppDir\models" | Out-Null
 New-Item -ItemType Directory -Force -Path "$AppDir\licenses" | Out-Null
 
 # 4. Copy executable
@@ -48,23 +48,63 @@ Write-Host "--> Copying native runtime DLLs..."
 $DllSource = if (Test-Path "$LocalRuntime\runtime\bin") { "$LocalRuntime\runtime\bin" } else { "$LocalRuntime\runtime\lib" }
 Copy-Item -Path "$DllSource\*.dll" -Destination $AppDir -Force
 
-# 6. Copy model files (excluding test_wavs)
-Write-Host "--> Copying model files..."
-Copy-Item -Path "$LocalRuntime\models\bilingual-zh-en\encoder-480ms.onnx" -Destination "$AppDir\models\bilingual-zh-en\" -Force
-Copy-Item -Path "$LocalRuntime\models\bilingual-zh-en\decoder-480ms.onnx" -Destination "$AppDir\models\bilingual-zh-en\" -Force
-Copy-Item -Path "$LocalRuntime\models\bilingual-zh-en\joiner-480ms.onnx" -Destination "$AppDir\models\bilingual-zh-en\" -Force
-Copy-Item -Path "$LocalRuntime\models\bilingual-zh-en\tokens.txt" -Destination "$AppDir\models\bilingual-zh-en\" -Force
-
-# 7. Copy model manifest and registry
-Write-Host "--> Copying manifest and registry..."
-Copy-Item -Path "$RepoRoot\model.json" -Destination "$AppDir\model.json" -Force
-Copy-Item -Path "$RepoRoot\model.json" -Destination "$AppDir\models\bilingual-zh-en\model.json" -Force
+# 6. Copy model catalog metadata (registry.json only, no weights)
+Write-Host "--> Copying model registry..."
 Copy-Item -Path "$RepoRoot\models\registry.json" -Destination "$AppDir\models\registry.json" -Force
 
-# 8. Copy licenses
+# 7. Copy licenses
 Write-Host "--> Copying licenses..."
 Copy-Item -Path "$RepoRoot\licenses\*" -Destination "$AppDir\licenses\" -Force
 
+# 8. Sanity check bundle completeness
+Write-Host "--> Validating production package structure..."
+$RequiredFiles = @(
+    "$AppDir\echolet.exe",
+    "$AppDir\models\registry.json",
+    "$AppDir\sherpa-onnx-c-api.dll",
+    "$AppDir\onnxruntime.dll",
+    "$AppDir\licenses\sherpa-onnx-LICENSE",
+    "$AppDir\licenses\onnxruntime-LICENSE",
+    "$AppDir\licenses\model-LICENSE",
+    "$AppDir\licenses\lucide-LICENSE"
+)
+
+foreach ($f in $RequiredFiles) {
+    if (!(Test-Path $f)) {
+        Write-Error "[Error] Missing expected bundle file: $f"
+        exit 1
+    }
+}
+
+# Ensure model payload files and directories are absent
+if (Test-Path "$AppDir\model.json") {
+    Write-Error "[Error] root model.json found in production release!"
+    exit 1
+}
+
+if (Test-Path "$AppDir\models\bilingual-zh-en") {
+    Write-Error "[Error] models\bilingual-zh-en directory found in production release!"
+    exit 1
+}
+
+$OnnxFiles = Get-ChildItem -Path $AppDir -Recurse -Filter "*.onnx"
+if ($OnnxFiles.Count -gt 0) {
+    Write-Error "[Error] ONNX model files found in production release!"
+    exit 1
+}
+
+$TokensFiles = Get-ChildItem -Path $AppDir -Recurse -Filter "tokens.txt"
+if ($TokensFiles.Count -gt 0) {
+    Write-Error "[Error] tokens.txt found in production release!"
+    exit 1
+}
+
+if (Test-Path "$AppDir\models\test_wavs" -or (Test-Path "$AppDir\models\bilingual-zh-en\test_wavs")) {
+    Write-Error "[Error] test_wavs directory found in production release!"
+    exit 1
+}
+
 Write-Host "=== Echolet Windows release staged successfully at: $AppDir ==="
 Get-ChildItem -Path $AppDir
-Get-ChildItem -Path "$AppDir\models\bilingual-zh-en"
+Get-ChildItem -Path "$AppDir\models"
+Get-ChildItem -Path "$AppDir\licenses"

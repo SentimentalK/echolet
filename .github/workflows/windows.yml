@@ -72,6 +72,12 @@ jobs:
           $env:PATH = "$PWD\.local-runtime\runtime\lib;$PWD\.local-runtime\runtime\bin;$env:PATH"
           cargo test --release -- --nocapture --test-threads=1
 
+      - name: Remove staged model payload to verify model-free packaging
+        shell: pwsh
+        run: |
+          Remove-Item -Recurse -Force .local-runtime\models -ErrorAction SilentlyContinue
+          Remove-Item -Force .local-runtime\model.json -ErrorAction SilentlyContinue
+
       - name: Build and verify Windows release package
         shell: pwsh
         run: |

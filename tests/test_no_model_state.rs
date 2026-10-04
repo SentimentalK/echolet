@@ -606,3 +606,133 @@ fn test_env_var_isolated_path_hooks_model_manager_and_app() {
 
     let _ = fs::remove_dir_all(&tmp);
 }
+
+#[test]
+fn test_staged_bundle_layout_first_run_smoke() {
+    let _guard = ENV_LOCK.lock().unwrap();
+
+    let tmp = create_temp_test_dir("bundle-smoke");
+    let bundle_root = tmp.join("bundle");
+    let bundle_models = bundle_root.join("models");
+    let user_home = tmp.join("user_home");
+    let user_models = user_home.join("models");
+
+    fs::create_dir_all(&bundle_models).unwrap();
+    fs::create_dir_all(&user_models).unwrap();
+
+    // Copy repository registry.json into the bundle layout (matching production packaging)
+    let repo_registry = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("models/registry.json");
+    fs::copy(&repo_registry, bundle_models.join("registry.json")).expect("copy registry.json");
+
+    // Assert bundle has NO onnx files, NO root model.json, NO bilingual-zh-en subdir
+    assert!(!bundle_root.join("model.json").exists());
+    assert!(!bundle_models.join("bilingual-zh-en").exists());
+
+    let old_res = std::env::var("ECHOLET_RESOURCE_ROOT").ok();
+    let old_user = std::env::var("ECHOLET_USER_HOME").ok();
+
+    std::env::set_var("ECHOLET_RESOURCE_ROOT", &bundle_root);
+    std::env::set_var("ECHOLET_USER_HOME", &user_home);
+
+    let mm = ModelManager::new().expect("ModelManager::new() must succeed with bundle layout");
+
+    // 1. Must load registry from the bundle file, not fallback
+    assert_eq!(mm.registry.models.len(), 1);
+    let default_reg = mm
+        .registry
+        .get_model(&mm.registry.default_model_id)
+        .unwrap();
+    assert!(
+        !default_reg.source.bundled,
+        "Production bundle registry must mark bundled: false"
+    );
+
+    // 2. Must be in clean NO_MODEL first-run state
+    assert!(
+        mm.installed.is_empty(),
+        "Bundle with zero model files must yield zero installed models"
+    );
+    assert_eq!(
+        mm.active_model_id, None,
+        "Active model must be None on first run"
+    );
+
+    // 3. User directory safety: user_models must not have been deleted or modified
+    assert!(
+        user_models.exists(),
+        "User models directory must remain intact"
+    );
+    assert_eq!(
+        fs::read_dir(&user_models).unwrap().count(),
+        0,
+        "User models directory must remain untouched"
+    );
+
+    if let Some(r) = old_res {
+        std::env::set_var("ECHOLET_RESOURCE_ROOT", r);
+    } else {
+        std::env::remove_var("ECHOLET_RESOURCE_ROOT");
+    }
+    if let Some(u) = old_user {
+        std::env::set_var("ECHOLET_USER_HOME", u);
+    } else {
+        std::env::remove_var("ECHOLET_USER_HOME");
+    }
+
+    let _ = fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn test_user_models_safety_and_non_interference() {
+    let _guard = ENV_LOCK.lock().unwrap();
+
+    let tmp = create_temp_test_dir("user-safety");
+    let bundle_root = tmp.join("bundle");
+    let bundle_models = bundle_root.join("models");
+    let user_home = tmp.join("user_home");
+    let user_models = user_home.join("models");
+
+    fs::create_dir_all(&bundle_models).unwrap();
+    fs::create_dir_all(&user_models).unwrap();
+
+    let repo_registry = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("models/registry.json");
+    fs::copy(&repo_registry, bundle_models.join("registry.json")).expect("copy registry.json");
+
+    // Create a mock user-downloaded model under user_home/models/my-custom-model
+    let custom_model_dir = user_models.join("my-custom-model");
+    fs::create_dir_all(&custom_model_dir).unwrap();
+    fs::write(custom_model_dir.join("marker.txt"), b"user-data-content").unwrap();
+
+    let old_res = std::env::var("ECHOLET_RESOURCE_ROOT").ok();
+    let old_user = std::env::var("ECHOLET_USER_HOME").ok();
+
+    std::env::set_var("ECHOLET_RESOURCE_ROOT", &bundle_root);
+    std::env::set_var("ECHOLET_USER_HOME", &user_home);
+
+    let _mm = ModelManager::new().expect("ModelManager::new() must succeed");
+
+    // Assert custom user model and marker file are completely untouched
+    assert!(
+        custom_model_dir.exists(),
+        "User custom model dir must exist"
+    );
+    assert!(
+        custom_model_dir.join("marker.txt").exists(),
+        "User marker file must be preserved"
+    );
+    let content = fs::read(custom_model_dir.join("marker.txt")).unwrap();
+    assert_eq!(content, b"user-data-content");
+
+    if let Some(r) = old_res {
+        std::env::set_var("ECHOLET_RESOURCE_ROOT", r);
+    } else {
+        std::env::remove_var("ECHOLET_RESOURCE_ROOT");
+    }
+    if let Some(u) = old_user {
+        std::env::set_var("ECHOLET_USER_HOME", u);
+    } else {
+        std::env::remove_var("ECHOLET_USER_HOME");
+    }
+
+    let _ = fs::remove_dir_all(&tmp);
+}

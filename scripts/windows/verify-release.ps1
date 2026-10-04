@@ -69,33 +69,48 @@ if (Get-Command dumpbin.exe -ErrorAction SilentlyContinue) {
     }
 }
 
-# 5. Check model files, manifest, and registry
-Write-Host "--> Checking model manifest, registry, and files..."
-if (!(Test-Path "$AppDir\model.json")) {
-    Write-Error "[Error] Missing model.json manifest!"
-    exit 1
-}
+# 5. Check model registry and catalog metadata
+Write-Host "--> Checking model registry and catalog metadata..."
 if (!(Test-Path "$AppDir\models\registry.json")) {
     Write-Error "[Error] Missing models\registry.json!"
     exit 1
 }
 
-$ModelFiles = @(
-    "encoder-480ms.onnx",
-    "decoder-480ms.onnx",
-    "joiner-480ms.onnx",
-    "tokens.txt"
-)
-foreach ($mf in $ModelFiles) {
-    $TargetMf = "$AppDir\models\bilingual-zh-en\$mf"
-    if (!(Test-Path $TargetMf) -or (Get-Item $TargetMf).Length -eq 0) {
-        Write-Error "[Error] Missing or empty model file: $TargetMf"
-        exit 1
-    }
+$RegistryContent = Get-Content "$AppDir\models\registry.json" -Raw
+if ($RegistryContent -match '"bundled":\s*true') {
+    Write-Error "[Error] models\registry.json still marks model as bundled: true!"
+    exit 1
+}
+if ($RegistryContent -notmatch '"bundled":\s*false') {
+    Write-Error "[Error] models\registry.json does not mark model as bundled: false!"
+    exit 1
 }
 
-# 6. Ensure test_wavs is excluded
-if (Test-Path "$AppDir\models\bilingual-zh-en\test_wavs") {
+if (Test-Path "$AppDir\model.json") {
+    Write-Error "[Error] root model.json found in production release!"
+    exit 1
+}
+
+# 6. Assert that model payload files/directories are absent
+Write-Host "--> Verifying absence of model weight payload..."
+if (Test-Path "$AppDir\models\bilingual-zh-en") {
+    Write-Error "[Error] models\bilingual-zh-en directory found in release bundle!"
+    exit 1
+}
+
+$OnnxFiles = Get-ChildItem -Path $AppDir -Recurse -Filter "*.onnx"
+if ($OnnxFiles.Count -gt 0) {
+    Write-Error "[Error] ONNX model files found in release bundle!"
+    exit 1
+}
+
+$TokensFiles = Get-ChildItem -Path $AppDir -Recurse -Filter "tokens.txt"
+if ($TokensFiles.Count -gt 0) {
+    Write-Error "[Error] tokens.txt found in release bundle!"
+    exit 1
+}
+
+if (Test-Path "$AppDir\models\test_wavs" -or (Test-Path "$AppDir\models\bilingual-zh-en\test_wavs")) {
     Write-Error "[Error] test_wavs directory found in production release!"
     exit 1
 }
@@ -122,5 +137,10 @@ foreach ($lic in $Licenses) {
         exit 1
     }
 }
+
+# 9. Print final package size
+Write-Host "--> Staged package size:"
+$PackageSize = (Get-ChildItem -Path $AppDir -Recurse | Measure-Object -Property Length -Sum).Sum
+Write-Host "    Total package size: $([math]::Round($PackageSize / 1MB, 2)) MB"
 
 Write-Host "=== All Echolet Windows release verification checks PASSED! ==="

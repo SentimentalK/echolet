@@ -9,7 +9,7 @@
       "language": "zh-en",
       "family": "online-transducer",
       "source": {
-        "bundled": true,
+        "bundled": false,
         "repository": "https://huggingface.co/GilgameshWind/X-ASR-zh-en",
         "revision": "689ff18c584d29910da37b6fe904db0c1489c9d1"
       },

@@ -34,16 +34,26 @@ SHERPA_URL="https://github.com/k2-fsa/sherpa-onnx/releases/download/${SHERPA_VER
 TEST_WAV_URL="https://huggingface.co/csukuangfj/sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20/resolve/main/test_wavs/0.wav"
 TEST_WAV_SHA256="7d93384ca14702cc584a7a33fe2fed92e89e708549161cb12ea38c916882103b"
 
+RUNTIME_ONLY=false
+for arg in "$@"; do
+    if [[ "${arg}" == "--runtime-only" ]]; then
+        RUNTIME_ONLY=true
+    fi
+done
+
 echo "=== Downloading & Verifying Official Echolet Assets (${ARCH}) ==="
 echo "Repo root:    ${REPO_ROOT}"
 echo "Staging dir:  ${STAGING_DIR}"
 echo "Architecture: ${ARCH} (raw: ${RAW_ARCH})"
+echo "Runtime only: ${RUNTIME_ONLY}"
 
 TMP_WORK_DIR=$(mktemp -d)
 trap 'rm -rf "${TMP_WORK_DIR}"' EXIT
 
 mkdir -p "${STAGING_DIR}/runtime/lib"
-mkdir -p "${STAGING_DIR}/models/bilingual-zh-en/test_wavs"
+if [[ "${RUNTIME_ONLY}" != "true" ]]; then
+    mkdir -p "${STAGING_DIR}/models/bilingual-zh-en/test_wavs"
+fi
 
 SHERPA_ARCHIVE="${TMP_WORK_DIR}/${SHERPA_ASSET}"
 
@@ -57,22 +67,27 @@ echo "--> Staging native libraries into .local-runtime/runtime/lib..."
 tar -xjf "${SHERPA_ARCHIVE}" -C "${TMP_WORK_DIR}"
 cp -a "${TMP_WORK_DIR}/${SHERPA_DIR_NAME}/lib"/* "${STAGING_DIR}/runtime/lib/"
 
-# 2. Acquire Echolet Base Model via frozen model lock (No upstream Hugging Face!)
-echo "--> Acquiring Echolet Base Model (r1)..."
-"${REPO_ROOT}/scripts/acquire-base-model.sh" "${STAGING_DIR}/models/bilingual-zh-en"
+if [[ "${RUNTIME_ONLY}" != "true" ]]; then
+    # 2. Acquire Echolet Base Model via frozen model lock (No upstream Hugging Face!)
+    echo "--> Acquiring Echolet Base Model (r1)..."
+    "${REPO_ROOT}/scripts/acquire-base-model.sh" "${STAGING_DIR}/models/bilingual-zh-en"
 
-# 3. Download test wav for stream testing
-echo "--> Downloading test wav..."
-curl -L --fail --retry 3 --retry-delay 2 -s -o "${TMP_WORK_DIR}/0.wav" "${TEST_WAV_URL}"
-echo "${TEST_WAV_SHA256}  ${TMP_WORK_DIR}/0.wav" | sha256sum -c -
-cp "${TMP_WORK_DIR}/0.wav" "${STAGING_DIR}/models/bilingual-zh-en/test_wavs/"
+    # 3. Download test wav for stream testing
+    echo "--> Downloading test wav..."
+    curl -L --fail --retry 3 --retry-delay 2 -s -o "${TMP_WORK_DIR}/0.wav" "${TEST_WAV_URL}"
+    echo "${TEST_WAV_SHA256}  ${TMP_WORK_DIR}/0.wav" | sha256sum -c -
+    cp "${TMP_WORK_DIR}/0.wav" "${STAGING_DIR}/models/bilingual-zh-en/test_wavs/"
 
-# 4. Copy manifest & registry
-cp "${REPO_ROOT}/model.json" "${STAGING_DIR}/models/bilingual-zh-en/model.json"
-cp "${REPO_ROOT}/model.json" "${STAGING_DIR}/model.json"
+    # 4. Copy manifest
+    cp "${REPO_ROOT}/model.json" "${STAGING_DIR}/models/bilingual-zh-en/model.json"
+    cp "${REPO_ROOT}/model.json" "${STAGING_DIR}/model.json"
+fi
+
 mkdir -p "${STAGING_DIR}/models"
 cp "${REPO_ROOT}/models/registry.json" "${STAGING_DIR}/models/registry.json"
 
 echo "=== Official assets staged successfully into .local-runtime/ (${ARCH}) ==="
 ls -lh "${STAGING_DIR}/runtime/lib"
-ls -lh "${STAGING_DIR}/models/bilingual-zh-en"
+if [[ -d "${STAGING_DIR}/models/bilingual-zh-en" ]]; then
+    ls -lh "${STAGING_DIR}/models/bilingual-zh-en"
+fi

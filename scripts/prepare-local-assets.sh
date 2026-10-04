@@ -25,7 +25,26 @@ case "${RAW_ARCH}" in
         ;;
 esac
 
-# 2. Check if already complete with current X-ASR 480ms model and native libraries
+RUNTIME_ONLY=false
+for arg in "$@"; do
+    if [[ "${arg}" == "--runtime-only" ]]; then
+        RUNTIME_ONLY=true
+    fi
+done
+
+# 2. Check if already complete
+if [[ "${RUNTIME_ONLY}" == "true" ]]; then
+    if [[ -f "${STAGING_DIR}/runtime/lib/libsherpa-onnx-c-api.so" && \
+          -f "${STAGING_DIR}/runtime/lib/libonnxruntime.so" && \
+          -f "${STAGING_DIR}/models/registry.json" ]]; then
+        echo "[Assets] .local-runtime/ runtime libraries and registry are already populated (${ARCH})."
+        exit 0
+    fi
+    echo "=== Staging official Echolet runtime libraries only (${ARCH}) ==="
+    "${REPO_ROOT}/scripts/download-official-assets.sh" "${ARCH}" --runtime-only
+    exit 0
+fi
+
 if [[ -f "${STAGING_DIR}/runtime/lib/libsherpa-onnx-c-api.so" && \
       -f "${STAGING_DIR}/runtime/lib/libonnxruntime.so" && \
       -f "${STAGING_DIR}/models/bilingual-zh-en/encoder-480ms.onnx" && \

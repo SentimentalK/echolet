@@ -67,7 +67,7 @@ fn test_registry_parsing_and_invariants() {
         xasr.display_title(),
         "Chinese + English (X-ASR / 480ms) — 2026"
     );
-    assert!(xasr.source.bundled);
+    assert!(!xasr.source.bundled);
     assert_eq!(
         xasr.source.repository.as_deref(),
         Some("https://huggingface.co/GilgameshWind/X-ASR-zh-en")

@@ -64,6 +64,10 @@ jobs:
         run: |
           cargo test --release -- --nocapture
 
+      - name: Remove staged model payload to verify model-free packaging
+        run: |
+          rm -rf .local-runtime/models .local-runtime/model.json
+
       - name: Build and verify macOS release bundle
         run: |
           ./scripts/macos/build-release.sh arm64
@@ -119,6 +123,10 @@ jobs:
       - name: Run automated test suite
         run: |
           cargo test --release -- --nocapture
+
+      - name: Remove staged model payload to verify model-free packaging
+        run: |
+          rm -rf .local-runtime/models .local-runtime/model.json
 
       - name: Build and verify macOS release bundle
         run: |
