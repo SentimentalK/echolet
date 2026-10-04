@@ -4,6 +4,7 @@ pub mod asr;
 pub mod audio;
 pub mod beep;
 pub mod config;
+pub mod diagnostics;
 pub mod diff;
 pub mod ffi;
 pub mod history;

@@ -223,6 +223,8 @@ impl App {
             return Ok(());
         }
 
+        let t_total_start = std::time::Instant::now();
+
         // Clean up any partial/inconsistent state before attempting load
         self.unload_model();
 
@@ -237,13 +239,34 @@ impl App {
         );
 
         crate::log::log("INFO", &format!("loading ASR model: {}", active_model.id));
+        let t_recog_start = std::time::Instant::now();
         let recognizer = Arc::new(OnlineRecognizer::from_manifest(
             &active_model.dir,
             &active_model.manifest,
         )?);
+        let recog_duration = t_recog_start.elapsed();
+
+        let t_stream_start = std::time::Instant::now();
         let stream = recognizer.create_stream()?;
-        crate::log::log("INFO", "ASR recognizer initialized");
-        println!("[ASR] Recognizer initialized successfully.");
+        let stream_duration = t_stream_start.elapsed();
+        let total_load_duration = t_total_start.elapsed();
+
+        crate::log::log(
+            "INFO",
+            &format!(
+                "ASR model loaded: id='{}', total={:.2}ms, recognizer={:.2}ms, stream={:.2}ms",
+                active_model.id,
+                total_load_duration.as_secs_f64() * 1000.0,
+                recog_duration.as_secs_f64() * 1000.0,
+                stream_duration.as_secs_f64() * 1000.0,
+            ),
+        );
+        println!(
+            "[ASR] Recognizer initialized successfully in {:.2}ms (recognizer: {:.2}ms, stream: {:.2}ms).",
+            total_load_duration.as_secs_f64() * 1000.0,
+            recog_duration.as_secs_f64() * 1000.0,
+            stream_duration.as_secs_f64() * 1000.0,
+        );
 
         // Publish only after both recognizer and stream creation succeed
         self._recognizer = Some(recognizer);
@@ -266,12 +289,28 @@ impl App {
         self.finalize_current_segment();
         self.session = PartialSession::new();
 
+        let had_runtime = self.stream.is_some() || self._recognizer.is_some();
+        let t_unload = std::time::Instant::now();
+
         // Explicitly drop stream BEFORE recognizer Arc to maintain strict native lifetime ordering
         drop(self.stream.take());
         drop(self._recognizer.take());
 
-        crate::log::log("INFO", "ASR model unloaded");
-        println!("[ASR] Model unloaded successfully.");
+        let unload_duration = t_unload.elapsed();
+
+        if had_runtime {
+            crate::log::log(
+                "INFO",
+                &format!(
+                    "ASR model unloaded: duration={:.2}ms",
+                    unload_duration.as_secs_f64() * 1000.0
+                ),
+            );
+            println!(
+                "[ASR] Model unloaded successfully in {:.2}ms.",
+                unload_duration.as_secs_f64() * 1000.0
+            );
+        }
         true
     }
 
@@ -358,10 +397,13 @@ impl App {
             return;
         }
 
+        let t_start = std::time::Instant::now();
+
         // Cancel any pending idle unload before/while ensuring the runtime
         self.cancel_idle_unload();
 
         // 1. Ensure model runtime is loaded before opening microphone / entering Listening
+        let was_loaded = self.is_model_loaded();
         if let Err(err) = self.ensure_model_loaded() {
             eprintln!(
                 "[ASR] Failed to ensure model is loaded before listening: {}. Remaining in Standby.",
@@ -369,8 +411,10 @@ impl App {
             );
             return;
         }
+        let t_model_ready = t_start.elapsed();
 
         // 2. Open microphone on demand
+        let t_mic_start = std::time::Instant::now();
         match (self.audio_starter)(self.audio_tx.clone()) {
             Ok(source) => {
                 self._audio_source = Some(source);
@@ -385,12 +429,32 @@ impl App {
                 return;
             }
         }
+        let mic_duration = t_mic_start.elapsed();
 
         // 3. Transition state
         self.finalize_current_segment();
         self.state.listening = true;
         beep_start();
         self.platform.handle.set_listening(true);
+        let total_transition_duration = t_start.elapsed();
+
+        crate::log::log(
+            "INFO",
+            &format!(
+                "start_listening ready: total={:.2}ms, model_ready={:.2}ms (warm={}), mic_open={:.2}ms",
+                total_transition_duration.as_secs_f64() * 1000.0,
+                t_model_ready.as_secs_f64() * 1000.0,
+                was_loaded,
+                mic_duration.as_secs_f64() * 1000.0,
+            ),
+        );
+        println!(
+            "[ASR] Listening ready in {:.2}ms (model: {:.2}ms [{}], mic: {:.2}ms).",
+            total_transition_duration.as_secs_f64() * 1000.0,
+            t_model_ready.as_secs_f64() * 1000.0,
+            if was_loaded { "warm" } else { "loaded" },
+            mic_duration.as_secs_f64() * 1000.0,
+        );
         println!("\n[Action] >>> Listening STARTED (Speaking...) <<<");
     }
 

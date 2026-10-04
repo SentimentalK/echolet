@@ -23,6 +23,12 @@ const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().collect();
 
+    // Developer benchmark entrypoint (PROJECT-041 Stage 1 / J3)
+    if args.len() > 1 && (args[1] == "benchmark" || args[1] == "bench" || args[1] == "--benchmark")
+    {
+        return echolet::diagnostics::benchmark::run_cli(&args[1..]);
+    }
+
     // 1. Handle subcommands (toggle, stop, status, setup-uinput)
     if platform::handle_subcommand(&args)? {
         return Ok(());
@@ -44,10 +50,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         if !is_foreground {
             let exe = env::current_exe()?;
-            let mut child_args: Vec<String> = args
-                .into_iter()
-                .skip(1)
-                .collect();
+            let mut child_args: Vec<String> = args.into_iter().skip(1).collect();
             child_args.push("--foreground".to_string());
 
             let child = Command::new(&exe)
@@ -58,7 +61,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .spawn()?;
 
             println!("============================================================");
-            println!(" Echolet v{} started in background (PID: {}).", APP_VERSION, child.id());
+            println!(
+                " Echolet v{} started in background (PID: {}).",
+                APP_VERSION,
+                child.id()
+            );
             println!(" - Press [F10] or click the System Tray icon to Speak.");
             println!(" - Run `echolet stop` or click the System Tray [Quit] to exit.");
             println!(" - (Tip: Run `echolet -f` to run in foreground with debug logs)");
@@ -92,7 +99,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
 
         println!("============================================================");
-        println!(" Echolet v{} - Real-time Streaming Voice Input", APP_VERSION);
+        println!(
+            " Echolet v{} - Real-time Streaming Voice Input",
+            APP_VERSION
+        );
         println!(" Resource Root: {:?}", paths::resource_root());
         println!("============================================================");
 
