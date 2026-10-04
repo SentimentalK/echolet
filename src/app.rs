@@ -35,6 +35,8 @@ pub struct App {
     platform: PlatformRuntime,
     last_logged_text: String,
     current_utterance_start: Option<DateTime<Local>>,
+    idle_unload_deadline: Option<std::time::Instant>,
+    idle_unload_model_id: Option<String>,
 }
 
 impl App {
@@ -45,7 +47,29 @@ impl App {
         let (audio_tx, audio_rx) = unbounded::<AudioChunk>();
         let starter = default_audio_starter();
         println!("[Audio] Microphone deferred until Listening starts.");
-        Self::new_internal(platform, None, action_rx, audio_rx, audio_tx, starter, None)
+        Self::new_internal(
+            platform, None, action_rx, audio_rx, audio_tx, starter, None, None,
+        )
+    }
+
+    pub fn new_with_config(
+        platform: PlatformRuntime,
+        action_rx: Receiver<AppAction>,
+        config: EcholetConfig,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let (audio_tx, audio_rx) = unbounded::<AudioChunk>();
+        let starter = default_audio_starter();
+        println!("[Audio] Microphone deferred until Listening starts.");
+        Self::new_internal(
+            platform,
+            None,
+            action_rx,
+            audio_rx,
+            audio_tx,
+            starter,
+            None,
+            Some(config),
+        )
     }
 
     pub fn new_with_tx(
@@ -63,6 +87,7 @@ impl App {
             audio_rx,
             audio_tx,
             starter,
+            None,
             None,
         )
     }
@@ -85,6 +110,7 @@ impl App {
             audio_tx,
             starter,
             initial_source,
+            None,
         )
     }
 
@@ -105,6 +131,29 @@ impl App {
             audio_tx,
             starter,
             initial_source,
+            None,
+        )
+    }
+
+    pub fn new_with_starter_and_config(
+        platform: PlatformRuntime,
+        action_tx: Option<Sender<AppAction>>,
+        action_rx: Receiver<AppAction>,
+        audio_rx: Receiver<AudioChunk>,
+        audio_tx: Sender<AudioChunk>,
+        starter: AudioStarter,
+        initial_source: Option<Box<dyn AudioSource>>,
+        config: Option<EcholetConfig>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::new_internal(
+            platform,
+            action_tx,
+            action_rx,
+            audio_rx,
+            audio_tx,
+            starter,
+            initial_source,
+            config,
         )
     }
 
@@ -116,8 +165,9 @@ impl App {
         audio_tx: Sender<AudioChunk>,
         audio_starter: AudioStarter,
         audio_source: Option<Box<dyn AudioSource>>,
+        custom_config: Option<EcholetConfig>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        let config = EcholetConfig::load();
+        let config = custom_config.unwrap_or_else(EcholetConfig::load);
         let history_dir = paths::history_dir();
         let history_manager = HistoryManager::new(config.history_enabled, history_dir);
 
@@ -147,10 +197,15 @@ impl App {
             platform,
             last_logged_text: String::new(),
             current_utterance_start: None,
+            idle_unload_deadline: None,
+            idle_unload_model_id: None,
         };
 
-        // Eagerly load the active model runtime on startup (preserving current baseline behavior)
-        app.ensure_model_loaded()?;
+        // If preload is requested, load active model during startup and begin idle deadline
+        if app.config.preload_model_on_startup {
+            app.ensure_model_loaded()?;
+            app.schedule_idle_unload();
+        }
 
         Ok(app)
     }
@@ -206,6 +261,8 @@ impl App {
             return false;
         }
 
+        self.cancel_idle_unload();
+
         self.finalize_current_segment();
         self.session = PartialSession::new();
 
@@ -226,10 +283,83 @@ impl App {
         notify_platform_models(&self.platform, &self.model_manager);
     }
 
+    pub fn cancel_idle_unload(&mut self) {
+        self.idle_unload_deadline = None;
+        self.idle_unload_model_id = None;
+    }
+
+    pub fn schedule_idle_unload(&mut self) {
+        if self.state.listening || !self.is_model_loaded() {
+            self.cancel_idle_unload();
+            return;
+        }
+
+        match self.config.model_idle_unload_minutes {
+            Some(0) => {
+                self.idle_unload_deadline = Some(std::time::Instant::now());
+                self.idle_unload_model_id = Some(self.model_manager.active_model_id.clone());
+            }
+            Some(minutes) => {
+                let duration = Duration::from_secs(minutes as u64 * 60);
+                self.idle_unload_deadline = Some(std::time::Instant::now() + duration);
+                self.idle_unload_model_id = Some(self.model_manager.active_model_id.clone());
+            }
+            None => {
+                self.cancel_idle_unload();
+            }
+        }
+    }
+
+    pub fn check_idle_unload(&mut self) {
+        if self.state.listening || !self.is_model_loaded() {
+            return;
+        }
+
+        if let Some(deadline) = self.idle_unload_deadline {
+            if let Some(ref scheduled_model) = self.idle_unload_model_id {
+                if scheduled_model != &self.model_manager.active_model_id {
+                    // Stale deadline from previous model
+                    self.cancel_idle_unload();
+                    return;
+                }
+            }
+
+            if std::time::Instant::now() >= deadline {
+                crate::log::log(
+                    "INFO",
+                    "idle unload deadline reached; unloading active model",
+                );
+                self.unload_model();
+            }
+        }
+    }
+
+    pub fn idle_unload_deadline(&self) -> Option<std::time::Instant> {
+        self.idle_unload_deadline
+    }
+
+    pub fn idle_unload_model_id(&self) -> Option<&str> {
+        self.idle_unload_model_id.as_deref()
+    }
+
+    pub fn set_idle_unload_deadline(&mut self, deadline: Option<std::time::Instant>) {
+        self.idle_unload_deadline = deadline;
+    }
+
+    pub fn expire_idle_unload_deadline(&mut self) {
+        self.idle_unload_deadline = Some(std::time::Instant::now() - Duration::from_secs(1));
+        if self.idle_unload_model_id.is_none() {
+            self.idle_unload_model_id = Some(self.model_manager.active_model_id.clone());
+        }
+    }
+
     pub fn start_listening(&mut self) {
         if self.state.listening {
             return;
         }
+
+        // Cancel any pending idle unload before/while ensuring the runtime
+        self.cancel_idle_unload();
 
         // 1. Ensure model runtime is loaded before opening microphone / entering Listening
         if let Err(err) = self.ensure_model_loaded() {
@@ -251,6 +381,7 @@ impl App {
                     "[Audio] Failed to open microphone: {}. Remaining in Standby.",
                     err
                 );
+                self.schedule_idle_unload();
                 return;
             }
         }
@@ -296,6 +427,9 @@ impl App {
         beep_stop();
         self.platform.handle.set_listening(false);
         println!("\n[Action] >>> Listening STOPPED (Standby) <<<\n");
+
+        // 6. Schedule unload according to policy
+        self.schedule_idle_unload();
     }
 
     pub fn toggle_listening(&mut self) {
@@ -326,9 +460,14 @@ impl App {
 
         if self.model_manager.active_model_id == model_id {
             if self.is_model_loaded() {
+                self.schedule_idle_unload();
                 return true;
             }
-            return self.ensure_model_loaded().is_ok();
+            if self.ensure_model_loaded().is_ok() {
+                self.schedule_idle_unload();
+                return true;
+            }
+            return false;
         }
 
         // If installed, perform transactional switch
@@ -376,6 +515,8 @@ impl App {
             self.config.selected_model = model_id.to_string();
             let _ = self.config.save();
             self.notify_models();
+
+            self.schedule_idle_unload();
 
             println!(
                 "[Model] Active model successfully switched to: {} — {}",
@@ -554,6 +695,9 @@ impl App {
                 eprintln!("[ASR] Invariant violation: Listening is true but stream is absent during decode.");
             }
         }
+
+        // 4. Check idle unload policy
+        self.check_idle_unload();
     }
 
     pub fn run(&mut self) {

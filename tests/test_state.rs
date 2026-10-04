@@ -2,11 +2,13 @@ use crossbeam_channel::unbounded;
 use echolet::actions::AppAction;
 use echolet::app::App;
 use echolet::audio::{AudioChunk, AudioSource, AudioStarter};
+use echolet::config::EcholetConfig;
 use echolet::platform::{PlatformHandle, PlatformRuntime, TextInjector};
 use echolet::state::AppState;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 struct FakeInjector {
     diffs: Arc<Mutex<Vec<(usize, String)>>>,
@@ -141,6 +143,66 @@ fn create_test_app_with_starter(
     .expect("Failed to create App with custom starter");
 
     (app, action_tx, listening_history)
+}
+
+fn create_test_app_with_config(
+    config: EcholetConfig,
+) -> (
+    App,
+    crossbeam_channel::Sender<AppAction>,
+    Arc<Mutex<Vec<bool>>>,
+    Arc<AtomicBool>,
+    Arc<Mutex<Vec<(usize, String)>>>,
+    Arc<Mutex<Vec<bool>>>,
+    Arc<Mutex<Vec<PathBuf>>>,
+) {
+    let (action_tx, action_rx) = unbounded::<AppAction>();
+    let listening_history = Arc::new(Mutex::new(Vec::new()));
+    let history_state_history = Arc::new(Mutex::new(Vec::new()));
+    let opened_folders = Arc::new(Mutex::new(Vec::new()));
+    let shutdown_called = Arc::new(AtomicBool::new(false));
+    let diffs = Arc::new(Mutex::new(Vec::new()));
+
+    let fake_handle = Box::new(FakePlatformHandle {
+        listening_history: listening_history.clone(),
+        history_state_history: history_state_history.clone(),
+        opened_folders: opened_folders.clone(),
+        shutdown_called: shutdown_called.clone(),
+    });
+
+    let fake_injector = Box::new(FakeInjector {
+        diffs: diffs.clone(),
+    });
+
+    let platform = PlatformRuntime {
+        injector: fake_injector,
+        handle: fake_handle,
+        _resources: Box::new(()),
+    };
+
+    let (audio_tx, audio_rx) = unbounded::<AudioChunk>();
+    let starter: AudioStarter = Box::new(|_tx| Ok(Box::new(()) as Box<dyn AudioSource>));
+    let app = App::new_with_starter_and_config(
+        platform,
+        Some(action_tx.clone()),
+        action_rx,
+        audio_rx,
+        audio_tx,
+        starter,
+        None,
+        Some(config),
+    )
+    .expect("Failed to create App with custom config");
+
+    (
+        app,
+        action_tx,
+        listening_history,
+        shutdown_called,
+        diffs,
+        history_state_history,
+        opened_folders,
+    )
 }
 
 #[test]
@@ -326,13 +388,17 @@ fn test_app_history_toggle_and_open_folder_actions() {
 fn test_optional_recognizer_lifecycle_unload_and_reload() {
     let (mut app, _, _, _, _, _, _) = create_test_app();
 
-    // 1. Initial eager-loaded state
+    // 1. Initial default state: preload=false, so model is unloaded at startup
     assert!(
-        app.is_model_loaded(),
-        "App must eagerly load active model on startup"
+        !app.is_model_loaded(),
+        "App must default to unloaded model on startup when preload=false"
     );
 
-    // 2. Unload model
+    // 2. Load model
+    assert!(app.ensure_model_loaded().is_ok());
+    assert!(app.is_model_loaded());
+
+    // 3. Unload model
     let unloaded = app.unload_model();
     assert!(unloaded, "unload_model must succeed when in Standby");
     assert!(!app.is_model_loaded(), "Model must be unloaded");
@@ -518,4 +584,229 @@ fn test_tick_safe_when_unloaded_even_if_corrupted_listening_flag() {
     // tick() must not panic or dereference absent stream
     app.tick();
     assert!(!app.is_model_loaded());
+}
+
+#[test]
+fn test_preload_false_starts_runtime_unloaded() {
+    let mut config = EcholetConfig::default();
+    config.preload_model_on_startup = false;
+    let (app, _, _, _, _, _, _) = create_test_app_with_config(config);
+
+    assert!(
+        !app.is_model_loaded(),
+        "App must not load model when preload is false"
+    );
+    assert_eq!(app.idle_unload_deadline(), None);
+}
+
+#[test]
+fn test_preload_true_starts_runtime_loaded() {
+    let mut config = EcholetConfig::default();
+    config.preload_model_on_startup = true;
+    config.model_idle_unload_minutes = Some(10);
+    let (app, _, _, _, _, _, _) = create_test_app_with_config(config);
+
+    assert!(
+        app.is_model_loaded(),
+        "App must load active model when preload_model_on_startup is true"
+    );
+    assert!(
+        app.idle_unload_deadline().is_some(),
+        "App must schedule idle unload from startup when preload is true and timeout is finite"
+    );
+}
+
+#[test]
+fn test_first_start_listening_lazy_loads_when_preload_false() {
+    let mut config = EcholetConfig::default();
+    config.preload_model_on_startup = false;
+    let (mut app, action_tx, history, _, _, _, _) = create_test_app_with_config(config);
+
+    assert!(!app.is_model_loaded());
+    action_tx.send(AppAction::StartListening).unwrap();
+    app.tick();
+
+    assert!(
+        app.is_model_loaded(),
+        "First start_listening must lazy-load model"
+    );
+    assert!(app.state.listening);
+    assert!(app.is_audio_active());
+    assert_eq!(*history.lock().unwrap(), vec![false, true]);
+}
+
+#[test]
+fn test_stop_with_10_min_policy_schedules_without_immediate_unload() {
+    let mut config = EcholetConfig::default();
+    config.preload_model_on_startup = false;
+    config.model_idle_unload_minutes = Some(10);
+    let (mut app, _, _, _, _, _, _) = create_test_app_with_config(config);
+
+    app.start_listening();
+    assert!(app.is_model_loaded());
+    assert!(app.state.listening);
+
+    app.stop_listening();
+    assert!(!app.state.listening);
+    assert!(!app.is_audio_active());
+    assert!(
+        app.is_model_loaded(),
+        "Model must remain warm immediately after stop"
+    );
+    assert!(
+        app.idle_unload_deadline().is_some(),
+        "Deadline must be scheduled"
+    );
+
+    // Tick immediately -> deadline is in future (10m), so model remains loaded
+    app.tick();
+    assert!(app.is_model_loaded());
+}
+
+#[test]
+fn test_start_before_deadline_cancels_unload() {
+    let mut config = EcholetConfig::default();
+    config.preload_model_on_startup = false;
+    config.model_idle_unload_minutes = Some(10);
+    let (mut app, _, _, _, _, _, _) = create_test_app_with_config(config);
+
+    app.start_listening();
+    app.stop_listening();
+    assert!(app.idle_unload_deadline().is_some());
+
+    // Start listening again before deadline
+    app.start_listening();
+    assert_eq!(
+        app.idle_unload_deadline(),
+        None,
+        "Start listening must cancel pending deadline"
+    );
+    assert!(app.state.listening);
+    assert!(app.is_model_loaded());
+}
+
+#[test]
+fn test_expired_deadline_while_standby_unloads() {
+    let mut config = EcholetConfig::default();
+    config.preload_model_on_startup = false;
+    config.model_idle_unload_minutes = Some(10);
+    let (mut app, _, _, _, _, _, _) = create_test_app_with_config(config);
+
+    app.start_listening();
+    app.stop_listening();
+    assert!(app.is_model_loaded());
+    assert!(app.idle_unload_deadline().is_some());
+
+    // Simulate deadline expiration
+    app.expire_idle_unload_deadline();
+    app.tick();
+
+    assert!(
+        !app.is_model_loaded(),
+        "Expired deadline must unload model in Standby"
+    );
+    assert_eq!(app.idle_unload_deadline(), None);
+}
+
+#[test]
+fn test_timeout_zero_unloads_after_stop_transition() {
+    let mut config = EcholetConfig::default();
+    config.preload_model_on_startup = false;
+    config.model_idle_unload_minutes = Some(0);
+    let (mut app, _, history, _, _, _, _) = create_test_app_with_config(config);
+
+    app.start_listening();
+    assert!(app.state.listening);
+    assert!(app.is_audio_active());
+    assert!(app.is_model_loaded());
+
+    app.stop_listening();
+    // Invariant: stop_listening immediately transitions microphone and UI, model is NOT unloaded yet
+    assert!(!app.state.listening, "Listening must be false");
+    assert!(!app.is_audio_active(), "Microphone must be released");
+    assert_eq!(*history.lock().unwrap(), vec![false, true, false]);
+    assert!(
+        app.is_model_loaded(),
+        "Model destruction must not block stop_listening"
+    );
+
+    // On tick, the immediate unload is performed
+    app.tick();
+    assert!(
+        !app.is_model_loaded(),
+        "Model must unload on subsequent tick for timeout=0"
+    );
+}
+
+#[test]
+fn test_null_never_timeout_does_not_auto_unload() {
+    let mut config = EcholetConfig::default();
+    config.preload_model_on_startup = false;
+    config.model_idle_unload_minutes = None;
+    let (mut app, _, _, _, _, _, _) = create_test_app_with_config(config);
+
+    app.start_listening();
+    app.stop_listening();
+
+    assert!(app.is_model_loaded());
+    assert_eq!(
+        app.idle_unload_deadline(),
+        None,
+        "Null timeout must never schedule deadline"
+    );
+
+    app.tick();
+    assert!(
+        app.is_model_loaded(),
+        "Model must remain loaded indefinitely when timeout is null"
+    );
+}
+
+#[test]
+fn test_unload_cannot_occur_while_listening() {
+    let mut config = EcholetConfig::default();
+    config.preload_model_on_startup = true;
+    config.model_idle_unload_minutes = Some(10);
+    let (mut app, _, _, _, _, _, _) = create_test_app_with_config(config);
+
+    app.start_listening();
+    assert!(app.state.listening);
+    assert!(app.is_model_loaded());
+
+    // Force an expired deadline while listening
+    app.expire_idle_unload_deadline();
+    app.tick();
+
+    assert!(
+        app.is_model_loaded(),
+        "Active model must NEVER unload while Listening"
+    );
+    assert!(app.state.listening);
+}
+
+#[test]
+fn test_model_switch_invalidates_stale_deadline() {
+    let mut config = EcholetConfig::default();
+    config.preload_model_on_startup = true;
+    config.model_idle_unload_minutes = Some(10);
+    let (mut app, _, _, _, _, _, _) = create_test_app_with_config(config);
+
+    assert!(app.is_model_loaded());
+    let active_id = app.model_manager.active_model_id.clone();
+
+    // Expire the deadline for active model
+    app.set_idle_unload_deadline(Some(std::time::Instant::now() - Duration::from_secs(10)));
+
+    // Re-selecting active model resets residency and sets a fresh deadline in future
+    app.select_model(&active_id);
+
+    assert!(app.is_model_loaded());
+    let new_deadline = app
+        .idle_unload_deadline()
+        .expect("New deadline should be scheduled");
+    assert!(new_deadline > std::time::Instant::now());
+
+    // Tick does not unload because new model has fresh deadline
+    app.tick();
+    assert!(app.is_model_loaded());
 }
