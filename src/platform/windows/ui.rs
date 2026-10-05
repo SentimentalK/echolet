@@ -3,6 +3,10 @@ use crate::paths;
 use crate::platform::windows::hotkey::{register_f10, unregister_f10, HOTKEY_F10_ID};
 use crate::platform::windows::icon;
 use crate::platform::{PlatformHandle, PlatformView};
+use crate::ui::control_surface::ControlSurfaceState;
+use crate::ui::desktop::adapter::{PANEL_HEIGHT_PX, PANEL_WIDTH_PX};
+use crate::ui::desktop::controller::DesktopPanelController;
+use crate::ui::desktop::host::{calculate_windows_panel_position, Rect};
 use crossbeam_channel::{Receiver, Sender};
 use std::mem::size_of;
 use std::path::{Path, PathBuf};
@@ -20,20 +24,17 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyIcon, DestroyMenu,
     DestroyWindow, DispatchMessageW, GetCursorPos, GetMessageW, PostMessageW, PostQuitMessage,
     RegisterClassW, RegisterWindowMessageW, SetForegroundWindow, TrackPopupMenuEx,
-    TranslateMessage, HICON, HMENU, HWND_MESSAGE, MF_DISABLED, MF_GRAYED, MF_SEPARATOR, MF_STRING,
+    TranslateMessage, HICON, HMENU, HWND_MESSAGE, MF_SEPARATOR, MF_STRING,
     MSG, SW_SHOWNORMAL, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_APP, WM_CONTEXTMENU,
     WM_DESTROY, WM_HOTKEY, WM_LBUTTONUP, WM_RBUTTONUP, WNDCLASSW,
 };
 
 pub enum WindowsUiCommand {
     SetListening(bool),
-    UpdateModels {
-        active_id: Option<String>,
-        installed_ids: Vec<String>,
-        downloading_ids: Vec<String>,
-    },
+    UpdateControlSurface(Box<ControlSurfaceState>),
     UpdateHistoryState(bool),
     OpenHistoryFolder(PathBuf),
+    TogglePanel,
     Shutdown,
 }
 
@@ -69,22 +70,9 @@ impl PlatformHandle for WindowsPlatformHandle {
     }
 
     fn update_models(&self, view: &PlatformView) {
-        let active_id = view.selected_model().map(|m| m.id.clone());
-        let installed_ids = view
-            .all_models()
-            .filter(|m| m.installed)
-            .map(|m| m.id.clone())
-            .collect();
-        let downloading_ids = view
-            .all_models()
-            .filter(|m| m.download.is_in_progress())
-            .map(|m| m.id.clone())
-            .collect();
-        let _ = self.cmd_tx.send(WindowsUiCommand::UpdateModels {
-            active_id,
-            installed_ids,
-            downloading_ids,
-        });
+        let _ = self
+            .cmd_tx
+            .send(WindowsUiCommand::UpdateControlSurface(Box::new(view.clone())));
         self.notify_ui();
     }
 
@@ -107,12 +95,9 @@ const WM_APP_WAKEUP: u32 = WM_APP + 1;
 const WM_TRAY_CALLBACK: u32 = WM_APP + 2;
 const TRAY_ICON_ID: u32 = 1001;
 
+const IDM_TOGGLE_PANEL: usize = 2000;
 const IDM_TOGGLE_LISTENING: usize = 2001;
-const IDM_MODEL_INFO: usize = 2002;
-const IDM_TOGGLE_HISTORY: usize = 2003;
 const IDM_OPEN_HISTORY_FOLDER: usize = 2004;
-const IDM_HISTORY_PATH: usize = 2005;
-const IDM_HOTKEY_INFO: usize = 2006;
 const IDM_QUIT: usize = 2007;
 
 struct UiState {
@@ -120,10 +105,10 @@ struct UiState {
     cmd_rx: Receiver<WindowsUiCommand>,
     listening: bool,
     history_enabled: bool,
-    model_name: Option<String>,
     taskbar_created_msg: u32,
     icon_standby: HICON,
     icon_listening: HICON,
+    controller: DesktopPanelController,
 }
 
 static mut UI_STATE_PTR: *mut UiState = ptr::null_mut();
@@ -162,11 +147,19 @@ unsafe extern "system" fn wnd_proc(
                         };
                         update_tray_icon(hwnd, listening, NIM_MODIFY, icon);
                     }
+                    WindowsUiCommand::UpdateControlSurface(surface_state) => {
+                        state.listening = surface_state.runtime_state.is_listening();
+                        state.history_enabled = surface_state.history_enabled;
+                        let icon = if state.listening {
+                            state.icon_listening
+                        } else {
+                            state.icon_standby
+                        };
+                        update_tray_icon(hwnd, state.listening, NIM_MODIFY, icon);
+                        state.controller.update_state(&surface_state);
+                    }
                     WindowsUiCommand::UpdateHistoryState(enabled) => {
                         state.history_enabled = enabled;
-                    }
-                    WindowsUiCommand::UpdateModels { active_id, .. } => {
-                        state.model_name = active_id;
                     }
                     WindowsUiCommand::OpenHistoryFolder(path) => {
                         let mut path_utf16: Vec<u16> =
@@ -182,7 +175,20 @@ unsafe extern "system" fn wnd_proc(
                             SW_SHOWNORMAL,
                         );
                     }
+                    WindowsUiCommand::TogglePanel => {
+                        let mut pt: POINT = std::mem::zeroed();
+                        GetCursorPos(&mut pt);
+                        let pos = calculate_windows_panel_position(
+                            Rect::new(pt.x, pt.y, 24, 24),
+                            Rect::new(0, 0, 1920, 1080),
+                            PANEL_WIDTH_PX,
+                            PANEL_HEIGHT_PX,
+                        );
+                        state.controller.set_position(pos);
+                        let _ = state.controller.toggle_panel();
+                    }
                     WindowsUiCommand::Shutdown => {
+                        state.controller.hide_panel();
                         DestroyWindow(hwnd);
                     }
                 }
@@ -197,12 +203,24 @@ unsafe extern "system" fn wnd_proc(
         }
         WM_TRAY_CALLBACK => {
             let event = lparam as u32;
-            if event == WM_RBUTTONUP || event == WM_LBUTTONUP || event == WM_CONTEXTMENU {
+            if event == WM_LBUTTONUP {
+                let mut pt: POINT = std::mem::zeroed();
+                GetCursorPos(&mut pt);
+                let pos = calculate_windows_panel_position(
+                    Rect::new(pt.x, pt.y, 24, 24),
+                    Rect::new(0, 0, 1920, 1080),
+                    PANEL_WIDTH_PX,
+                    PANEL_HEIGHT_PX,
+                );
+                state.controller.set_position(pos);
+                let _ = state.controller.toggle_panel();
+            } else if event == WM_RBUTTONUP || event == WM_CONTEXTMENU {
                 show_tray_menu(hwnd, state);
             }
             0
         }
         WM_DESTROY => {
+            state.controller.hide_panel();
             update_tray_icon(hwnd, false, NIM_DELETE, state.icon_standby);
             unregister_f10(hwnd);
             if !state.icon_standby.is_null() {
@@ -243,7 +261,7 @@ unsafe fn update_tray_icon(hwnd: HWND, listening: bool, action: u32, icon: HICON
     Shell_NotifyIconW(action, &nid);
 }
 
-unsafe fn show_tray_menu(hwnd: HWND, state: &UiState) {
+unsafe fn show_tray_menu(hwnd: HWND, state: &mut UiState) {
     let mut pt: POINT = std::mem::zeroed();
     GetCursorPos(&mut pt);
     SetForegroundWindow(hwnd);
@@ -253,7 +271,15 @@ unsafe fn show_tray_menu(hwnd: HWND, state: &UiState) {
         return;
     }
 
-    // 1. Start/Stop Listening
+    // 1. Open Echolet
+    AppendMenuW(
+        hmenu,
+        MF_STRING,
+        IDM_TOGGLE_PANEL,
+        to_wide("Open Echolet").as_ptr(),
+    );
+
+    // 2. Start / Stop Listening
     let toggle_text = if state.listening {
         "Stop Listening (F10)"
     } else {
@@ -267,64 +293,16 @@ unsafe fn show_tray_menu(hwnd: HWND, state: &UiState) {
     );
     AppendMenuW(hmenu, MF_SEPARATOR, 0, ptr::null());
 
-    // 2. Model Info
-    let model_text = match &state.model_name {
-        Some(name) => format!("Model: {}", name),
-        None => "Model: None installed".to_string(),
-    };
+    // 3. Open History Folder
     AppendMenuW(
         hmenu,
-        MF_STRING | MF_DISABLED | MF_GRAYED,
-        IDM_MODEL_INFO,
-        to_wide(&model_text).as_ptr(),
+        MF_STRING,
+        IDM_OPEN_HISTORY_FOLDER,
+        to_wide("Open History Folder").as_ptr(),
     );
     AppendMenuW(hmenu, MF_SEPARATOR, 0, ptr::null());
 
-    // 3. Local History
-    let hist_dir = paths::history_dir()
-        .to_string_lossy()
-        .replace(&std::env::var("USERPROFILE").unwrap_or_default(), "~");
-
-    if !state.history_enabled {
-        AppendMenuW(
-            hmenu,
-            MF_STRING,
-            IDM_TOGGLE_HISTORY,
-            to_wide("Local History: Off").as_ptr(),
-        );
-    } else {
-        AppendMenuW(
-            hmenu,
-            MF_STRING,
-            IDM_TOGGLE_HISTORY,
-            to_wide("✓ Local History").as_ptr(),
-        );
-        AppendMenuW(
-            hmenu,
-            MF_STRING,
-            IDM_OPEN_HISTORY_FOLDER,
-            to_wide("    Open History Folder").as_ptr(),
-        );
-        let path_text = format!("    {}", hist_dir);
-        AppendMenuW(
-            hmenu,
-            MF_STRING | MF_DISABLED | MF_GRAYED,
-            IDM_HISTORY_PATH,
-            to_wide(&path_text).as_ptr(),
-        );
-    }
-    AppendMenuW(hmenu, MF_SEPARATOR, 0, ptr::null());
-
-    // 4. Hotkey
-    AppendMenuW(
-        hmenu,
-        MF_STRING | MF_DISABLED | MF_GRAYED,
-        IDM_HOTKEY_INFO,
-        to_wide("Hotkey: F10").as_ptr(),
-    );
-    AppendMenuW(hmenu, MF_SEPARATOR, 0, ptr::null());
-
-    // 5. Quit
+    // 4. Quit
     AppendMenuW(hmenu, MF_STRING, IDM_QUIT, to_wide("Quit").as_ptr());
 
     let selected = TrackPopupMenuEx(
@@ -339,11 +317,18 @@ unsafe fn show_tray_menu(hwnd: HWND, state: &UiState) {
     DestroyMenu(hmenu);
 
     match selected {
+        IDM_TOGGLE_PANEL => {
+            let pos = calculate_windows_panel_position(
+                Rect::new(pt.x, pt.y, 24, 24),
+                Rect::new(0, 0, 1920, 1080),
+                PANEL_WIDTH_PX,
+                PANEL_HEIGHT_PX,
+            );
+            state.controller.set_position(pos);
+            let _ = state.controller.toggle_panel();
+        }
         IDM_TOGGLE_LISTENING => {
             let _ = state.action_tx.send(AppAction::ToggleListening);
-        }
-        IDM_TOGGLE_HISTORY => {
-            let _ = state.action_tx.send(AppAction::ToggleHistory);
         }
         IDM_OPEN_HISTORY_FOLDER => {
             let _ = state.action_tx.send(AppAction::OpenHistoryFolder);
@@ -368,15 +353,20 @@ pub fn spawn_ui_thread(
             let class_name = to_wide("EcholetMessageWindowClass");
             let hinstance = GetModuleHandleW(ptr::null());
 
-            let mut wc: WNDCLASSW = std::mem::zeroed();
-            wc.lpfnWndProc = Some(wnd_proc);
-            wc.hInstance = hinstance;
-            wc.lpszClassName = class_name.as_ptr();
+            let wnd_class = WNDCLASSW {
+                style: 0,
+                lpfnWndProc: Some(wnd_proc),
+                cbClsExtra: 0,
+                cbWndExtra: 0,
+                hInstance: hinstance,
+                hIcon: 0,
+                hCursor: 0,
+                hbrBackground: 0,
+                lpszMenuName: ptr::null(),
+                lpszClassName: class_name.as_ptr(),
+            };
 
-            if RegisterClassW(&wc) == 0 {
-                let _ = init_tx.send(Err("Failed to register window class".into()));
-                return;
-            }
+            RegisterClassW(&wnd_class);
 
             let hwnd = CreateWindowExW(
                 0,
@@ -408,15 +398,17 @@ pub fn spawn_ui_thread(
                 eprintln!("[Platform] Failed to create custom tray icon(s).");
             }
 
+            let controller = DesktopPanelController::new(action_tx.clone());
+
             let mut state = UiState {
                 action_tx,
                 cmd_rx,
                 listening: false,
                 history_enabled: false,
-                model_name: None,
                 taskbar_created_msg: taskbar_msg,
                 icon_standby,
                 icon_listening,
+                controller,
             };
 
             UI_STATE_PTR = &mut state;
