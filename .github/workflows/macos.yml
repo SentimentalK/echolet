@@ -64,6 +64,11 @@ jobs:
         run: |
           cargo test --release -- --nocapture
 
+      - name: Build Slint UI spike
+        run: |
+          cargo build --release --features slint-ui-spike --bin echolet-ui-spike
+          cargo test --test test_j11_1c_slint_spike --features slint-ui-spike --release -- --nocapture
+
       - name: Remove staged model payload to verify model-free packaging
         run: |
           rm -rf .local-runtime/models .local-runtime/model.json
@@ -123,6 +128,11 @@ jobs:
       - name: Run automated test suite
         run: |
           cargo test --release -- --nocapture
+
+      - name: Build Slint UI spike
+        run: |
+          cargo build --release --features slint-ui-spike --bin echolet-ui-spike
+          cargo test --test test_j11_1c_slint_spike --features slint-ui-spike --release -- --nocapture
 
       - name: Remove staged model payload to verify model-free packaging
         run: |

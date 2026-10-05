@@ -72,6 +72,13 @@ jobs:
           $env:PATH = "$PWD\.local-runtime\runtime\lib;$PWD\.local-runtime\runtime\bin;$env:PATH"
           cargo test --release -- --nocapture --test-threads=1
 
+      - name: Build Slint UI spike
+        shell: pwsh
+        run: |
+          $env:PATH = "$PWD\.local-runtime\runtime\lib;$PWD\.local-runtime\runtime\bin;$env:PATH"
+          cargo build --release --features slint-ui-spike --bin echolet-ui-spike
+          cargo test --test test_j11_1c_slint_spike --features slint-ui-spike --release -- --nocapture
+
       - name: Remove staged model payload to verify model-free packaging
         shell: pwsh
         run: |

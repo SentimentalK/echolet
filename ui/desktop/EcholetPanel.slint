@@ -1,0 +1,220 @@
+export struct SlintModelRow {
+    id: string,
+    label: string,
+    status_text: string,
+    action_label: string,
+    action_enabled: bool,
+    selected: bool,
+}
+
+export component EcholetPanel inherits Window {
+    width: 380px;
+    height: 240px;
+    title: "Echolet";
+    no-frame: true;
+    background: #18181b;
+    default-font-size: 13px;
+
+    in property <string> status_text: "Status: Ready";
+    in property <string> group_label: "Chinese + English";
+    in property <[SlintModelRow]> models: [];
+    in property <int> diagnostic_count: 0;
+    in property <string> diagnostic_state: "Default";
+    in property <string> footer_text: "Slint 1.18.1 · Software Renderer · 380x240";
+
+    callback close_requested();
+    callback diagnostic_clicked();
+    callback model_action_clicked(string);
+
+    forward-focus: key_handler;
+
+    key_handler := FocusScope {
+        key-pressed(event) => {
+            if (event.text == Key.Escape) {
+                root.close_requested();
+                return accept;
+            }
+            return reject;
+        }
+
+        // Outer container with border and fixed dimensions
+        Rectangle {
+            width: 380px;
+            height: 240px;
+            border-width: 1px;
+            border-color: #3f3f46;
+            border-radius: 8px;
+            background: #18181b;
+            clip: true;
+
+            VerticalLayout {
+                padding-left: 14px;
+                padding-right: 14px;
+                padding-top: 12px;
+                padding-bottom: 12px;
+                spacing: 8px;
+
+                // Header row: Echolet title and status
+                HorizontalLayout {
+                    height: 24px;
+                    alignment: space-between;
+
+                    Text {
+                        text: "Echolet";
+                        color: #f4f4f5;
+                        font-size: 15px;
+                        font-weight: 700;
+                        vertical-alignment: center;
+                    }
+
+                    Rectangle {
+                        height: 22px;
+                        border-radius: 4px;
+                        background: #27272a;
+                        border-width: 1px;
+                        border-color: #3f3f46;
+
+                        HorizontalLayout {
+                            padding-left: 8px;
+                            padding-right: 8px;
+
+                            Text {
+                                text: root.status_text;
+                                color: #a1a1aa;
+                                font-size: 11px;
+                                vertical-alignment: center;
+                                horizontal-alignment: center;
+                            }
+                        }
+                    }
+                }
+
+                // Divider
+                Rectangle {
+                    height: 1px;
+                    background: #27272a;
+                }
+
+                // Model Section: Group label
+                HorizontalLayout {
+                    height: 16px;
+                    Text {
+                        text: root.group_label;
+                        color: #71717a;
+                        font-size: 11px;
+                        font-weight: 600;
+                        overflow: elide;
+                        vertical-alignment: center;
+                    }
+                }
+
+                // Model Rows
+                VerticalLayout {
+                    spacing: 4px;
+
+                    for model in root.models: Rectangle {
+                        height: 34px;
+                        border-radius: 6px;
+                        background: model.selected ? #27272a : #1f1f23;
+                        border-width: 1px;
+                        border-color: model.selected ? #3b82f6 : #2e2e33;
+
+                        HorizontalLayout {
+                            padding-left: 10px;
+                            padding-right: 10px;
+                            spacing: 8px;
+                            alignment: space-between;
+
+                            // Model name and status text
+                            VerticalLayout {
+                                alignment: center;
+                                spacing: 2px;
+                                width: 220px;
+
+                                Text {
+                                    text: model.label;
+                                    color: #f4f4f5;
+                                    font-size: 12px;
+                                    font-weight: 500;
+                                    overflow: elide;
+                                }
+
+                                Text {
+                                    text: model.status_text;
+                                    color: #a1a1aa;
+                                    font-size: 10px;
+                                    overflow: elide;
+                                }
+                            }
+
+                            // Model Action button
+                            Rectangle {
+                                width: 90px;
+                                height: 24px;
+                                border-radius: 4px;
+                                background: !model.action_enabled ? #27272a : (model.selected ? #1e3a8a : #2563eb);
+                                border-width: 1px;
+                                border-color: !model.action_enabled ? #3f3f46 : (model.selected ? #3b82f6 : #60a5fa);
+
+                                Text {
+                                    text: model.action_label;
+                                    color: !model.action_enabled ? #71717a : #ffffff;
+                                    font-size: 11px;
+                                    font-weight: 500;
+                                    vertical-alignment: center;
+                                    horizontal-alignment: center;
+                                    overflow: elide;
+                                }
+
+                                action_touch := TouchArea {
+                                    enabled: model.action_enabled;
+                                    clicked => {
+                                        root.model_action_clicked(model.id);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Diagnostic control button
+                diag_box := Rectangle {
+                    height: 28px;
+                    border-radius: 6px;
+                    background: diag_touch.pressed ? #3f3f46 : (diag_touch.has-hover ? #2e2e33 : #27272a);
+                    border-width: 1px;
+                    border-color: #3f3f46;
+
+                    Text {
+                        text: "Diagnostic Ping: " + root.diagnostic_state + " (" + root.diagnostic_count + " clicks)";
+                        color: #e4e4e7;
+                        font-size: 11px;
+                        vertical-alignment: center;
+                        horizontal-alignment: center;
+                    }
+
+                    diag_touch := TouchArea {
+                        clicked => {
+                            root.diagnostic_clicked();
+                        }
+                    }
+                }
+
+                // Footer
+                HorizontalLayout {
+                    height: 16px;
+                    alignment: center;
+
+                    Text {
+                        text: root.footer_text;
+                        color: #52525b;
+                        font-size: 10px;
+                        vertical-alignment: center;
+                        horizontal-alignment: center;
+                        overflow: elide;
+                    }
+                }
+            }
+        }
+    }
+}

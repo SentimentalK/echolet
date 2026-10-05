@@ -44,6 +44,8 @@ jobs:
               - 'src/lib.rs'
               - 'src/state.rs'
               - 'src/models/**'
+              - 'src/ui/**'
+              - 'ui/**'
               - 'tests/**'
               - 'licenses/**'
             platform_build:

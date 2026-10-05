@@ -21,6 +21,11 @@ if [[ ! -x "${APP_DIR}/Contents/MacOS/echolet" ]]; then
     exit 1
 fi
 
+if [[ -f "${APP_DIR}/Contents/MacOS/echolet-ui-spike" ]]; then
+    echo "[Error] echolet-ui-spike found in production Echolet.app!" >&2
+    exit 1
+fi
+
 # 2. Check Info.plist
 echo "--> Validating Info.plist..."
 if [[ ! -f "${APP_DIR}/Contents/Info.plist" ]]; then

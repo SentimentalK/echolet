@@ -79,4 +79,9 @@ fn main() {
         res.set_icon("assets/windows/echolet.ico");
         res.compile().expect("Failed to compile Windows application icon resource");
     }
+
+    #[cfg(feature = "slint-ui-spike")]
+    {
+        slint_build::compile("ui/desktop/EcholetPanel.slint").expect("Failed to compile EcholetPanel.slint");
+    }
 }

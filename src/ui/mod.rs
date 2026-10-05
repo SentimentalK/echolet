@@ -9,6 +9,9 @@
 
 pub mod control_surface;
 
+#[cfg(feature = "slint-ui-spike")]
+pub mod desktop;
+
 pub use control_surface::{
     build_control_surface_state, dispatch_surface_action, format_bytes, project_runtime_state,
     ControlSurfaceState, DownloadPhase, DownloadPresentation, LanguageOptionPresentation,

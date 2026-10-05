@@ -38,6 +38,11 @@ if [[ ! -x "${DIST_DIR}/echolet" ]]; then
     exit 1
 fi
 
+if [[ -f "${DIST_DIR}/echolet-ui-spike" ]]; then
+    echo "[Error] echolet-ui-spike found in production release bundle!" >&2
+    exit 1
+fi
+
 # 2. Check RUNPATH
 echo "--> Verifying clean production RUNPATH..."
 RUNPATH=$(readelf -d "${DIST_DIR}/echolet" | grep -E "RPATH|RUNPATH" || true)

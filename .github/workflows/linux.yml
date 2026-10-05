@@ -40,7 +40,7 @@ jobs:
       - name: Install Linux system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libasound2-dev pkg-config zstd jq curl
+          sudo apt-get install -y libasound2-dev libxkbcommon-dev pkg-config zstd jq curl
 
       - name: Cache Cargo dependencies and build cache
         uses: actions/cache@v4
@@ -69,6 +69,11 @@ jobs:
       - name: Run automated test suite
         run: |
           cargo test --release -- --nocapture
+
+      - name: Build Slint UI spike
+        run: |
+          cargo build --release --features slint-ui-spike --bin echolet-ui-spike
+          cargo test --test test_j11_1c_slint_spike --features slint-ui-spike --release -- --nocapture
 
       - name: Remove staged model payload to verify model-free packaging
         run: |

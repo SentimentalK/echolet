@@ -20,6 +20,12 @@ if (!(Test-Path $ExePath) -or (Get-Item $ExePath).Length -eq 0) {
     exit 1
 }
 
+$SpikeExePath = "$AppDir\echolet-ui-spike.exe"
+if (Test-Path $SpikeExePath) {
+    Write-Error "[Error] $SpikeExePath found in production release package!"
+    exit 1
+}
+
 # 2. Check embedded application icon in executable
 Write-Host "--> Checking embedded application icon in executable..."
 Add-Type -TypeDefinition @"
