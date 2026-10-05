@@ -9,7 +9,9 @@ fn test_multi_model_initialization_and_inference() {
         "/home/sentimentalk/.cache/echolet-staging/nemotron/sherpa-onnx-nemotron-speech-streaming-en-0.6b-560ms-int8-2026-04-25",
     );
     let xasr_dir = Path::new("/home/sentimentalk/.cache/echolet-staging/xasr");
-    let fallback_wav = Path::new("/home/sentimentalk/codes/echolet/.local-runtime/models/bilingual-zh-en/test_wavs/0.wav");
+    let fallback_wav = Path::new(
+        "/home/sentimentalk/codes/echolet/.local-runtime/models/bilingual-zh-en/test_wavs/0.wav",
+    );
 
     // 1. Test Nemotron 2026 Model ASR if staged
     if nemotron_dir.exists() {
@@ -17,7 +19,7 @@ fn test_multi_model_initialization_and_inference() {
             id: "sherpa-onnx-nemotron-speech-streaming-en-0.6b-560ms-int8-2026-04-25".into(),
             display_name: "English (Nemotron 0.6B / 560ms)".into(),
             version: "2026-04-25".into(),
-            language: "en".into(),
+            languages: vec!["en".into()],
             family: "online-transducer".into(),
             encoder: "encoder.int8.onnx".into(),
             decoder: "decoder.int8.onnx".into(),
@@ -68,7 +70,7 @@ fn test_multi_model_initialization_and_inference() {
             id: "echolet-xasr-zh-en-480ms-689ff18c584d29910da37b6fe904db0c1489c9d1".into(),
             display_name: "Chinese + English (X-ASR / 480ms)".into(),
             version: "2026".into(),
-            language: "zh-en".into(),
+            languages: vec!["zh".into(), "en".into()],
             family: "online-transducer".into(),
             encoder: "encoder-480ms.onnx".into(),
             decoder: "decoder-480ms.onnx".into(),
@@ -100,7 +102,10 @@ fn test_multi_model_initialization_and_inference() {
 
             let res = xasr_stream.get_result();
             println!("[Multi-Model Test] X-ASR 2026 result: {}", res);
-            assert!(!res.is_empty(), "X-ASR recognition result should not be empty");
+            assert!(
+                !res.is_empty(),
+                "X-ASR recognition result should not be empty"
+            );
         }
     }
 }

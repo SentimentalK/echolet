@@ -1,12 +1,15 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "default_model_id": "echolet-xasr-zh-en-480ms-689ff18c584d29910da37b6fe904db0c1489c9d1",
   "models": [
     {
       "id": "echolet-xasr-zh-en-480ms-689ff18c584d29910da37b6fe904db0c1489c9d1",
       "display_name": "Chinese + English (X-ASR / 480ms)",
       "version": "2026",
-      "language": "zh-en",
+      "languages": [
+        "zh",
+        "en"
+      ],
       "family": "online-transducer",
       "source": {
         "bundled": false,
@@ -29,7 +32,12 @@
         "provider": "cpu",
         "decoding_method": "greedy_search",
         "max_active_paths": 4
-      }
+      },
+      "license": {
+        "spdx": "Apache-2.0",
+        "name": "Apache License 2.0"
+      },
+      "verification_status": "Experimental"
     }
   ]
 }

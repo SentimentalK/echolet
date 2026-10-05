@@ -3,7 +3,9 @@ use echolet::actions::AppAction;
 use echolet::app::App;
 use echolet::models::manager::ModelManager;
 use echolet::models::manifest::ModelManifest;
-use echolet::models::registry::ModelRegistry;
+use echolet::models::registry::{
+    ModelLicense, ModelRegistry, VerificationStatus, CURRENT_SCHEMA_VERSION,
+};
 use echolet::platform::{PlatformHandle, PlatformRuntime, TextInjector};
 use std::fs;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -48,7 +50,7 @@ fn test_registry_parsing_and_invariants() {
     let registry =
         ModelRegistry::from_str(registry_content).expect("Failed to parse registry.json");
 
-    assert_eq!(registry.schema_version, 1);
+    assert_eq!(registry.schema_version, 2);
     assert_eq!(
         registry.default_model_id,
         "echolet-xasr-zh-en-480ms-689ff18c584d29910da37b6fe904db0c1489c9d1"
@@ -67,6 +69,13 @@ fn test_registry_parsing_and_invariants() {
         xasr.display_title(),
         "Chinese + English (X-ASR / 480ms) — 2026"
     );
+    assert_eq!(xasr.languages, vec!["zh", "en"]);
+    assert_eq!(xasr.language_key(), "zh-en");
+    assert_eq!(xasr.language_label(), "Chinese + English");
+    assert!(xasr.supports_language("zh"));
+    assert!(xasr.supports_language("zh-en"));
+    assert!(!xasr.supports_language("ja"));
+    assert_eq!(xasr.primary_language(), Some("zh"));
     assert!(!xasr.source.bundled);
     assert_eq!(
         xasr.source.repository.as_deref(),
@@ -94,7 +103,7 @@ fn test_manifest_validation_catches_missing_files() {
         id: "test-model".into(),
         display_name: "Test Model".into(),
         version: "2026-01-01".into(),
-        language: "en".into(),
+        languages: vec!["en".into()],
         family: "online-transducer".into(),
         encoder: "encoder.onnx".into(),
         decoder: "decoder.onnx".into(),
@@ -204,4 +213,305 @@ fn test_transactional_model_switch_and_listening_guard() {
         app.model_manager.active_model_id, initial_model,
         "Active model must remain untouched on failure"
     );
+}
+
+// ---------------------------------------------------------------------------
+// J7: registry schema v2 / backward compatibility
+// ---------------------------------------------------------------------------
+
+/// Exact legacy v1 registry shape: singular `language` string, no optional
+/// v2 metadata, no `verification_status`.
+const LEGACY_V1_REGISTRY: &str = r#"
+{
+  "schema_version": 1,
+  "default_model_id": "legacy-model",
+  "models": [
+    {
+      "id": "legacy-model",
+      "display_name": "Legacy Bilingual",
+      "version": "1",
+      "language": "zh-en",
+      "family": "online-transducer",
+      "source": {
+        "bundled": false,
+        "url": "https://example.invalid/legacy.tar.zst",
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "repository": "https://example.invalid/repo",
+        "revision": "rev-legacy"
+      },
+      "files": {
+        "encoder": "encoder.onnx",
+        "decoder": "decoder.onnx",
+        "joiner": "joiner.onnx",
+        "tokens": "tokens.txt"
+      },
+      "runtime": {
+        "model_type": "zipformer2",
+        "sample_rate": 16000,
+        "feature_dim": 80,
+        "num_threads": 1,
+        "provider": "cpu",
+        "decoding_method": "greedy_search",
+        "max_active_paths": 4
+      }
+    }
+  ]
+}
+"#;
+
+#[test]
+fn test_legacy_v1_registry_parses_and_normalizes() {
+    let registry = ModelRegistry::from_str(LEGACY_V1_REGISTRY).expect("legacy v1 must parse");
+    assert_eq!(registry.schema_version, 1);
+    let entry = registry.get_model("legacy-model").expect("legacy model");
+    // Legacy singular `language: "zh-en"` normalizes centrally to plural codes.
+    assert_eq!(entry.languages, vec!["zh", "en"]);
+    assert_eq!(entry.language_key(), "zh-en");
+    assert!(entry.supports_language("zh-en"));
+    // Missing legacy verification_status defaults conservatively to non-Verified.
+    assert_eq!(entry.verification_status, VerificationStatus::Experimental);
+    assert!(!entry.verification_status.is_verified());
+    // Optional v2 metadata is absent, not required.
+    assert_eq!(entry.download_size_bytes, None);
+    assert_eq!(entry.installed_size_bytes, None);
+    assert_eq!(entry.upstream_release_date, None);
+    assert_eq!(entry.license, None);
+
+    // v1 -> normalized in-memory -> canonical v2 serialization.
+    let canonical = registry
+        .to_canonical_string()
+        .expect("canonical serialization must succeed");
+    assert!(canonical.contains("\"schema_version\": 2"));
+    assert!(canonical.contains("\"languages\""));
+    assert!(
+        !canonical.contains("\"language\""),
+        "canonical v2 must not emit the legacy singular field: {}",
+        canonical
+    );
+    let reparsed = ModelRegistry::from_str(&canonical).expect("canonical v2 must reparse");
+    assert_eq!(reparsed.schema_version, CURRENT_SCHEMA_VERSION);
+    assert_eq!(
+        reparsed.models, registry.models,
+        "normalization must be lossless for model metadata"
+    );
+}
+
+fn canonical_v2_registry() -> String {
+    r#"
+{
+  "schema_version": 2,
+  "default_model_id": "v2-model",
+  "models": [
+    {
+      "id": "v2-model",
+      "display_name": "V2 Bilingual",
+      "version": "2",
+      "languages": ["zh", "en"],
+      "family": "online-transducer",
+      "source": {
+        "bundled": false,
+        "url": "https://example.invalid/v2.tar.zst",
+        "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "repository": "https://example.invalid/repo",
+        "revision": "rev-v2"
+      },
+      "files": {
+        "encoder": "encoder.onnx",
+        "decoder": "decoder.onnx",
+        "joiner": "joiner.onnx",
+        "tokens": "tokens.txt"
+      },
+      "runtime": {
+        "model_type": "zipformer2",
+        "sample_rate": 16000,
+        "feature_dim": 80,
+        "num_threads": 2,
+        "provider": "cpu",
+        "decoding_method": "greedy_search",
+        "max_active_paths": 4
+      },
+      "download_size_bytes": 123456,
+      "installed_size_bytes": 234567,
+      "upstream_release_date": "2026-04-25",
+      "license": {
+        "spdx": "Apache-2.0",
+        "name": "Apache License 2.0",
+        "url": "https://www.apache.org/licenses/LICENSE-2.0"
+      },
+      "verification_status": "Community"
+    }
+  ]
+}
+"#
+    .to_string()
+}
+
+#[test]
+fn test_canonical_v2_round_trip_preserves_all_metadata() {
+    let registry = ModelRegistry::from_str(&canonical_v2_registry()).expect("v2 must parse");
+    assert_eq!(registry.schema_version, CURRENT_SCHEMA_VERSION);
+
+    let entry = registry.get_model("v2-model").expect("v2 model");
+    assert_eq!(entry.download_size_bytes, Some(123456));
+    assert_eq!(entry.installed_size_bytes, Some(234567));
+    assert_eq!(entry.upstream_release_date.as_deref(), Some("2026-04-25"));
+    assert_eq!(
+        entry.license,
+        Some(ModelLicense {
+            spdx: Some("Apache-2.0".into()),
+            name: Some("Apache License 2.0".into()),
+            url: Some("https://www.apache.org/licenses/LICENSE-2.0".into()),
+        })
+    );
+    assert_eq!(registry.models[0].verification_status.label(), "Community");
+
+    let serialized = registry.to_canonical_string().unwrap();
+    let reparsed = ModelRegistry::from_str(&serialized).expect("round-trip must parse");
+    assert_eq!(reparsed, registry, "round-trip must not lose metadata");
+}
+
+#[test]
+fn test_missing_optional_v2_metadata_parses() {
+    let json = r#"
+    {
+      "schema_version": 2,
+      "default_model_id": "m",
+      "models": [
+        {
+          "id": "m",
+          "display_name": "M",
+          "version": "1",
+          "languages": ["en"],
+          "family": "online-transducer",
+          "source": {},
+          "files": {
+            "encoder": "e.onnx", "decoder": "d.onnx",
+            "joiner": "j.onnx", "tokens": "tokens.txt"
+          },
+          "runtime": {}
+        }
+      ]
+    }
+    "#;
+    let registry = ModelRegistry::from_str(json).expect("minimal v2 must parse");
+    let entry = registry.get_model("m").unwrap();
+    assert_eq!(entry.download_size_bytes, None);
+    assert_eq!(entry.installed_size_bytes, None);
+    assert_eq!(entry.upstream_release_date, None);
+    // license URL (and license entirely) absent is fine.
+    assert_eq!(entry.license, None);
+    // Runtime config falls back to backward-compatible defaults.
+    assert_eq!(entry.runtime.sample_rate, 16000);
+    assert_eq!(entry.runtime.provider, "cpu");
+    // Unknown/omitted verification defaults to non-Verified.
+    assert!(!entry.verification_status.is_verified());
+}
+
+#[test]
+fn test_unknown_future_schema_version_fails_clearly() {
+    let json = r#"{"schema_version": 99, "default_model_id": "m", "models": []}"#;
+    let err = ModelRegistry::from_str(json).unwrap_err();
+    assert!(
+        err.contains("Unsupported registry schema_version 99"),
+        "unexpected error: {}",
+        err
+    );
+    assert!(
+        err.contains("up to 2"),
+        "error must state the supported ceiling: {}",
+        err
+    );
+}
+
+#[test]
+fn test_migrated_registry_keeps_j6_frozen_xasr_asset_and_is_not_verified() {
+    let registry = ModelRegistry::from_str(include_str!("../models/registry.json"))
+        .expect("migrated registry must parse");
+    assert_eq!(registry.schema_version, CURRENT_SCHEMA_VERSION);
+
+    let xasr = registry
+        .get_model("echolet-xasr-zh-en-480ms-689ff18c584d29910da37b6fe904db0c1489c9d1")
+        .expect("current X-ASR entry");
+    assert_eq!(xasr.languages, vec!["zh", "en"]);
+    // J6 frozen Echolet Release URL + SHA256 must be preserved verbatim.
+    assert_eq!(
+        xasr.source.url.as_deref(),
+        Some("https://github.com/SentimentalK/echolet/releases/download/model-xasr-zh-en-480ms-r1/model-xasr-zh-en-480ms-r1.tar.zst")
+    );
+    assert_eq!(
+        xasr.source.sha256.as_deref(),
+        Some("6fd6e6c5c3969ea90ce4245fd8ac4e61a92881deedab1c467568ab73baa98a3f")
+    );
+    // Provenance preserved.
+    assert_eq!(
+        xasr.source.repository.as_deref(),
+        Some("https://huggingface.co/GilgameshWind/X-ASR-zh-en")
+    );
+    assert_eq!(
+        xasr.source.revision.as_deref(),
+        Some("689ff18c584d29910da37b6fe904db0c1489c9d1")
+    );
+    // Repo-local authoritative license (models/base-model.json) says Apache-2.0.
+    let license = xasr.license.as_ref().expect("license metadata present");
+    assert_eq!(license.spdx.as_deref(), Some("Apache-2.0"));
+    // J8 owns promotion; J7 must keep current X-ASR non-Verified.
+    assert!(
+        !xasr.verification_status.is_verified(),
+        "current X-ASR must NOT be Echolet Verified in J7"
+    );
+    assert_eq!(xasr.verification_status, VerificationStatus::Experimental);
+
+    // Round-trip of the shipped registry is stable.
+    let round_trip = ModelRegistry::from_str(&registry.to_canonical_string().unwrap()).unwrap();
+    assert_eq!(round_trip, registry);
+}
+
+#[test]
+fn test_manager_discovers_registry_model_without_manifest() {
+    let tmp = std::env::temp_dir().join(format!("echolet-j7-discovery-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&tmp);
+    let bundled = tmp.join("bundled");
+    let user = tmp.join("user");
+    let cfg = tmp.join("config.json");
+    // Legacy-style install directory name derived from the language pair; no
+    // model.json is written, so discovery must fall back to the registry entry.
+    let model_dir = bundled.join("bilingual-zh-en");
+    fs::create_dir_all(&model_dir).unwrap();
+    for file in [
+        "encoder-480ms.onnx",
+        "decoder-480ms.onnx",
+        "joiner-480ms.onnx",
+        "tokens.txt",
+    ] {
+        fs::write(model_dir.join(file), b"dummy").unwrap();
+    }
+    fs::create_dir_all(&user).unwrap();
+
+    let manager = ModelManager::new_with_paths(bundled, user, cfg).expect("manager must init");
+    let id = "echolet-xasr-zh-en-480ms-689ff18c584d29910da37b6fe904db0c1489c9d1";
+    assert!(
+        manager.is_installed(id),
+        "installed models: {:?}",
+        manager.installed.keys().collect::<Vec<_>>()
+    );
+    let installed = manager.get_model(id).unwrap();
+    assert_eq!(installed.manifest.languages, vec!["zh", "en"]);
+    assert_eq!(installed.manifest.language_label(), "Chinese + English");
+
+    let _ = fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn test_platform_projection_derives_language_label_from_normalized_schema() {
+    let registry = ModelRegistry::from_str(include_str!("../models/registry.json")).unwrap();
+    let entry = registry.default_entry().expect("default entry");
+    // The platform tray projection derives a display title; the language label
+    // is derived from the normalized plural schema.
+    assert!(entry.display_title().contains("Chinese + English"));
+    assert_eq!(entry.language_label(), "Chinese + English");
+    assert_eq!(entry.language_key(), "zh-en");
+    assert!(entry.matches_install_dir("bilingual-zh-en"));
+    assert!(entry
+        .matches_install_dir("echolet-xasr-zh-en-480ms-689ff18c584d29910da37b6fe904db0c1489c9d1"));
+    assert!(!entry.matches_install_dir("bilingual-ja-en"));
 }

@@ -1,7 +1,7 @@
 use echolet::models::download::{ArchiveFormat, InstallPhase};
 use echolet::models::manager::ModelManager;
 use echolet::models::registry::{
-    ModelFilesConfig, ModelRuntimeConfig, ModelSource, RegistryModelEntry,
+    ModelFilesConfig, ModelRuntimeConfig, ModelSource, RegistryModelEntry, VerificationStatus,
 };
 use std::fs;
 use std::io::{Read, Write};
@@ -283,7 +283,7 @@ fn test_entry(id: &str, url: String, sha256: &str) -> RegistryModelEntry {
         id: id.to_string(),
         display_name: format!("Test Model {}", id),
         version: "2026".into(),
-        language: "en".into(),
+        languages: vec!["en".into()],
         family: "test".into(),
         source: ModelSource {
             bundled: false,
@@ -299,6 +299,11 @@ fn test_entry(id: &str, url: String, sha256: &str) -> RegistryModelEntry {
             tokens: FILE_NAMES[3].into(),
         },
         runtime: runtime_config(),
+        download_size_bytes: None,
+        installed_size_bytes: None,
+        upstream_release_date: None,
+        license: None,
+        verification_status: VerificationStatus::Experimental,
     }
 }
 

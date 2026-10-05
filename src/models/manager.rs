@@ -136,10 +136,7 @@ impl ModelManager {
                 // If model.json is absent, match against registry entries
                 let dir_name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
                 for reg in &self.registry.models {
-                    if reg.id == dir_name
-                        || dir_name.starts_with(&reg.language)
-                        || dir_name.contains("bilingual")
-                    {
+                    if reg.matches_install_dir(dir_name) {
                         let manifest = reg.to_manifest();
                         if manifest.validate_files(&path).is_ok() {
                             self.installed.insert(

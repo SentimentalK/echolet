@@ -452,7 +452,7 @@ fn test_discovering_or_installing_model_after_starting_in_no_model_state() {
         id: "mock-new-model".into(),
         display_name: "Mock New Model".into(),
         version: "2026-01-01".into(),
-        language: "en".into(),
+        languages: vec!["en".into()],
         family: "test".into(),
         encoder: "enc.onnx".into(),
         decoder: "dec.onnx".into(),

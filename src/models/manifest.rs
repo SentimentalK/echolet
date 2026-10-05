@@ -1,3 +1,4 @@
+use crate::models::language::{self, deserialize_languages};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
@@ -7,7 +8,11 @@ pub struct ModelManifest {
     pub id: String,
     pub display_name: String,
     pub version: String,
-    pub language: String,
+    /// Canonical plural language list. Legacy on-disk manifests that stored a
+    /// single `"language"` string still load through the shared normalization
+    /// seam; there is no competing in-memory `language` field.
+    #[serde(alias = "language", deserialize_with = "deserialize_languages")]
+    pub languages: Vec<String>,
     pub family: String,
 
     pub encoder: String,
@@ -57,7 +62,7 @@ impl Default for ModelManifest {
             id: "echolet-xasr-zh-en-480ms-689ff18c584d29910da37b6fe904db0c1489c9d1".into(),
             display_name: "Chinese + English (X-ASR / 480ms)".into(),
             version: "2026".into(),
-            language: "zh-en".into(),
+            languages: vec!["zh".into(), "en".into()],
             family: "online-transducer".into(),
             encoder: "encoder-480ms.onnx".into(),
             decoder: "decoder-480ms.onnx".into(),
@@ -75,6 +80,33 @@ impl Default for ModelManifest {
 }
 
 impl ModelManifest {
+    /// Whether this model supports every code in `code` (which itself may be a
+    /// legacy composite spec such as `"zh-en"`).
+    pub fn supports_language(&self, code: &str) -> bool {
+        let requested = language::normalize_language_spec(code);
+        if requested.is_empty() {
+            return false;
+        }
+        requested
+            .iter()
+            .all(|req| self.languages.iter().any(|lang| lang == req))
+    }
+
+    /// First (primary) canonical language code, if any.
+    pub fn primary_language(&self) -> Option<&str> {
+        self.languages.first().map(String::as_str)
+    }
+
+    /// Stable canonical language key (for example `"zh-en"`).
+    pub fn language_key(&self) -> String {
+        language::language_key(&self.languages)
+    }
+
+    /// Human-readable language label (for example `"Chinese + English"`).
+    pub fn language_label(&self) -> String {
+        language::language_label(&self.languages)
+    }
+
     pub fn from_file(path: &Path) -> Result<Self, String> {
         let content = fs::read_to_string(path)
             .map_err(|e| format!("Failed to read model manifest {:?}: {}", path, e))?;
@@ -86,9 +118,8 @@ impl ModelManifest {
         let content = serde_json::to_string_pretty(self)
             .map_err(|e| format!("Failed to serialize model manifest: {}", e))?;
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|e| {
-                format!("Failed to create parent dir for {:?}: {}", path, e)
-            })?;
+            fs::create_dir_all(parent)
+                .map_err(|e| format!("Failed to create parent dir for {:?}: {}", path, e))?;
         }
         fs::write(path, content)
             .map_err(|e| format!("Failed to write model manifest to {:?}: {}", path, e))

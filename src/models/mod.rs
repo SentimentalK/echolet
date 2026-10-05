@@ -1,4 +1,5 @@
 pub mod download;
+pub mod language;
 pub mod manager;
 pub mod manifest;
 pub mod registry;
@@ -10,4 +11,6 @@ pub use download::{
 };
 pub use manager::{InstalledModel, ModelManager};
 pub use manifest::ModelManifest;
-pub use registry::{ModelRegistry, RegistryModelEntry};
+pub use registry::{
+    ModelLicense, ModelRegistry, RegistryModelEntry, VerificationStatus, CURRENT_SCHEMA_VERSION,
+};
