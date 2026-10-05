@@ -33,11 +33,13 @@
         "decoding_method": "greedy_search",
         "max_active_paths": 4
       },
+      "download_size_bytes": 551847917,
+      "installed_size_bytes": 614596718,
       "license": {
         "spdx": "Apache-2.0",
         "name": "Apache License 2.0"
       },
-      "verification_status": "Experimental"
+      "verification_status": "Echolet Verified"
     }
   ]
 }

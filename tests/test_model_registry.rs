@@ -423,43 +423,92 @@ fn test_unknown_future_schema_version_fails_clearly() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// J8: canonical X-ASR promotion + identity drift guards
+// ---------------------------------------------------------------------------
+
+/// The shipped registry's canonical X-ASR entry is `Echolet Verified`, and that
+/// promotion is tied to the *exact* immutable identity from the repo
+/// authorities. If a future model change updates `base-model.json` /
+/// `base-model.lock.json` without updating (and re-verifying) the shipped
+/// registry entry, this test fails rather than letting the stale entry keep
+/// inheriting `Verified`.
 #[test]
-fn test_migrated_registry_keeps_j6_frozen_xasr_asset_and_is_not_verified() {
+fn test_shipped_registry_xasr_is_verified_and_matches_authorities() {
     let registry = ModelRegistry::from_str(include_str!("../models/registry.json"))
-        .expect("migrated registry must parse");
+        .expect("shipped registry must parse");
     assert_eq!(registry.schema_version, CURRENT_SCHEMA_VERSION);
+
+    let base: serde_json::Value =
+        serde_json::from_str(include_str!("../models/base-model.json")).expect("base-model.json");
+    let lock: serde_json::Value =
+        serde_json::from_str(include_str!("../models/base-model.lock.json"))
+            .expect("base-model.lock.json");
 
     let xasr = registry
         .get_model("echolet-xasr-zh-en-480ms-689ff18c584d29910da37b6fe904db0c1489c9d1")
         .expect("current X-ASR entry");
-    assert_eq!(xasr.languages, vec!["zh", "en"]);
-    // J6 frozen Echolet Release URL + SHA256 must be preserved verbatim.
-    assert_eq!(
-        xasr.source.url.as_deref(),
-        Some("https://github.com/SentimentalK/echolet/releases/download/model-xasr-zh-en-480ms-r1/model-xasr-zh-en-480ms-r1.tar.zst")
+
+    // J8 promotion: the exact canonical identity is now Echolet Verified.
+    assert!(
+        xasr.verification_status.is_verified(),
+        "canonical X-ASR must be Echolet Verified after J8"
     );
     assert_eq!(
-        xasr.source.sha256.as_deref(),
-        Some("6fd6e6c5c3969ea90ce4245fd8ac4e61a92881deedab1c467568ab73baa98a3f")
+        xasr.verification_status,
+        VerificationStatus::EcholetVerified
     );
-    // Provenance preserved.
-    assert_eq!(
-        xasr.source.repository.as_deref(),
-        Some("https://huggingface.co/GilgameshWind/X-ASR-zh-en")
-    );
+    assert_eq!(xasr.verification_status.label(), "Echolet Verified");
+
+    // URL + archive SHA256 must match the immutable Echolet Release lock.
+    assert_eq!(xasr.source.url.as_deref(), lock["url"].as_str());
+    assert_eq!(xasr.source.sha256.as_deref(), lock["sha256"].as_str());
+
+    // Provenance, languages and license must match the base-model authority.
     assert_eq!(
         xasr.source.revision.as_deref(),
-        Some("689ff18c584d29910da37b6fe904db0c1489c9d1")
+        base["upstream_revision"].as_str()
     );
-    // Repo-local authoritative license (models/base-model.json) says Apache-2.0.
+    assert_eq!(
+        xasr.languages,
+        base["language"]
+            .as_array()
+            .expect("base-model language array")
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect::<Vec<_>>()
+    );
     let license = xasr.license.as_ref().expect("license metadata present");
+    assert_eq!(license.spdx.as_deref(), base["license"].as_str());
     assert_eq!(license.spdx.as_deref(), Some("Apache-2.0"));
-    // J8 owns promotion; J7 must keep current X-ASR non-Verified.
+
+    // The model id itself encodes the upstream revision, so a revision bump
+    // cannot silently keep the old Verified id.
     assert!(
-        !xasr.verification_status.is_verified(),
-        "current X-ASR must NOT be Echolet Verified in J7"
+        xasr.id
+            .contains(base["upstream_revision"].as_str().unwrap()),
+        "model id must encode the upstream revision: {}",
+        xasr.id
     );
-    assert_eq!(xasr.verification_status, VerificationStatus::Experimental);
+
+    // J8 populated authoritative size metadata for the verified pack: the
+    // immutable archive length, and the deterministic sum of the four
+    // canonical installed model-pack files (see the field docs in registry.rs).
+    assert_eq!(xasr.download_size_bytes, Some(551_847_917));
+    assert_eq!(xasr.installed_size_bytes, Some(614_596_718));
+
+    // Only this exact frozen identity may be Verified in the shipped registry.
+    let verified_ids: Vec<&str> = registry
+        .models
+        .iter()
+        .filter(|m| m.verification_status.is_verified())
+        .map(|m| m.id.as_str())
+        .collect();
+    assert_eq!(
+        verified_ids,
+        vec![xasr.id.as_str()],
+        "only the canonical X-ASR entry may be Echolet Verified"
+    );
 
     // Round-trip of the shipped registry is stable.
     let round_trip = ModelRegistry::from_str(&registry.to_canonical_string().unwrap()).unwrap();

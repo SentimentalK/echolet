@@ -134,8 +134,14 @@ pub struct RegistryModelEntry {
     pub source: ModelSource,
     pub files: ModelFilesConfig,
     pub runtime: ModelRuntimeConfig,
+    /// Length in bytes of the immutable source archive at `source.url`, as
+    /// advertised by the release host. `None` when not authoritatively known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub download_size_bytes: Option<u64>,
+    /// Deterministic installed footprint: the sum of the four canonical
+    /// installed model-pack files (`files.encoder`, `files.decoder`,
+    /// `files.joiner`, `files.tokens`), excluding the generated `model.json`.
+    /// `None` when not authoritatively known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub installed_size_bytes: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

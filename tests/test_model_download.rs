@@ -895,6 +895,46 @@ fn test_transient_http_failure_is_retried_and_then_succeeds() {
 }
 
 #[test]
+fn test_verified_status_does_not_change_downloader_safety_or_autoselect() {
+    // A model marked `Echolet Verified` must go through exactly the same
+    // downloader safety path as an Experimental one: checksum enforced, no
+    // auto-select, staging cleaned up.
+    let archive = build_tar_zst(&model_files("verified", Some("root")));
+    let sha = sha256_hex(&archive);
+    let server = TestServer::serve(archive);
+
+    let fx = Fixture::new("verified-status");
+    let mut manager = fx.manager();
+    let id = "test-verified-model";
+    let mut entry = test_entry(id, server.url("/m.tar.zst"), &sha);
+    entry.verification_status = VerificationStatus::EcholetVerified;
+    register_entry(&mut manager, entry);
+
+    manager
+        .install_registry_model(id, None)
+        .expect("verified-status install must succeed");
+    assert!(
+        manager.active_model_id.is_none(),
+        "verified status must not auto-select a model"
+    );
+    assert_target_has_tag(&fx.user_model_dir(id), "verified");
+    assert!(!fx.has_staging_residue());
+
+    // A checksum mismatch must still fail for a Verified entry.
+    let bad_id = "test-verified-bad-sha";
+    let mut bad_entry = test_entry(bad_id, server.url("/bad.tar.zst"), &"0".repeat(64));
+    bad_entry.verification_status = VerificationStatus::EcholetVerified;
+    register_entry(&mut manager, bad_entry);
+
+    let err = manager
+        .install_registry_model(bad_id, None)
+        .expect_err("verified status must not bypass checksum enforcement");
+    assert!(err.contains("SHA256"), "unexpected error: {}", err);
+    assert!(!fx.user_dir_has_target(bad_id));
+    assert!(!fx.has_staging_residue());
+}
+
+#[test]
 fn test_non_success_http_status_returns_clear_error() {
     let server = TestServer::start(|_| (404, b"nope".to_vec()));
 
