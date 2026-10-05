@@ -111,7 +111,8 @@ pub fn calculate_windows_panel_position(
         (tray_icon_rect.y - panel_height as i32).max(work_area.y)
     } else {
         // Place below taskbar
-        (tray_icon_rect.y + tray_icon_rect.height as i32).min(work_area.y + work_area.height as i32 - panel_height as i32)
+        (tray_icon_rect.y + tray_icon_rect.height as i32)
+            .min(work_area.y + work_area.height as i32 - panel_height as i32)
     };
 
     Point { x, y }
@@ -140,13 +141,15 @@ pub fn calculate_linux_panel_position(
         let y = if is_bottom {
             (anchor.y - panel_height as i32).max(screen_bounds.y)
         } else {
-            (anchor.y + anchor.height as i32).min(screen_bounds.y + screen_bounds.height as i32 - panel_height as i32)
+            (anchor.y + anchor.height as i32)
+                .min(screen_bounds.y + screen_bounds.height as i32 - panel_height as i32)
         };
 
         Point { x, y }
     } else {
         // Wayland fallback: predictable top-right placement with 16px right margin, 32px top margin
-        let x = (screen_bounds.x + screen_bounds.width as i32 - panel_width as i32 - 16).max(screen_bounds.x);
+        let x = (screen_bounds.x + screen_bounds.width as i32 - panel_width as i32 - 16)
+            .max(screen_bounds.x);
         let y = screen_bounds.y + 32;
         Point { x, y }
     }

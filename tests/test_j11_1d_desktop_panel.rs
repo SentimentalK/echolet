@@ -312,7 +312,10 @@ fn test_single_source_slint_guard() {
 
     // Verify canonical ui/desktop/EcholetPanel.slint exists
     let canonical = root.join("ui/desktop/EcholetPanel.slint");
-    assert!(canonical.exists(), "ui/desktop/EcholetPanel.slint must exist");
+    assert!(
+        canonical.exists(),
+        "ui/desktop/EcholetPanel.slint must exist"
+    );
 
     // Verify no .slint files exist in src/
     let src_dir = root.join("src");
@@ -365,8 +368,204 @@ fn test_single_source_slint_guard() {
 }
 
 #[test]
-fn test_desktop_panel_controller_is_send() {
+fn test_threading_architecture_handle_is_send_sync_and_runtime_is_thread_bound() {
+    use echolet::ui::desktop::controller::{DesktopPanelCommand, DesktopPanelHandle};
+
     fn assert_send<T: Send>() {}
-    assert_send::<echolet::ui::desktop::DesktopPanelController>();
+    fn assert_sync<T: Sync>() {}
+
+    // DesktopPanelHandle is Send + Sync
+    assert_send::<DesktopPanelHandle>();
+    assert_sync::<DesktopPanelHandle>();
+
+    // DesktopPanelCommand is Send
+    assert_send::<DesktopPanelCommand>();
+
+    // Verify source files contain no `unsafe impl Send` or `unsafe impl Sync` for DesktopPanelController or DesktopPanelRuntime
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let controller_src = fs::read_to_string(root.join("src/ui/desktop/controller.rs"))
+        .expect("controller.rs must exist");
+    assert!(
+        !controller_src.contains("unsafe impl Send for DesktopPanelController"),
+        "Unsound Send impl must be removed from DesktopPanelController"
+    );
+    assert!(
+        !controller_src.contains("unsafe impl Send for DesktopPanelRuntime"),
+        "Unsound Send impl must not be added to DesktopPanelRuntime"
+    );
+    assert!(
+        !controller_src.contains("unsafe impl Sync"),
+        "Unsound Sync impl must not exist"
+    );
 }
 
+#[test]
+fn test_cross_thread_command_enqueue_and_ui_drain() {
+    use echolet::ui::desktop::controller::DesktopPanelRuntime;
+    use echolet::ui::desktop::host::Point;
+
+    let (tx, _rx) = crossbeam_channel::unbounded();
+    let (handle, mut runtime) = DesktopPanelRuntime::new(tx);
+
+    let test_state = ControlSurfaceState {
+        runtime_state: RuntimeState::Listening,
+        preload_on_startup: true,
+        idle_unload_minutes: Some(15),
+        history_enabled: true,
+        ..Default::default()
+    };
+
+    // Enqueue commands from background thread
+    let handle_clone = handle.clone();
+    let state_clone = test_state.clone();
+    let worker = std::thread::spawn(move || {
+        handle_clone.update_state(&state_clone);
+        handle_clone.show_panel(Some(Point::new(100, 200)));
+    });
+    worker.join().expect("Worker thread finished");
+
+    // UI-side drains commands
+    assert!(!runtime.is_visible());
+    runtime.drain_commands();
+
+    // Verifications on UI owner
+    assert!(runtime.is_visible());
+    assert_eq!(
+        runtime.current_state().runtime_state,
+        RuntimeState::Listening
+    );
+    assert_eq!(runtime.current_state().preload_on_startup, true);
+    assert_eq!(runtime.current_state().idle_unload_minutes, Some(15));
+    assert_eq!(runtime.current_state().history_enabled, true);
+
+    // Hide from worker
+    let handle_clone2 = handle.clone();
+    let worker2 = std::thread::spawn(move || {
+        handle_clone2.hide_panel();
+    });
+    worker2.join().expect("Worker thread 2 finished");
+
+    runtime.drain_commands();
+    assert!(!runtime.is_visible());
+}
+
+#[test]
+fn test_panel_runtime_reuse_and_state_update_without_recreation() {
+    use echolet::ui::desktop::controller::DesktopPanelRuntime;
+
+    let (tx, _rx) = crossbeam_channel::unbounded();
+    let (handle, mut runtime) = DesktopPanelRuntime::new(tx);
+
+    // Repeated toggle commands reuse the same logical panel
+    for _ in 0..5 {
+        handle.toggle_panel(None);
+        runtime.drain_commands();
+        assert!(runtime.is_visible());
+
+        handle.toggle_panel(None);
+        runtime.drain_commands();
+        assert!(!runtime.is_visible());
+    }
+
+    // Open and update state while open does not recreate or crash
+    handle.show_panel(None);
+    runtime.drain_commands();
+    assert!(runtime.is_visible());
+
+    let state = ControlSurfaceState {
+        runtime_state: RuntimeState::Ready,
+        preload_on_startup: false,
+        ..Default::default()
+    };
+    handle.update_state(&state);
+    runtime.drain_commands();
+    assert!(runtime.is_visible());
+    assert_eq!(runtime.current_state().runtime_state, RuntimeState::Ready);
+}
+
+#[test]
+fn test_focus_loss_and_dismissal_contract() {
+    use echolet::ui::desktop::controller::DesktopPanelRuntime;
+
+    let (tx, _rx) = crossbeam_channel::unbounded();
+    let (handle, mut runtime) = DesktopPanelRuntime::new(tx);
+
+    // 1. Synthetic focus loss maps to one hide command
+    handle.show_panel(None);
+    runtime.drain_commands();
+    assert!(runtime.is_visible());
+
+    handle.focus_lost();
+    runtime.drain_commands();
+    assert!(!runtime.is_visible(), "Focus loss must hide panel");
+
+    // 2. Internal action / state update does NOT hide panel
+    handle.show_panel(None);
+    runtime.drain_commands();
+    assert!(runtime.is_visible());
+
+    let state = ControlSurfaceState {
+        runtime_state: RuntimeState::Listening,
+        ..Default::default()
+    };
+    handle.update_state(&state);
+    runtime.drain_commands();
+    assert!(
+        runtime.is_visible(),
+        "State update while open must not hide panel"
+    );
+
+    // 3. Escape / close requested maps to hide
+    runtime.hide_panel();
+    assert!(!runtime.is_visible(), "Close requested must hide panel");
+}
+
+#[test]
+fn test_geometry_clamping_and_no_hardcoded_1920x1080() {
+    // 1. Windows: 4K display geometry
+    let tray_4k = Rect::new(3700, 2100, 24, 24);
+    let work_area_4k = Rect::new(0, 0, 3840, 2120);
+    let pos_4k = calculate_windows_panel_position(tray_4k, work_area_4k, 380, 520);
+    // Right clamp: 3840 - 380 = 3460
+    assert_eq!(pos_4k.x, 3460);
+    assert_eq!(pos_4k.y, 2100 - 520);
+
+    // 2. Windows: Small 1366x768 display geometry (clamps right edge to work area)
+    let tray_small = Rect::new(1200, 728, 24, 24);
+    let work_area_small = Rect::new(0, 0, 1366, 728);
+    let pos_small = calculate_windows_panel_position(tray_small, work_area_small, 380, 520);
+    assert_eq!(pos_small.x, 1366 - 380); // 986 clamped to right boundary
+    assert_eq!(pos_small.y, 728 - 520);
+
+    // 3. Linux: 2560x1440 display geometry
+    let tray_linux = Rect::new(2400, 1400, 24, 24);
+    let screen_linux = Rect::new(0, 0, 2560, 1440);
+    let pos_linux = calculate_linux_panel_position(Some(tray_linux), screen_linux, 380, 520);
+    // Right clamp: 2560 - 380 = 2180
+    assert_eq!(pos_linux.x, 2180);
+    assert_eq!(pos_linux.y, 1400 - 520);
+
+    // 4. Verify NO hardcoded "1920, 1080" or "1920x1080" in production platform code
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let linux_src = fs::read_to_string(root.join("src/platform/linux/tray.rs"))
+        .expect("linux tray.rs must exist");
+    assert!(
+        !linux_src.contains("1920, 1080"),
+        "Linux production code must not contain hard-coded 1920, 1080"
+    );
+    assert!(
+        !linux_src.contains("1920x1080"),
+        "Linux production code must not contain hard-coded 1920x1080"
+    );
+
+    let win_src = fs::read_to_string(root.join("src/platform/windows/ui.rs"))
+        .expect("windows ui.rs must exist");
+    assert!(
+        !win_src.contains("1920, 1080"),
+        "Windows production code must not contain hard-coded 1920, 1080"
+    );
+    assert!(
+        !win_src.contains("1920x1080"),
+        "Windows production code must not contain hard-coded 1920x1080"
+    );
+}

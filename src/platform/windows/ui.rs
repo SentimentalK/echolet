@@ -5,7 +5,7 @@ use crate::platform::windows::icon;
 use crate::platform::{PlatformHandle, PlatformView};
 use crate::ui::control_surface::ControlSurfaceState;
 use crate::ui::desktop::adapter::{PANEL_HEIGHT_PX, PANEL_WIDTH_PX};
-use crate::ui::desktop::controller::DesktopPanelController;
+use crate::ui::desktop::controller::{DesktopPanelHandle, DesktopPanelRuntime};
 use crate::ui::desktop::host::{calculate_windows_panel_position, Rect};
 use crossbeam_channel::{Receiver, Sender};
 use std::mem::size_of;
@@ -14,19 +14,24 @@ use std::ptr;
 use std::sync::atomic::{AtomicIsize, Ordering};
 use std::sync::Arc;
 use std::thread;
-use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
+use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows_sys::Win32::Graphics::Gdi::{
+    GetMonitorInfoW, MonitorFromPoint, MonitorFromRect, HMONITOR, MONITORINFO,
+    MONITOR_DEFAULTTONEAREST,
+};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Shell::{
-    ShellExecuteW, Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE,
-    NIM_MODIFY, NOTIFYICONDATAW,
+    ShellExecuteW, Shell_NotifyIconGetRect, Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP,
+    NIM_ADD, NIM_DELETE, NIM_MODIFY, NOTIFYICONDATAW, NOTIFYICONIDENTIFIER,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyIcon, DestroyMenu,
-    DestroyWindow, DispatchMessageW, GetCursorPos, GetMessageW, PostMessageW, PostQuitMessage,
-    RegisterClassW, RegisterWindowMessageW, SetForegroundWindow, TrackPopupMenuEx,
-    TranslateMessage, HICON, HMENU, HWND_MESSAGE, MF_SEPARATOR, MF_STRING,
-    MSG, SW_SHOWNORMAL, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_APP, WM_CONTEXTMENU,
-    WM_DESTROY, WM_HOTKEY, WM_LBUTTONUP, WM_RBUTTONUP, WNDCLASSW,
+    AppendMenuW, CallWindowProcW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyIcon,
+    DestroyMenu, DestroyWindow, DispatchMessageW, FindWindowW, GetCursorPos, GetMessageW,
+    PostMessageW, PostQuitMessage, RegisterClassW, RegisterWindowMessageW, SetForegroundWindow,
+    SetWindowLongPtrW, TrackPopupMenuEx, TranslateMessage, GWLP_WNDPROC, HICON, HMENU,
+    HWND_MESSAGE, MF_SEPARATOR, MF_STRING, MSG, SW_SHOWNORMAL, TPM_NONOTIFY, TPM_RETURNCMD,
+    TPM_RIGHTBUTTON, WA_INACTIVE, WM_ACTIVATE, WM_APP, WM_CONTEXTMENU, WM_DESTROY, WM_HOTKEY,
+    WM_KILLFOCUS, WM_LBUTTONUP, WM_RBUTTONUP, WNDCLASSW, WNDPROC,
 };
 
 pub enum WindowsUiCommand {
@@ -72,7 +77,9 @@ impl PlatformHandle for WindowsPlatformHandle {
     fn update_models(&self, view: &PlatformView) {
         let _ = self
             .cmd_tx
-            .send(WindowsUiCommand::UpdateControlSurface(Box::new(view.clone())));
+            .send(WindowsUiCommand::UpdateControlSurface(Box::new(
+                view.clone(),
+            )));
         self.notify_ui();
     }
 
@@ -108,10 +115,88 @@ struct UiState {
     taskbar_created_msg: u32,
     icon_standby: HICON,
     icon_listening: HICON,
-    controller: DesktopPanelController,
+    panel_handle: DesktopPanelHandle,
 }
 
 static mut UI_STATE_PTR: *mut UiState = ptr::null_mut();
+static mut PREV_PANEL_WNDPROC: Option<WNDPROC> = None;
+static mut SUBCLASSED_PANEL_HWND: HWND = ptr::null_mut();
+
+unsafe extern "system" fn panel_subclass_wndproc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    if (msg == WM_ACTIVATE && (wparam as u32 & 0xFFFF) == WA_INACTIVE) || msg == WM_KILLFOCUS {
+        if !UI_STATE_PTR.is_null() {
+            (*UI_STATE_PTR).panel_handle.focus_lost();
+        }
+    }
+    if let Some(prev) = PREV_PANEL_WNDPROC {
+        CallWindowProcW(prev, hwnd, msg, wparam, lparam)
+    } else {
+        DefWindowProcW(hwnd, msg, wparam, lparam)
+    }
+}
+
+unsafe fn ensure_panel_subclassed() {
+    if SUBCLASSED_PANEL_HWND.is_null() {
+        let hwnd = FindWindowW(ptr::null(), to_wide("Echolet").as_ptr());
+        if !hwnd.is_null() {
+            SUBCLASSED_PANEL_HWND = hwnd;
+            let prev = SetWindowLongPtrW(hwnd, GWLP_WNDPROC, panel_subclass_wndproc as isize);
+            if prev != 0 {
+                PREV_PANEL_WNDPROC = Some(std::mem::transmute(prev));
+            }
+        }
+    }
+}
+
+unsafe fn get_windows_tray_position(hwnd: HWND) -> Point {
+    let mut identifier: NOTIFYICONIDENTIFIER = std::mem::zeroed();
+    identifier.cbSize = size_of::<NOTIFYICONIDENTIFIER>() as u32;
+    identifier.hWnd = hwnd;
+    identifier.uID = TRAY_ICON_ID;
+
+    let mut icon_rect: RECT = std::mem::zeroed();
+    let hr = Shell_NotifyIconGetRect(&identifier, &mut icon_rect);
+
+    if hr == 0 {
+        let tray = Rect::new(
+            icon_rect.left,
+            icon_rect.top,
+            (icon_rect.right - icon_rect.left).max(1) as u32,
+            (icon_rect.bottom - icon_rect.top).max(1) as u32,
+        );
+        let hmonitor = MonitorFromRect(&icon_rect, MONITOR_DEFAULTTONEAREST);
+        let work_area = get_monitor_work_area(hmonitor);
+        calculate_windows_panel_position(tray, work_area, PANEL_WIDTH_PX, PANEL_HEIGHT_PX)
+    } else {
+        // Fallback: cursor position when Shell_NotifyIconGetRect is unsupported or fails
+        let mut pt: POINT = std::mem::zeroed();
+        GetCursorPos(&mut pt);
+        let cursor_rect = Rect::new(pt.x, pt.y, 24, 24);
+        let hmonitor = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
+        let work_area = get_monitor_work_area(hmonitor);
+        calculate_windows_panel_position(cursor_rect, work_area, PANEL_WIDTH_PX, PANEL_HEIGHT_PX)
+    }
+}
+
+unsafe fn get_monitor_work_area(hmonitor: HMONITOR) -> Rect {
+    let mut mi: MONITORINFO = std::mem::zeroed();
+    mi.cbSize = size_of::<MONITORINFO>() as u32;
+    if GetMonitorInfoW(hmonitor, &mut mi) != 0 {
+        Rect::new(
+            mi.rcWork.left,
+            mi.rcWork.top,
+            (mi.rcWork.right - mi.rcWork.left).max(800) as u32,
+            (mi.rcWork.bottom - mi.rcWork.top).max(600) as u32,
+        )
+    } else {
+        Rect::new(0, 0, 1280, 720)
+    }
+}
 
 unsafe extern "system" fn wnd_proc(
     hwnd: HWND,
@@ -156,7 +241,7 @@ unsafe extern "system" fn wnd_proc(
                             state.icon_standby
                         };
                         update_tray_icon(hwnd, state.listening, NIM_MODIFY, icon);
-                        state.controller.update_state(&surface_state);
+                        state.panel_handle.update_state(&surface_state);
                     }
                     WindowsUiCommand::UpdateHistoryState(enabled) => {
                         state.history_enabled = enabled;
@@ -176,19 +261,13 @@ unsafe extern "system" fn wnd_proc(
                         );
                     }
                     WindowsUiCommand::TogglePanel => {
-                        let mut pt: POINT = std::mem::zeroed();
-                        GetCursorPos(&mut pt);
-                        let pos = calculate_windows_panel_position(
-                            Rect::new(pt.x, pt.y, 24, 24),
-                            Rect::new(0, 0, 1920, 1080),
-                            PANEL_WIDTH_PX,
-                            PANEL_HEIGHT_PX,
-                        );
-                        state.controller.set_position(pos);
-                        let _ = state.controller.toggle_panel();
+                        ensure_panel_subclassed();
+                        let pos = get_windows_tray_position(hwnd);
+                        state.panel_handle.set_position(pos);
+                        state.panel_handle.toggle_panel(Some(pos));
                     }
                     WindowsUiCommand::Shutdown => {
-                        state.controller.hide_panel();
+                        state.panel_handle.shutdown();
                         DestroyWindow(hwnd);
                     }
                 }
@@ -204,23 +283,17 @@ unsafe extern "system" fn wnd_proc(
         WM_TRAY_CALLBACK => {
             let event = lparam as u32;
             if event == WM_LBUTTONUP {
-                let mut pt: POINT = std::mem::zeroed();
-                GetCursorPos(&mut pt);
-                let pos = calculate_windows_panel_position(
-                    Rect::new(pt.x, pt.y, 24, 24),
-                    Rect::new(0, 0, 1920, 1080),
-                    PANEL_WIDTH_PX,
-                    PANEL_HEIGHT_PX,
-                );
-                state.controller.set_position(pos);
-                let _ = state.controller.toggle_panel();
+                ensure_panel_subclassed();
+                let pos = get_windows_tray_position(hwnd);
+                state.panel_handle.set_position(pos);
+                state.panel_handle.toggle_panel(Some(pos));
             } else if event == WM_RBUTTONUP || event == WM_CONTEXTMENU {
                 show_tray_menu(hwnd, state);
             }
             0
         }
         WM_DESTROY => {
-            state.controller.hide_panel();
+            state.panel_handle.shutdown();
             update_tray_icon(hwnd, false, NIM_DELETE, state.icon_standby);
             unregister_f10(hwnd);
             if !state.icon_standby.is_null() {
@@ -318,14 +391,10 @@ unsafe fn show_tray_menu(hwnd: HWND, state: &mut UiState) {
 
     match selected {
         IDM_TOGGLE_PANEL => {
-            let pos = calculate_windows_panel_position(
-                Rect::new(pt.x, pt.y, 24, 24),
-                Rect::new(0, 0, 1920, 1080),
-                PANEL_WIDTH_PX,
-                PANEL_HEIGHT_PX,
-            );
-            state.controller.set_position(pos);
-            let _ = state.controller.toggle_panel();
+            ensure_panel_subclassed();
+            let pos = get_windows_tray_position(hwnd);
+            state.panel_handle.set_position(pos);
+            state.panel_handle.toggle_panel(Some(pos));
         }
         IDM_TOGGLE_LISTENING => {
             let _ = state.action_tx.send(AppAction::ToggleListening);
@@ -334,6 +403,7 @@ unsafe fn show_tray_menu(hwnd: HWND, state: &mut UiState) {
             let _ = state.action_tx.send(AppAction::OpenHistoryFolder);
         }
         IDM_QUIT => {
+            state.panel_handle.shutdown();
             let _ = state.action_tx.send(AppAction::Quit);
         }
         _ => {}
@@ -398,7 +468,16 @@ pub fn spawn_ui_thread(
                 eprintln!("[Platform] Failed to create custom tray icon(s).");
             }
 
-            let controller = DesktopPanelController::new(action_tx.clone());
+            let (panel_handle, panel_runtime) = DesktopPanelRuntime::new(action_tx.clone());
+
+            // Spawn dedicated Slint UI event loop thread (single-thread owner)
+            let _ = thread::Builder::new()
+                .name("echolet-slint-ui".into())
+                .spawn(move || {
+                    if let Err(e) = panel_runtime.run() {
+                        eprintln!("[Windows UI] Slint event loop error: {}", e);
+                    }
+                });
 
             let mut state = UiState {
                 action_tx,
@@ -408,7 +487,7 @@ pub fn spawn_ui_thread(
                 taskbar_created_msg: taskbar_msg,
                 icon_standby,
                 icon_listening,
-                controller,
+                panel_handle,
             };
 
             UI_STATE_PTR = &mut state;

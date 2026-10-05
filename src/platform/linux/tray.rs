@@ -8,7 +8,7 @@ use crate::ui::control_surface::{
     dispatch_surface_action, ControlSurfaceState, RuntimeState, SurfaceAction,
 };
 use crate::ui::desktop::adapter::{PANEL_HEIGHT_PX, PANEL_WIDTH_PX};
-use crate::ui::desktop::controller::DesktopPanelController;
+use crate::ui::desktop::controller::{DesktopPanelHandle, DesktopPanelRuntime};
 use crate::ui::desktop::host::{calculate_linux_panel_position, Rect};
 use crossbeam_channel::Sender;
 use ksni::menu::{MenuItem, StandardItem};
@@ -23,7 +23,7 @@ pub struct LinuxTray {
     pub history_enabled: Arc<AtomicBool>,
     pub view: Arc<Mutex<PlatformView>>,
     pub action_tx: Sender<AppAction>,
-    pub controller: Arc<Mutex<DesktopPanelController>>,
+    pub panel_handle: DesktopPanelHandle,
 }
 
 impl Tray for LinuxTray {
@@ -41,21 +41,16 @@ impl Tray for LinuxTray {
     }
 
     fn activate(&mut self, x: i32, y: i32) {
-        if let Ok(mut c) = self.controller.lock() {
-            let anchor = if x > 0 || y > 0 {
-                Some(Rect::new(x, y, 24, 24))
-            } else {
-                None
-            };
-            let pos = calculate_linux_panel_position(
-                anchor,
-                Rect::new(0, 0, 1920, 1080),
-                PANEL_WIDTH_PX,
-                PANEL_HEIGHT_PX,
-            );
-            c.set_position(pos);
-            let _ = c.toggle_panel();
-        }
+        let anchor = if x > 0 || y > 0 {
+            Some(Rect::new(x, y, 24, 24))
+        } else {
+            None
+        };
+        let screen_bounds = detect_linux_screen_bounds(anchor);
+        let pos =
+            calculate_linux_panel_position(anchor, screen_bounds, PANEL_WIDTH_PX, PANEL_HEIGHT_PX);
+        self.panel_handle.set_position(pos);
+        self.panel_handle.toggle_panel(Some(pos));
     }
 
     fn menu(&self) -> Vec<MenuItem<Self>> {
@@ -64,14 +59,12 @@ impl Tray for LinuxTray {
 
         // 1. Open Echolet
         {
-            let controller = self.controller.clone();
+            let handle = self.panel_handle.clone();
             menu_items.push(
                 StandardItem {
                     label: "Open Echolet".into(),
                     activate: Box::new(move |_| {
-                        if let Ok(mut c) = controller.lock() {
-                            let _ = c.toggle_panel();
-                        }
+                        handle.toggle_panel(None);
                     }),
                     ..Default::default()
                 }
@@ -144,7 +137,7 @@ pub struct LinuxPlatformHandle {
     pub registry: ModelRegistry,
     pub tray_handle: Option<ksni::Handle<LinuxTray>>,
     pub rt: Option<tokio::runtime::Runtime>,
-    pub controller: Arc<Mutex<DesktopPanelController>>,
+    pub panel_handle: DesktopPanelHandle,
 }
 
 impl LinuxPlatformHandle {
@@ -166,9 +159,7 @@ impl PlatformHandle for LinuxPlatformHandle {
     }
 
     fn shutdown(&self) {
-        if let Ok(mut c) = self.controller.lock() {
-            c.hide_panel();
-        }
+        self.panel_handle.shutdown();
         if let Some(handle) = &self.tray_handle {
             handle.shutdown();
         }
@@ -178,9 +169,7 @@ impl PlatformHandle for LinuxPlatformHandle {
         if let Ok(mut lock) = self.view.lock() {
             *lock = view.clone();
         }
-        if let Ok(mut c) = self.controller.lock() {
-            c.update_state(view);
-        }
+        self.panel_handle.update_state(view);
         self.refresh();
     }
 
@@ -233,14 +222,23 @@ pub fn spawn_linux_tray(action_tx: Sender<AppAction>) -> LinuxPlatformHandle {
     };
 
     let view = Arc::new(Mutex::new(initial_platform_view(&registry)));
-    let controller = Arc::new(Mutex::new(DesktopPanelController::new(action_tx.clone())));
+    let (panel_handle, panel_runtime) = DesktopPanelRuntime::new(action_tx.clone());
+
+    // Spawn dedicated Slint UI event loop thread (single-thread owner)
+    let _ = std::thread::Builder::new()
+        .name("echolet-slint-ui".into())
+        .spawn(move || {
+            if let Err(e) = panel_runtime.run() {
+                eprintln!("[Linux UI] Slint event loop error: {}", e);
+            }
+        });
 
     let tray = LinuxTray {
         is_listening: is_listening.clone(),
         history_enabled: history_enabled.clone(),
         view: view.clone(),
         action_tx,
-        controller: controller.clone(),
+        panel_handle: panel_handle.clone(),
     };
 
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -267,8 +265,43 @@ pub fn spawn_linux_tray(action_tx: Sender<AppAction>) -> LinuxPlatformHandle {
         registry,
         tray_handle,
         rt,
-        controller,
+        panel_handle,
     }
+}
+
+/// Dynamically detects screen bounds on Linux, combining anchor hints and system queries,
+/// with dynamic display geometry detection.
+pub fn detect_linux_screen_bounds(anchor: Option<Rect>) -> Rect {
+    if let Ok(entries) = std::fs::read_dir("/sys/class/drm") {
+        for entry in entries.flatten() {
+            let modes_path = entry.path().join("modes");
+            if modes_path.exists() {
+                if let Ok(content) = std::fs::read_to_string(&modes_path) {
+                    if let Some(first_line) = content.lines().next() {
+                        let parts: Vec<&str> = first_line.split('x').collect();
+                        if parts.len() == 2 {
+                            if let (Ok(w), Ok(h)) = (
+                                parts[0].trim().parse::<u32>(),
+                                parts[1].trim().parse::<u32>(),
+                            ) {
+                                if w > 0 && h > 0 {
+                                    return Rect::new(0, 0, w, h);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if let Some(a) = anchor {
+        let min_w = ((a.x + a.width as i32 + 64).max(1280)) as u32;
+        let min_h = ((a.y + a.height as i32 + 64).max(720)) as u32;
+        return Rect::new(0, 0, min_w, min_h);
+    }
+
+    Rect::new(0, 0, 1366, 768)
 }
 
 /// Generate ARGB32 pixmap:
@@ -329,13 +362,13 @@ mod tests {
 
     fn make_tray(view: PlatformView) -> (LinuxTray, crossbeam_channel::Receiver<AppAction>) {
         let (tx, rx) = crossbeam_channel::unbounded();
-        let controller = Arc::new(Mutex::new(DesktopPanelController::new(tx.clone())));
+        let (panel_handle, _runtime) = DesktopPanelRuntime::new(tx.clone());
         let tray = LinuxTray {
             is_listening: Arc::new(AtomicBool::new(false)),
             history_enabled: Arc::new(AtomicBool::new(false)),
             view: Arc::new(Mutex::new(view)),
             action_tx: tx,
-            controller,
+            panel_handle,
         };
         (tray, rx)
     }

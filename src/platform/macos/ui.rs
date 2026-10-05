@@ -7,7 +7,7 @@ use crate::platform::macos::injector::execute_diff;
 use crate::platform::{PlatformHandle, PlatformView};
 use crate::ui::control_surface::ControlSurfaceState;
 use crate::ui::desktop::host::{calculate_macos_panel_position, Rect};
-use crate::ui::desktop::{DesktopPanelController, PANEL_HEIGHT_PX, PANEL_WIDTH_PX};
+use crate::ui::desktop::{DesktopPanelRuntime, PANEL_HEIGHT_PX, PANEL_WIDTH_PX};
 use cocoa::appkit::{
     NSApp, NSApplication, NSApplicationActivationPolicyAccessory, NSButton, NSMenu, NSMenuItem,
     NSStatusBar, NSStatusItem, NSVariableStatusItemLength,
@@ -34,10 +34,7 @@ pub enum MacUiCommand {
     SetListening(bool),
     UpdateControlSurface(ControlSurfaceState),
     UpdateHistoryState(bool),
-    InjectDiff {
-        backspaces: usize,
-        suffix: String,
-    },
+    InjectDiff { backspaces: usize, suffix: String },
     OpenHistoryFolder(PathBuf),
     Shutdown,
     TogglePanel,
@@ -121,6 +118,14 @@ extern "C" fn on_status_item_clicked(_this: &Object, _cmd: Sel, sender: id) {
     }
 }
 
+extern "C" fn on_window_did_resign_key(_this: &Object, _cmd: Sel, notification: id) {
+    unsafe {
+        if !MAC_UI_PTR.is_null() {
+            (*MAC_UI_PTR).handle_window_did_resign_key(notification);
+        }
+    }
+}
+
 fn register_menu_delegate_class() -> &'static Class {
     static ONCE: std::sync::Once = std::sync::Once::new();
     static mut CLASS: Option<&'static Class> = None;
@@ -147,6 +152,10 @@ fn register_menu_delegate_class() -> &'static Class {
                 sel!(onStatusItemClicked:),
                 on_status_item_clicked as extern "C" fn(&Object, Sel, id),
             );
+            decl.add_method(
+                sel!(onWindowDidResignKey:),
+                on_window_did_resign_key as extern "C" fn(&Object, Sel, id),
+            );
         }
 
         let registered = decl.register();
@@ -166,7 +175,8 @@ pub struct MacUi {
     listening: bool,
     history_enabled: bool,
     running: Arc<AtomicBool>,
-    controller: DesktopPanelController,
+    runtime: DesktopPanelRuntime,
+    last_resigned_at: Option<std::time::Instant>,
 }
 
 static mut MAC_UI_PTR: *mut MacUi = std::ptr::null_mut();
@@ -175,7 +185,6 @@ extern "C" fn timer_callback(_timer: CFRunLoopTimerRef, _info: *mut c_void) {
     unsafe {
         if !MAC_UI_PTR.is_null() {
             (*MAC_UI_PTR).drain_commands();
-            (*MAC_UI_PTR).check_focus_loss();
         }
     }
 }
@@ -202,10 +211,22 @@ impl MacUi {
             if button != nil {
                 let _: () = msg_send![button, setTarget:delegate];
                 let _: () = msg_send![button, setAction:sel!(onStatusItemClicked:)];
-                let _: () = msg_send![button, sendActionOn:(1 << 1) | (1 << 3)]; // LeftMouseUp | RightMouseUp
+                let _: () = msg_send![button, sendActionOn:(1 << 1) | (1 << 3)];
+                // LeftMouseUp | RightMouseUp
             }
 
-            let controller = DesktopPanelController::new(action_tx.clone());
+            // Register NSWindowDidResignKeyNotification observer on default NSNotificationCenter
+            let center: id = msg_send![class!(NSNotificationCenter), defaultCenter];
+            let notif_name = NSString::alloc(nil).init_str("NSWindowDidResignKeyNotification");
+            let _: () = msg_send![
+                center,
+                addObserver:delegate
+                selector:sel!(onWindowDidResignKey:)
+                name:notif_name
+                object:nil
+            ];
+
+            let (_, runtime) = DesktopPanelRuntime::new(action_tx.clone());
 
             let ui = Self {
                 action_tx,
@@ -215,7 +236,8 @@ impl MacUi {
                 listening: false,
                 history_enabled: false,
                 running: Arc::new(AtomicBool::new(true)),
-                controller,
+                runtime,
+                last_resigned_at: None,
             };
 
             let _ = NSAutoreleasePool::drain(pool);
@@ -223,22 +245,18 @@ impl MacUi {
         }
     }
 
+    pub fn handle_window_did_resign_key(&mut self, _notification: id) {
+        if self.runtime.is_visible() {
+            self.last_resigned_at = Some(std::time::Instant::now());
+            self.runtime.hide_panel();
+        }
+    }
+
     pub fn drain_commands(&mut self) {
         while let Ok(cmd) = self.cmd_rx.try_recv() {
             self.handle_command(cmd);
         }
-    }
-
-    pub fn check_focus_loss(&mut self) {
-        if self.controller.is_visible() {
-            unsafe {
-                let app = NSApp();
-                let is_active: bool = msg_send![app, isActive];
-                if !is_active {
-                    self.controller.hide_panel();
-                }
-            }
-        }
+        self.runtime.drain_commands();
     }
 
     pub fn handle_command(&mut self, cmd: MacUiCommand) {
@@ -251,7 +269,7 @@ impl MacUi {
                 self.history_enabled = state.history_enabled;
                 self.listening = state.runtime_state.is_listening();
                 self.update_status_bar();
-                self.controller.update_state(&state);
+                self.runtime.update_state(state);
             }
             MacUiCommand::UpdateHistoryState(enabled) => {
                 self.history_enabled = enabled;
@@ -264,7 +282,8 @@ impl MacUi {
             }
             MacUiCommand::Shutdown => {
                 self.running.store(false, Ordering::SeqCst);
-                self.controller.hide_panel();
+                self.runtime.hide_panel();
+                let _ = slint::quit_event_loop();
                 unsafe {
                     let app = NSApp();
                     let _: () = msg_send![app, terminate:nil];
@@ -304,14 +323,20 @@ impl MacUi {
             if event_type == 3 {
                 self.show_fallback_menu(button);
             } else {
+                // If window just resigned key due to outside click on this button, do not immediately reopen
+                if let Some(resigned_at) = self.last_resigned_at.take() {
+                    if resigned_at.elapsed() < std::time::Duration::from_millis(250) {
+                        return;
+                    }
+                }
                 self.toggle_desktop_panel(button);
             }
         }
     }
 
     pub fn toggle_desktop_panel(&mut self, button: id) {
-        if self.controller.is_visible() {
-            self.controller.hide_panel();
+        if self.runtime.is_visible() {
+            self.runtime.hide_panel();
             return;
         }
 
@@ -325,7 +350,10 @@ impl MacUi {
                 } else {
                     cocoa::foundation::NSRect {
                         origin: cocoa::foundation::NSPoint { x: 100.0, y: 800.0 },
-                        size: cocoa::foundation::NSSize { width: 24.0, height: 24.0 },
+                        size: cocoa::foundation::NSSize {
+                            width: 24.0,
+                            height: 24.0,
+                        },
                     }
                 };
 
@@ -340,7 +368,10 @@ impl MacUi {
                 } else {
                     cocoa::foundation::NSRect {
                         origin: cocoa::foundation::NSPoint { x: 0.0, y: 0.0 },
-                        size: cocoa::foundation::NSSize { width: 1440.0, height: 900.0 },
+                        size: cocoa::foundation::NSSize {
+                            width: 1440.0,
+                            height: 900.0,
+                        },
                     }
                 };
 
@@ -360,10 +391,7 @@ impl MacUi {
 
                 (anchor_rect, screen_rect)
             } else {
-                (
-                    Rect::new(100, 24, 24, 24),
-                    Rect::new(0, 0, 1440, 900),
-                )
+                (Rect::new(100, 24, 24, 24), Rect::new(0, 0, 1440, 900))
             };
 
             let pos = calculate_macos_panel_position(
@@ -373,8 +401,8 @@ impl MacUi {
                 PANEL_HEIGHT_PX,
             );
 
-            self.controller.set_position(pos);
-            let _ = self.controller.show_panel();
+            self.runtime.set_position(pos);
+            let _ = self.runtime.show_panel();
 
             let _ = NSAutoreleasePool::drain(pool);
         }
@@ -458,8 +486,8 @@ impl MacUi {
             let run_loop = CFRunLoopGetCurrent();
             CFRunLoopAddTimer(run_loop, timer, kCFRunLoopCommonModes);
 
-            let app = NSApp();
-            app.run();
+            // Run Slint event loop on main thread (valid Slint owner)
+            let _ = self.runtime.run();
 
             MAC_UI_PTR = std::ptr::null_mut();
         }

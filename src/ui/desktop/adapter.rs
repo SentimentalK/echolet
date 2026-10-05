@@ -176,7 +176,8 @@ impl DesktopPanelViewModel {
 
                     let mut current_label = "Auto".to_string();
                     for opt in &active.language.options {
-                        let is_sel = active.language.selected_locale.as_deref() == Some(&opt.locale);
+                        let is_sel =
+                            active.language.selected_locale.as_deref() == Some(&opt.locale);
                         if is_sel {
                             current_label = opt.label.clone();
                         }
@@ -205,10 +206,8 @@ impl DesktopPanelViewModel {
             Some(n) => format!("{} minutes", n),
         };
 
-        let all_models: Vec<DesktopModelRowViewModel> = model_groups
-            .iter()
-            .flat_map(|g| g.models.clone())
-            .collect();
+        let all_models: Vec<DesktopModelRowViewModel> =
+            model_groups.iter().flat_map(|g| g.models.clone()).collect();
         let group_label = model_groups
             .first()
             .map(|g| g.label.clone())
