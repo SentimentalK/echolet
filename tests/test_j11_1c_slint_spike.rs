@@ -224,13 +224,14 @@ mod slint_spike_tests {
         let vm_long = DesktopPanelViewModel::from_control_surface(&fixture_long);
 
         assert_eq!(vm_normal.width, 380);
-        assert_eq!(vm_normal.height, 240);
+        assert_eq!(vm_normal.height, 520);
         assert_eq!(PANEL_WIDTH_PX, 380);
-        assert_eq!(PANEL_HEIGHT_PX, 240);
+        assert_eq!(PANEL_HEIGHT_PX, 520);
+        assert!(PANEL_HEIGHT_PX <= 640);
 
         // Even with long name inputs, panel constants and view model dimensions remain invariant
         assert_eq!(vm_long.width, 380);
-        assert_eq!(vm_long.height, 240);
+        assert_eq!(vm_long.height, 520);
         assert_eq!(vm_long.width, vm_normal.width);
         assert_eq!(vm_long.height, vm_normal.height);
     }
@@ -319,7 +320,7 @@ mod slint_spike_tests {
             check_no_slint(&platform_dir);
         }
 
-        // Verify only ui/desktop contains .slint files
+        // Verify only ui/desktop contains .slint files (root and components)
         let ui_dir = root.join("ui");
         let mut slint_files = Vec::new();
         fn collect_slint(dir: &Path, list: &mut Vec<String>) {
@@ -335,10 +336,21 @@ mod slint_spike_tests {
             }
         }
         collect_slint(&ui_dir, &mut slint_files);
+        slint_files.sort();
+        let mut expected = vec![
+            "EcholetPanel.slint".to_string(),
+            "LanguageSelector.slint".to_string(),
+            "ModelGroup.slint".to_string(),
+            "ModelRow.slint".to_string(),
+            "ProgressRow.slint".to_string(),
+            "SettingRow.slint".to_string(),
+            "StatusHeader.slint".to_string(),
+        ];
+        expected.sort();
         assert_eq!(
             slint_files,
-            vec!["EcholetPanel.slint"],
-            "Only one shared EcholetPanel.slint must exist under ui/"
+            expected,
+            "All .slint files must reside under ui/desktop/"
         );
     }
 }
