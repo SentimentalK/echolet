@@ -363,3 +363,10 @@ fn test_single_source_slint_guard() {
         "Only the canonical shared Slint components should exist under ui/desktop/"
     );
 }
+
+#[test]
+fn test_desktop_panel_controller_is_send() {
+    fn assert_send<T: Send>() {}
+    assert_send::<echolet::ui::desktop::DesktopPanelController>();
+}
+

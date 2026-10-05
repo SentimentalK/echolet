@@ -359,9 +359,9 @@ pub fn spawn_ui_thread(
                 cbClsExtra: 0,
                 cbWndExtra: 0,
                 hInstance: hinstance,
-                hIcon: 0,
-                hCursor: 0,
-                hbrBackground: 0,
+                hIcon: ptr::null_mut(),
+                hCursor: ptr::null_mut(),
+                hbrBackground: ptr::null_mut(),
                 lpszMenuName: ptr::null(),
                 lpszClassName: class_name.as_ptr(),
             };

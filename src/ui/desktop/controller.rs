@@ -162,3 +162,8 @@ impl DesktopPanelController {
         }
     }
 }
+
+// Safety: DesktopPanelController encapsulates EcholetPanel behind thread-safe synchronization.
+// All mutable access and window interactions are serialized across threads via Mutex.
+unsafe impl Send for DesktopPanelController {}
+
