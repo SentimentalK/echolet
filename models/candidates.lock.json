@@ -1,0 +1,393 @@
+{
+  "schema_version": 1,
+  "description": "PROJECT-041 Stage 3 / J9 NON-PRODUCT candidate research + benchmark lock. This file must never be read by the Echolet runtime or product registry. It pins immutable upstream artifacts so the J9 benchmark harness (tests/test_j9_candidate_benchmark.rs) is reproducible. An entry is only 'benchmarked' when archive.url + archive.sha256 are both set.",
+  "baseline": {
+    "id": "echolet-xasr-zh-en-480ms-689ff18c584d29910da37b6fe904db0c1489c9d1",
+    "display_name": "Chinese + English (X-ASR / 480ms)",
+    "version": "2026",
+    "upstream_project": "X-ASR (GilgameshWind/X-ASR-zh-en)",
+    "upstream_url": "https://huggingface.co/GilgameshWind/X-ASR-zh-en",
+    "upstream_revision": "689ff18c584d29910da37b6fe904db0c1489c9d1",
+    "release_date": "2026",
+    "languages": ["zh", "en"],
+    "architecture": "cache-aware streaming Zipformer2 transducer",
+    "chunk_ms": 480,
+    "license": {
+      "spdx": "Apache-2.0",
+      "name": "Apache License 2.0"
+    },
+    "default_dir": ".local-runtime/models/bilingual-zh-en",
+    "files": {
+      "encoder": "encoder-480ms.onnx",
+      "decoder": "decoder-480ms.onnx",
+      "joiner": "joiner-480ms.onnx",
+      "tokens": "tokens.txt"
+    },
+    "model_type": "zipformer2",
+    "probes": [
+      { "name": "xasr-0", "wav": "test_wavs/0.wav", "language": "zh-en" }
+    ]
+  },
+  "candidates": [
+    {
+      "id": "nemotron-3.5-asr-streaming-0.6b-560ms-int8-2026-06-11",
+      "display_name": "Multilingual Nemotron 3.5 ASR Streaming 0.6B / 560ms (int8)",
+      "benchmark": true,
+      "dir_name": "sherpa-onnx-nemotron-3.5-asr-streaming-0.6b-560ms-int8-2026-06-11",
+      "upstream_project": "NVIDIA NeMo / nvidia/nemotron-3.5-asr-streaming-0.6b",
+      "upstream_url": "https://huggingface.co/nvidia/nemotron-3.5-asr-streaming-0.6b",
+      "export_project": "k2-fsa/sherpa-onnx (official export_onnx.py + CI)",
+      "export_revision": "PR #3671 merge b74c4dfee9b446c00eb88cf1364d61e26ee9b531 (2026-06-12); package built 2026-06-11",
+      "release_date": "2026-06-11",
+      "languages": [
+        "en", "es", "fr", "it", "pt", "nl", "de", "tr", "ru", "ar", "hi",
+        "ja", "ko", "vi", "uk", "pl", "sv", "cs", "nb", "da", "bg", "fi",
+        "hr", "sk", "zh", "hu", "ro", "et", "el", "lt", "lv", "mt", "sl",
+        "he", "th", "nn"
+      ],
+      "architecture": "cache-aware streaming FastConformer-RNNT (prompt_index language conditioning)",
+      "chunk_ms": 560,
+      "license": {
+        "spdx": "OpenMDW-1.1",
+        "name": "Open Model Development and Weights License 1.1",
+        "url": "https://openmdw.ai/license/1-1/",
+        "redistribution": "Permissive OpenMDW-1.1; NVIDIA model card states no additional restrictions for redistribution of the model."
+      },
+      "runtime_support": "native sherpa-onnx online transducer (NeMo). Per-stream language via SherpaOnnxOnlineStreamSetOption(stream, \"language\", \"<code>\"); empty/omitted = auto-detect.",
+      "source": {
+        "archive": "sherpa-onnx-nemotron-3.5-asr-streaming-0.6b-560ms-int8-2026-06-11.tar.bz2",
+        "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-nemotron-3.5-asr-streaming-0.6b-560ms-int8-2026-06-11.tar.bz2",
+        "sha256": "c6bf5e0df765f9d5b43bc9e0536d4b4b3e7d40bdf5ecf13e45f134c51c05ae3a",
+        "size_bytes": 475271763
+      },
+      "files": {
+        "encoder": "encoder.int8.onnx",
+        "decoder": "decoder.int8.onnx",
+        "joiner": "joiner.int8.onnx",
+        "tokens": "tokens.txt"
+      },
+      "installed_size_bytes": 682213356,
+      "model_type": null,
+      "probes": [
+        { "name": "zh", "wav": "test_wavs/zh.wav", "language": "zh" },
+        { "name": "ja", "wav": "test_wavs/ja.wav", "language": "ja" },
+        { "name": "es", "wav": "test_wavs/es.wav", "language": "es" },
+        { "name": "vi", "wav": "test_wavs/vi.wav", "language": "vi" }
+      ],
+      "recommendation": "Benchmark / J10 candidate"
+    },
+    {
+      "id": "nemotron-speech-streaming-en-0.6b-560ms-int8-2026-04-25",
+      "display_name": "English Nemotron Speech Streaming 0.6B / 560ms (int8)",
+      "benchmark": true,
+      "dir_name": "sherpa-onnx-nemotron-speech-streaming-en-0.6b-560ms-int8-2026-04-25",
+      "upstream_project": "NVIDIA NeMo / nvidia/nemotron-speech-streaming-en-0.6b",
+      "upstream_url": "https://huggingface.co/nvidia/nemotron-speech-streaming-en-0.6b",
+      "export_project": "k2-fsa/sherpa-onnx",
+      "release_date": "2026-04-25",
+      "languages": ["en"],
+      "architecture": "cache-aware streaming FastConformer-RNNT",
+      "chunk_ms": 560,
+      "license": {
+        "spdx": "NVIDIA-Open-Model-License",
+        "name": "NVIDIA Open Model License Agreement",
+        "url": "https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-open-model-license/",
+        "redistribution": "Permits redistribution of the Work and derivatives with attribution; commercial use allowed."
+      },
+      "runtime_support": "native sherpa-onnx online transducer (NeMo); English-only, no per-stream language option needed.",
+      "source": {
+        "archive": "sherpa-onnx-nemotron-speech-streaming-en-0.6b-560ms-int8-2026-04-25.tar.bz2",
+        "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-nemotron-speech-streaming-en-0.6b-560ms-int8-2026-04-25.tar.bz2",
+        "sha256": "78e2b79fcf7271553a74402a76b771b09ea40117a39566a79f52235b23db6358",
+        "size_bytes": 463945051
+      },
+      "files": {
+        "encoder": "encoder.int8.onnx",
+        "decoder": "decoder.int8.onnx",
+        "joiner": "joiner.int8.onnx",
+        "tokens": "tokens.txt"
+      },
+      "installed_size_bytes": 661919416,
+      "model_type": null,
+      "probes": [
+        { "name": "en-0", "wav": "test_wavs/0.wav", "language": "en" },
+        { "name": "en-1", "wav": "test_wavs/1.wav", "language": "en" }
+      ],
+      "recommendation": "Benchmark (English reference point)"
+    },
+    {
+      "id": "streaming-zipformer-zh-xlarge-int8-2025-06-30",
+      "display_name": "Chinese streaming Zipformer XLarge / int8 (2025-06-30)",
+      "benchmark": true,
+      "dir_name": "sherpa-onnx-streaming-zipformer-zh-xlarge-int8-2025-06-30",
+      "upstream_project": "yuekai/icefall-asr-multi-zh-hans-zipformer-xl",
+      "upstream_url": "https://huggingface.co/yuekai/icefall-asr-multi-zh-hans-zipformer-xl",
+      "export_project": "k2-fsa/sherpa-onnx",
+      "release_date": "2025-06-30",
+      "languages": ["zh"],
+      "architecture": "streaming Zipformer transducer (Chinese, char-based)",
+      "chunk_ms": 320,
+      "license": {
+        "spdx": "Apache-2.0",
+        "name": "Apache License 2.0 (icefall / k2-fsa export)",
+        "url": "https://github.com/k2-fsa/icefall/blob/master/LICENSE",
+        "redistribution": "Apache-2.0 upstream; model card does not restate a different license."
+      },
+      "runtime_support": "native sherpa-onnx online Zipformer2 transducer.",
+      "source": {
+        "archive": "sherpa-onnx-streaming-zipformer-zh-xlarge-int8-2025-06-30.tar.bz2",
+        "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-zh-xlarge-int8-2025-06-30.tar.bz2",
+        "sha256": "30437d84dc4861740d40166212ab05f3728945443d53691620075c4031fb88e1",
+        "size_bytes": 597755927
+      },
+      "files": {
+        "encoder": "encoder.int8.onnx",
+        "decoder": "decoder.onnx",
+        "joiner": "joiner.int8.onnx",
+        "tokens": "tokens.txt"
+      },
+      "installed_size_bytes": 771230802,
+      "model_type": "zipformer2",
+      "probes": [
+        { "name": "zh-0", "wav": "test_wavs/0.wav", "language": "zh" },
+        { "name": "zh-1", "wav": "test_wavs/1.wav", "language": "zh" }
+      ],
+      "recommendation": "Benchmark (Chinese quality/expansion)"
+    },
+    {
+      "id": "streaming-zipformer-zh-int8-2025-06-30",
+      "display_name": "Chinese streaming Zipformer (large) / int8 (2025-06-30)",
+      "benchmark": false,
+      "upstream_project": "yuekai/icefall-asr-multi-zh-hans-zipformer-large",
+      "upstream_url": "https://huggingface.co/yuekai/icefall-asr-multi-zh-hans-zipformer-large",
+      "export_project": "k2-fsa/sherpa-onnx",
+      "release_date": "2025-06-30",
+      "languages": ["zh"],
+      "architecture": "streaming Zipformer transducer (Chinese, char-based)",
+      "chunk_ms": 320,
+      "license": { "spdx": "Apache-2.0", "name": "Apache License 2.0 (icefall / k2-fsa export)" },
+      "runtime_support": "native sherpa-onnx online Zipformer2 transducer.",
+      "source": {
+        "archive": "sherpa-onnx-streaming-zipformer-zh-int8-2025-06-30.tar.bz2",
+        "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-zh-int8-2025-06-30.tar.bz2",
+        "sha256": null,
+        "size_bytes": 132649000
+      },
+      "files": {
+        "encoder": "encoder.int8.onnx",
+        "decoder": "decoder.onnx",
+        "joiner": "joiner.int8.onnx",
+        "tokens": "tokens.txt"
+      },
+      "model_type": "zipformer2",
+      "recommendation": "Watch (smaller Chinese alternative if XLarge is too heavy)"
+    },
+    {
+      "id": "streaming-zipformer-korean-2024-06-16",
+      "display_name": "Korean streaming Zipformer (2024-06-16)",
+      "benchmark": false,
+      "upstream_project": "k2-fsa/icefall Korean",
+      "upstream_url": "https://k2-fsa.github.io/sherpa/onnx/pretrained_models/online-transducer/zipformer-transducer-models.html",
+      "export_project": "k2-fsa/sherpa-onnx",
+      "release_date": "2024-06-16",
+      "languages": ["ko"],
+      "architecture": "streaming Zipformer transducer",
+      "chunk_ms": 320,
+      "license": { "spdx": "Apache-2.0", "name": "Apache License 2.0 (icefall / k2-fsa export)" },
+      "runtime_support": "native sherpa-onnx online Zipformer2 transducer.",
+      "source": {
+        "archive": "sherpa-onnx-streaming-zipformer-korean-2024-06-16.tar.bz2",
+        "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-korean-2024-06-16.tar.bz2",
+        "sha256": null,
+        "size_bytes": null
+      },
+      "files": null,
+      "model_type": "zipformer2",
+      "recommendation": "Watch (Korean; superseded by Nemotron 3.5 if multilingual is adopted)"
+    },
+    {
+      "id": "streaming-zipformer-vi-30M-int8-2026-02-09",
+      "display_name": "Vietnamese streaming Zipformer 30M / int8 (2026-02-09)",
+      "benchmark": false,
+      "upstream_project": "k2-fsa/icefall Vietnamese",
+      "upstream_url": "https://k2-fsa.github.io/sherpa/onnx/pretrained_models/online-transducer/zipformer-transducer-models.html",
+      "export_project": "k2-fsa/sherpa-onnx",
+      "release_date": "2026-02-09",
+      "languages": ["vi"],
+      "architecture": "streaming Zipformer transducer (30M)",
+      "chunk_ms": 320,
+      "license": { "spdx": "Apache-2.0", "name": "Apache License 2.0 (icefall / k2-fsa export)" },
+      "runtime_support": "native sherpa-onnx online Zipformer2 transducer.",
+      "source": {
+        "archive": "sherpa-onnx-streaming-zipformer-vi-30M-int8-2026-02-09.tar.bz2",
+        "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-vi-30M-int8-2026-02-09.tar.bz2",
+        "sha256": null,
+        "size_bytes": null
+      },
+      "files": null,
+      "model_type": "zipformer2",
+      "recommendation": "Watch (very small Vietnamese; Nemotron 3.5 covers vi too)"
+    },
+    {
+      "id": "streaming-zipformer-bn-vosk-2026-02-09",
+      "display_name": "Bengali streaming Zipformer (Vosk) 2026-02-09",
+      "benchmark": false,
+      "upstream_project": "alphacep/vosk-model-small-streaming-bn",
+      "upstream_url": "https://huggingface.co/alphacep/vosk-model-small-streaming-bn",
+      "export_project": "k2-fsa/sherpa-onnx",
+      "release_date": "2026-02-09",
+      "languages": ["bn"],
+      "architecture": "streaming Zipformer transducer",
+      "chunk_ms": 320,
+      "license": { "spdx": "Apache-2.0", "name": "Apache License 2.0 (Vosk / k2-fsa export)" },
+      "runtime_support": "native sherpa-onnx online Zipformer2 transducer.",
+      "source": {
+        "archive": "sherpa-onnx-streaming-zipformer-bn-vosk-2026-02-09.tar.bz2",
+        "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-bn-vosk-2026-02-09.tar.bz2",
+        "sha256": null,
+        "size_bytes": null
+      },
+      "files": null,
+      "model_type": "zipformer2",
+      "recommendation": "Watch (Bengali; not covered by Nemotron 3.5)"
+    },
+    {
+      "id": "streaming-paraformer-trilingual-zh-cantonese-en",
+      "display_name": "Streaming Paraformer trilingual zh + Cantonese + en",
+      "benchmark": false,
+      "upstream_project": "FunASR paraformer",
+      "upstream_url": "https://github.com/k2-fsa/sherpa-onnx/releases/tag/asr-models",
+      "export_project": "k2-fsa/sherpa-onnx",
+      "release_date": "2023",
+      "languages": ["zh", "yue", "en"],
+      "architecture": "streaming Paraformer (non-autoregressive)",
+      "chunk_ms": 600,
+      "license": { "spdx": "Apache-2.0", "name": "Apache License 2.0 (FunASR / k2-fsa export)" },
+      "runtime_support": "native sherpa-onnx online Paraformer (needs model_type=paraformer).",
+      "source": {
+        "archive": "sherpa-onnx-streaming-paraformer-trilingual-zh-cantonese-en.tar.bz2",
+        "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-paraformer-trilingual-zh-cantonese-en.tar.bz2",
+        "sha256": null,
+        "size_bytes": 1047508000
+      },
+      "files": null,
+      "model_type": "paraformer",
+      "recommendation": "Reject for now (1 GB, older, and Nemotron 3.5 covers zh; Cantonese is the only unique gap)"
+    },
+    {
+      "id": "nemo-fast-conformer-be-de-en-es-fr-hr-it-pl-ru-uk-20k",
+      "display_name": "NVIDIA STT Multilingual FastConformer 10 European languages",
+      "benchmark": false,
+      "upstream_project": "NVIDIA NeMo stt_multilingual_fastconformer_hybrid_large_pc",
+      "upstream_url": "https://huggingface.co/nvidia/stt_multilingual_fastconformer_hybrid_large_pc",
+      "export_project": "k2-fsa/sherpa-onnx",
+      "release_date": "2024",
+      "languages": ["be", "de", "en", "es", "fr", "hr", "it", "pl", "ru", "uk"],
+      "architecture": "FastConformer hybrid transducer/CTC (batch/offline oriented)",
+      "chunk_ms": null,
+      "license": { "spdx": "CC-BY-4.0", "name": "CC-BY-4.0 (NVIDIA NeMo model)", "url": "https://huggingface.co/nvidia/stt_multilingual_fastconformer_hybrid_large_pc" },
+      "runtime_support": "sherpa-onnx supports it primarily as an offline / simulated-streaming model; not a true cache-aware streaming path.",
+      "source": {
+        "archive": null,
+        "url": null,
+        "sha256": null,
+        "size_bytes": null
+      },
+      "files": null,
+      "model_type": null,
+      "recommendation": "Reject for streaming dictation (no true low-latency streaming path in Echolet)"
+    },
+    {
+      "id": "omnilingual-asr-1600-languages-300M-ctc-int8-2025-11-12",
+      "display_name": "Omnilingual ASR 300M CTC int8 (1600+ languages)",
+      "benchmark": false,
+      "upstream_project": "Meta facebook/omnilingual-asr",
+      "upstream_url": "https://huggingface.co/facebook/omnilingual-asr",
+      "export_project": "k2-fsa/sherpa-onnx",
+      "release_date": "2025-11-12",
+      "languages": ["multi (1600+)"],
+      "architecture": "wav2vec2 CTC (offline, non-streaming)",
+      "chunk_ms": null,
+      "license": { "spdx": "Apache-2.0", "name": "Apache License 2.0", "url": "https://huggingface.co/facebook/omnilingual-asr" },
+      "runtime_support": "sherpa-onnx offline Omnilingual CTC only; no incremental decode path.",
+      "source": {
+        "archive": "sherpa-onnx-omnilingual-asr-1600-languages-300M-ctc-int8-2025-11-12.tar.bz2",
+        "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-omnilingual-asr-1600-languages-300M-ctc-int8-2025-11-12.tar.bz2",
+        "sha256": null,
+        "size_bytes": null
+      },
+      "files": null,
+      "model_type": null,
+      "recommendation": "Reject for J10 (offline; violates mandatory streaming dictation)"
+    },
+    {
+      "id": "qwen3-asr-0.6b-int8",
+      "display_name": "Qwen3-ASR 0.6B int8 (52 languages)",
+      "benchmark": false,
+      "upstream_project": "Qwen/Qwen3-ASR",
+      "upstream_url": "https://huggingface.co/Qwen",
+      "export_project": "k2-fsa/sherpa-onnx",
+      "release_date": "2026",
+      "languages": ["multi (52)"],
+      "architecture": "LLM-based offline ASR",
+      "chunk_ms": null,
+      "license": { "spdx": "Apache-2.0", "name": "Apache License 2.0" },
+      "runtime_support": "sherpa-onnx offline Qwen3-ASR; simulated streaming via VAD only.",
+      "source": {
+        "archive": null,
+        "url": null,
+        "sha256": null,
+        "size_bytes": null
+      },
+      "files": null,
+      "model_type": null,
+      "recommendation": "Reject for J10 (offline; high latency, not cache-aware streaming)"
+    },
+    {
+      "id": "parakeet-tdt-0.6b-v3",
+      "display_name": "NVIDIA Parakeet TDT 0.6B v3 (multilingual)",
+      "benchmark": false,
+      "upstream_project": "nvidia/parakeet-tdt-0.6b-v3",
+      "upstream_url": "https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3",
+      "export_project": "k2-fsa/sherpa-onnx",
+      "release_date": "2025",
+      "languages": ["multi (25 European)"],
+      "architecture": "FastConformer TDT (offline / batched)",
+      "chunk_ms": null,
+      "license": { "spdx": "CC-BY-4.0", "name": "CC-BY-4.0" },
+      "runtime_support": "sherpa-onnx offline Parakeet TDT; simulated streaming only.",
+      "source": {
+        "archive": null,
+        "url": null,
+        "sha256": null,
+        "size_bytes": null
+      },
+      "files": null,
+      "model_type": null,
+      "recommendation": "Reject for J10 (no true streaming path)"
+    },
+    {
+      "id": "moonshine-base-int8",
+      "display_name": "Moonshine base int8",
+      "benchmark": false,
+      "upstream_project": "useful-sensors/moonshine",
+      "upstream_url": "https://huggingface.co/UsefulSensors/moonshine",
+      "export_project": "k2-fsa/sherpa-onnx",
+      "release_date": "2024",
+      "languages": ["en"],
+      "architecture": "Moonshine encoder-decoder (offline)",
+      "chunk_ms": null,
+      "license": { "spdx": "MIT", "name": "MIT" },
+      "runtime_support": "sherpa-onnx offline Moonshine; simulated streaming only.",
+      "source": {
+        "archive": null,
+        "url": null,
+        "sha256": null,
+        "size_bytes": null
+      },
+      "files": null,
+      "model_type": null,
+      "recommendation": "Reject for J10 (English-only offline; no advantage over Nemotron)"
+    }
+  ]
+}
