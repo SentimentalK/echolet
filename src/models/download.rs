@@ -854,9 +854,13 @@ mod tests {
         );
         let backup = find_prefix(&parent, ".echolet-old-").expect("backup must be preserved");
         assert_eq!(fs::read(backup.join("model.txt")).unwrap(), b"old");
+        // The path is formatted with `{:?}`, which escapes separators on
+        // Windows, so assert on the separator-free backup directory name.
+        let backup_name = backup.file_name().unwrap().to_str().unwrap();
         assert!(
-            err.contains(backup.to_str().unwrap()),
-            "error must name the preserved backup path: {}",
+            err.contains(backup_name),
+            "error must name the preserved backup path ({}): {}",
+            backup_name,
             err
         );
         let _ = fs::remove_dir_all(&tmp);
