@@ -1,0 +1,37 @@
+import { ModelRow, SlintModelRowData } from "ModelRow.slint";
+
+export struct SlintModelGroupData {
+    id: string,
+    label: string,
+    models: [SlintModelRowData],
+}
+
+export component ModelGroup {
+    in property <SlintModelGroupData> group;
+    callback action_clicked(string);
+
+    VerticalLayout {
+        spacing: 4px;
+
+        // Group Header
+        HorizontalLayout {
+            height: 16px;
+            Text {
+                text: root.group.label;
+                color: #71717a;
+                font-size: 11px;
+                font-weight: 600;
+                overflow: elide;
+                vertical-alignment: center;
+            }
+        }
+
+        // Model Rows within group
+        for model in root.group.models: ModelRow {
+            model: model;
+            action_clicked(id) => {
+                root.action_clicked(id);
+            }
+        }
+    }
+}

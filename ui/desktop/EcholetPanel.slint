@@ -1,30 +1,42 @@
-export struct SlintModelRow {
-    id: string,
-    label: string,
-    status_text: string,
-    action_label: string,
-    action_enabled: bool,
-    selected: bool,
-}
+import { ScrollView } from "std-widgets.slint";
+import { StatusHeader } from "components/StatusHeader.slint";
+import { ModelGroup, SlintModelGroupData } from "components/ModelGroup.slint";
+import { SlintModelRowData } from "components/ModelRow.slint";
+import { LanguageSelector, SlintLanguageOptionData } from "components/LanguageSelector.slint";
+import { SettingToggle, SettingIdleUnload, SettingAction } from "components/SettingRow.slint";
+
+export { SlintModelRowData, SlintModelGroupData, SlintLanguageOptionData }
 
 export component EcholetPanel inherits Window {
     width: 380px;
-    height: 240px;
+    height: 520px;
     title: "Echolet";
     no-frame: true;
     background: #18181b;
     default-font-size: 13px;
 
     in property <string> status_text: "Status: Ready";
-    in property <string> group_label: "Chinese + English";
-    in property <[SlintModelRow]> models: [];
-    in property <int> diagnostic_count: 0;
-    in property <string> diagnostic_state: "Default";
-    in property <string> footer_text: "Slint 1.18.1 · Software Renderer · 380x240";
+    in property <bool> is_listening: false;
+    in property <[SlintModelGroupData]> model_groups: [];
+    in property <bool> has_language_options: false;
+    in property <string> language_model_id: "";
+    in property <string> current_language_label: "Auto";
+    in property <[SlintLanguageOptionData]> language_options: [];
+    in property <bool> preload_on_startup: false;
+    in property <int> idle_unload_minutes: 10;
+    in property <string> idle_unload_label: "10 minutes";
+    in property <bool> history_enabled: false;
+    in property <string> footer_text: "Echolet · Slint 1.18.1 · 380px";
 
     callback close_requested();
+    callback toggle_listening();
     callback diagnostic_clicked();
     callback model_action_clicked(string);
+    callback language_selected(string, string);
+    callback set_preload_startup(bool);
+    callback set_idle_unload(int);
+    callback set_history_enabled(bool);
+    callback open_history_folder();
 
     forward-focus: key_handler;
 
@@ -37,10 +49,10 @@ export component EcholetPanel inherits Window {
             return reject;
         }
 
-        // Outer container with border and fixed dimensions
+        // Fixed 380px width panel boundary
         Rectangle {
             width: 380px;
-            height: 240px;
+            height: 520px;
             border-width: 1px;
             border-color: #3f3f46;
             border-radius: 8px;
@@ -54,39 +66,11 @@ export component EcholetPanel inherits Window {
                 padding-bottom: 12px;
                 spacing: 8px;
 
-                // Header row: Echolet title and status
-                HorizontalLayout {
-                    height: 24px;
-                    alignment: space-between;
-
-                    Text {
-                        text: "Echolet";
-                        color: #f4f4f5;
-                        font-size: 15px;
-                        font-weight: 700;
-                        vertical-alignment: center;
-                    }
-
-                    Rectangle {
-                        height: 22px;
-                        border-radius: 4px;
-                        background: #27272a;
-                        border-width: 1px;
-                        border-color: #3f3f46;
-
-                        HorizontalLayout {
-                            padding-left: 8px;
-                            padding-right: 8px;
-
-                            Text {
-                                text: root.status_text;
-                                color: #a1a1aa;
-                                font-size: 11px;
-                                vertical-alignment: center;
-                                horizontal-alignment: center;
-                            }
-                        }
-                    }
+                // 1. Header
+                StatusHeader {
+                    title: "Echolet";
+                    status_text: root.status_text;
+                    is_listening: root.is_listening;
                 }
 
                 // Divider
@@ -95,81 +79,96 @@ export component EcholetPanel inherits Window {
                     background: #27272a;
                 }
 
-                // Model Section: Group label
-                HorizontalLayout {
-                    height: 16px;
-                    Text {
-                        text: root.group_label;
-                        color: #71717a;
-                        font-size: 11px;
-                        font-weight: 600;
-                        overflow: elide;
-                        vertical-alignment: center;
-                    }
-                }
+                // 2. Scrollable Body
+                ScrollView {
+                    VerticalLayout {
+                        spacing: 10px;
+                        padding-right: 4px;
 
-                // Model Rows
-                VerticalLayout {
-                    spacing: 4px;
-
-                    for model in root.models: Rectangle {
-                        height: 34px;
-                        border-radius: 6px;
-                        background: model.selected ? #27272a : #1f1f23;
-                        border-width: 1px;
-                        border-color: model.selected ? #3b82f6 : #2e2e33;
-
-                        HorizontalLayout {
-                            padding-left: 10px;
-                            padding-right: 10px;
+                        // Model Section (Hierarchical Groups)
+                        VerticalLayout {
                             spacing: 8px;
-                            alignment: space-between;
 
-                            // Model name and status text
-                            VerticalLayout {
-                                alignment: center;
-                                spacing: 2px;
-                                width: 220px;
-
-                                Text {
-                                    text: model.label;
-                                    color: #f4f4f5;
-                                    font-size: 12px;
-                                    font-weight: 500;
-                                    overflow: elide;
+                            for group in root.model_groups: ModelGroup {
+                                group: group;
+                                action_clicked(id) => {
+                                    root.model_action_clicked(id);
                                 }
+                            }
+                        }
 
+                        // Language Section (only when selected model has options)
+                        if root.has_language_options: VerticalLayout {
+                            spacing: 8px;
+
+                            Rectangle {
+                                height: 1px;
+                                background: #27272a;
+                            }
+
+                            LanguageSelector {
+                                model_id: root.language_model_id;
+                                current_label: root.current_language_label;
+                                options: root.language_options;
+                                language_selected(model_id, locale) => {
+                                    root.language_selected(model_id, locale);
+                                }
+                            }
+                        }
+
+                        // Settings Divider
+                        Rectangle {
+                            height: 1px;
+                            background: #27272a;
+                        }
+
+                        // Settings Section
+                        VerticalLayout {
+                            spacing: 6px;
+
+                            HorizontalLayout {
+                                height: 16px;
                                 Text {
-                                    text: model.status_text;
-                                    color: #a1a1aa;
-                                    font-size: 10px;
-                                    overflow: elide;
+                                    text: "Settings";
+                                    color: #71717a;
+                                    font-size: 11px;
+                                    font-weight: 600;
+                                    vertical-alignment: center;
                                 }
                             }
 
-                            // Model Action button
-                            Rectangle {
-                                width: 90px;
-                                height: 24px;
-                                border-radius: 4px;
-                                background: !model.action_enabled ? #27272a : (model.selected ? #1e3a8a : #2563eb);
-                                border-width: 1px;
-                                border-color: !model.action_enabled ? #3f3f46 : (model.selected ? #3b82f6 : #60a5fa);
-
-                                Text {
-                                    text: model.action_label;
-                                    color: !model.action_enabled ? #71717a : #ffffff;
-                                    font-size: 11px;
-                                    font-weight: 500;
-                                    vertical-alignment: center;
-                                    horizontal-alignment: center;
-                                    overflow: elide;
+                            SettingToggle {
+                                title: "Faster First Dictation";
+                                subtitle: "Load selected model when Echolet starts";
+                                checked: root.preload_on_startup;
+                                toggled(checked) => {
+                                    root.set_preload_startup(checked);
                                 }
+                            }
 
-                                action_touch := TouchArea {
-                                    enabled: model.action_enabled;
+                            SettingIdleUnload {
+                                current_label: root.idle_unload_label;
+                                current_minutes: root.idle_unload_minutes;
+                                idle_selected(mins) => {
+                                    root.set_idle_unload(mins);
+                                }
+                            }
+
+                            SettingToggle {
+                                title: "Local History";
+                                subtitle: "";
+                                checked: root.history_enabled;
+                                toggled(checked) => {
+                                    root.set_history_enabled(checked);
+                                }
+                            }
+
+                            HorizontalLayout {
+                                alignment: start;
+                                SettingAction {
+                                    label: "Open History Folder";
                                     clicked => {
-                                        root.model_action_clicked(model.id);
+                                        root.open_history_folder();
                                     }
                                 }
                             }
@@ -177,41 +176,56 @@ export component EcholetPanel inherits Window {
                     }
                 }
 
-                // Diagnostic control button
-                diag_box := Rectangle {
-                    height: 28px;
-                    border-radius: 6px;
-                    background: diag_touch.pressed ? #3f3f46 : (diag_touch.has-hover ? #2e2e33 : #27272a);
-                    border-width: 1px;
-                    border-color: #3f3f46;
-
-                    Text {
-                        text: "Diagnostic Ping: " + root.diagnostic_state + " (" + root.diagnostic_count + " clicks)";
-                        color: #e4e4e7;
-                        font-size: 11px;
-                        vertical-alignment: center;
-                        horizontal-alignment: center;
-                    }
-
-                    diag_touch := TouchArea {
-                        clicked => {
-                            root.diagnostic_clicked();
-                        }
-                    }
+                // Divider before footer
+                Rectangle {
+                    height: 1px;
+                    background: #27272a;
                 }
 
-                // Footer
-                HorizontalLayout {
-                    height: 16px;
-                    alignment: center;
+                // 3. Footer / Listening Control
+                VerticalLayout {
+                    spacing: 6px;
 
-                    Text {
-                        text: root.footer_text;
-                        color: #52525b;
-                        font-size: 10px;
-                        vertical-alignment: center;
-                        horizontal-alignment: center;
-                        overflow: elide;
+                    Rectangle {
+                        height: 32px;
+                        border-radius: 6px;
+                        background: root.is_listening ? (mic_touch.pressed ? #991b1b : #dc2626) : (mic_touch.pressed ? #1d4ed8 : (mic_touch.has-hover ? #2563eb : #1d4ed8));
+                        border-width: 1px;
+                        border-color: root.is_listening ? #ef4444 : #3b82f6;
+
+                        HorizontalLayout {
+                            alignment: center;
+                            spacing: 6px;
+
+                            Text {
+                                text: root.is_listening ? "Stop Listening (F10)" : "Start Listening (F10)";
+                                color: #ffffff;
+                                font-size: 12px;
+                                font-weight: 600;
+                                vertical-alignment: center;
+                                horizontal-alignment: center;
+                            }
+                        }
+
+                        mic_touch := TouchArea {
+                            clicked => {
+                                root.toggle_listening();
+                            }
+                        }
+                    }
+
+                    HorizontalLayout {
+                        height: 14px;
+                        alignment: center;
+
+                        Text {
+                            text: root.footer_text;
+                            color: #52525b;
+                            font-size: 10px;
+                            vertical-alignment: center;
+                            horizontal-alignment: center;
+                            overflow: elide;
+                        }
                     }
                 }
             }

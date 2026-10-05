@@ -8,8 +8,6 @@
 //! They render immutable projected [`ControlSurfaceState`] and emit explicit [`SurfaceAction`].
 
 pub mod control_surface;
-
-#[cfg(feature = "slint-ui-spike")]
 pub mod desktop;
 
 pub use control_surface::{

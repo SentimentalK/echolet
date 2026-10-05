@@ -5,7 +5,7 @@ edition = "2021"
 
 [features]
 default = []
-slint-ui-spike = ["dep:slint", "dep:slint-build"]
+slint-ui-spike = []
 
 [[bin]]
 name = "echolet"
@@ -14,7 +14,6 @@ path = "src/main.rs"
 [[bin]]
 name = "echolet-ui-spike"
 path = "src/bin/echolet-ui-spike.rs"
-required-features = ["slint-ui-spike"]
 
 [dependencies]
 cpal = "0.15"
@@ -31,7 +30,7 @@ tar = "0.4"
 bzip2 = "0.4"
 zstd = "0.13"
 chrono = { version = "0.4", features = ["serde"] }
-slint = { version = "1.18.1", default-features = false, features = ["std", "backend-winit", "renderer-software", "compat-1-2"], optional = true }
+slint = { version = "1.18.1", default-features = false, features = ["std", "backend-winit", "renderer-software", "compat-1-2"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 zbus = { version = "4.4", default-features = false, features = ["tokio"] }
@@ -66,4 +65,4 @@ windows-sys = { version = "0.59", features = [
 
 [build-dependencies]
 winresource = "0.1"
-slint-build = { version = "1.18.1", optional = true }
+slint-build = "1.18.1"

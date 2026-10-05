@@ -1,6 +1,12 @@
-//! Desktop UI layer for Echolet.
+//! Desktop UI layer for Echolet (PROJECT-041 / J11.1d).
 //!
-//! Contains the Slint cross-platform desktop UI spike adapter and view model.
+//! Provides the single shared cross-platform Slint renderer, adapter, controller,
+//! and host seams across Windows, macOS, and Linux.
 
-pub mod slint_spike;
-pub use slint_spike::*;
+pub mod adapter;
+pub mod controller;
+pub mod host;
+
+pub use adapter::*;
+pub use controller::*;
+pub use host::*;

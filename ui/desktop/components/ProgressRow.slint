@@ -1,0 +1,36 @@
+export component ProgressRow {
+    in property <string> progress_text: "";
+    in property <int> progress_percent: -1; // -1 if indeterminate or unknown
+
+    height: 14px;
+
+    HorizontalLayout {
+        spacing: 8px;
+        alignment: space-between;
+
+        Text {
+            text: root.progress_text;
+            color: #60a5fa;
+            font-size: 10px;
+            overflow: elide;
+            vertical-alignment: center;
+        }
+
+        if root.progress_percent >= 0: Rectangle {
+            width: 70px;
+            height: 4px;
+            border-radius: 2px;
+            background: #27272a;
+            y: (parent.height - self.height) / 2;
+
+            Rectangle {
+                x: 0;
+                y: 0;
+                width: parent.width * (root.progress_percent / 100.0);
+                height: parent.height;
+                border-radius: 2px;
+                background: #3b82f6;
+            }
+        }
+    }
+}

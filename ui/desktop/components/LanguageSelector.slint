@@ -1,0 +1,115 @@
+export struct SlintLanguageOptionData {
+    locale: string,
+    label: string,
+    is_selected: bool,
+}
+
+export component LanguageSelector {
+    in property <string> model_id: "";
+    in property <string> current_label: "Auto";
+    in property <[SlintLanguageOptionData]> options: [];
+    in-out property <bool> is_expanded: false;
+
+    callback language_selected(string, string);
+
+    VerticalLayout {
+        spacing: 4px;
+
+        HorizontalLayout {
+            height: 16px;
+            Text {
+                text: "Language";
+                color: #71717a;
+                font-size: 11px;
+                font-weight: 600;
+                vertical-alignment: center;
+            }
+        }
+
+        // Dropdown toggle bar
+        Rectangle {
+            height: 28px;
+            border-radius: 6px;
+            background: #1f1f23;
+            border-width: 1px;
+            border-color: root.is_expanded ? #3b82f6 : #2e2e33;
+
+            HorizontalLayout {
+                padding-left: 10px;
+                padding-right: 10px;
+                alignment: space-between;
+
+                Text {
+                    text: root.current_label;
+                    color: #f4f4f5;
+                    font-size: 11px;
+                    font-weight: 500;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+
+                Text {
+                    text: root.is_expanded ? "▲" : "▼";
+                    color: #71717a;
+                    font-size: 9px;
+                    vertical-alignment: center;
+                }
+            }
+
+            TouchArea {
+                clicked => {
+                    root.is_expanded = !root.is_expanded;
+                }
+            }
+        }
+
+        // Expanded list of language options
+        if root.is_expanded: Rectangle {
+            border-radius: 6px;
+            background: #18181b;
+            border-width: 1px;
+            border-color: #3f3f46;
+            clip: true;
+
+            VerticalLayout {
+                padding-top: 4px;
+                padding-bottom: 4px;
+                spacing: 2px;
+
+                for option in root.options: Rectangle {
+                    height: 24px;
+                    background: option.is_selected ? #27272a : (opt_touch.has-hover ? #1f1f23 : transparent);
+
+                    HorizontalLayout {
+                        padding-left: 10px;
+                        padding-right: 10px;
+                        alignment: space-between;
+
+                        Text {
+                            text: option.label;
+                            color: option.is_selected ? #3b82f6 : #d4d4d8;
+                            font-size: 11px;
+                            font-weight: option.is_selected ? 600 : 400;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+
+                        if option.is_selected: Text {
+                            text: "✓";
+                            color: #3b82f6;
+                            font-size: 11px;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    opt_touch := TouchArea {
+                        clicked => {
+                            root.is_expanded = false;
+                            root.language_selected(root.model_id, option.locale);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

@@ -80,8 +80,7 @@ fn main() {
         res.compile().expect("Failed to compile Windows application icon resource");
     }
 
-    #[cfg(feature = "slint-ui-spike")]
-    {
+    if target_os == "macos" || target_os == "linux" || target_os == "windows" {
         slint_build::compile("ui/desktop/EcholetPanel.slint").expect("Failed to compile EcholetPanel.slint");
     }
 }
