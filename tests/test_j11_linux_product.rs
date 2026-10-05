@@ -332,13 +332,12 @@ fn failed_download_is_retryable_and_preserves_active_model() {
     assert!(!h.app.model_manager.downloading.contains("mock-c"));
 
     let view = latest_view(&h.handle);
-    let failed = view
-        .models
-        .iter()
-        .find(|m| m.id == "mock-c")
-        .expect("mock-c in view");
-    assert_eq!(failed.download, DownloadStatus::Failed);
-    assert!(!failed.is_installed);
+    let failed = view.find_model("mock-c").expect("mock-c in view");
+    assert_eq!(
+        failed.download.phase,
+        echolet::ui::control_surface::DownloadPhase::Failed
+    );
+    assert!(!failed.installed);
     // A failed download stays actionable.
     assert!(h.app.start_download("mock-c"));
 }
@@ -369,9 +368,9 @@ fn successful_download_marks_installed_without_auto_select() {
         "a successful download must NOT auto-select"
     );
     let view = latest_view(&h.handle);
-    let installed = view.models.iter().find(|m| m.id == "mock-c").unwrap();
-    assert!(installed.is_installed);
-    assert!(!installed.is_selected);
+    let installed = view.find_model("mock-c").unwrap();
+    assert!(installed.installed);
+    assert!(!installed.selected);
 }
 
 #[test]
@@ -485,7 +484,7 @@ fn per_model_language_selection_validates_persists_and_repairs() {
     let view = latest_view(&h.handle);
     let active = view.selected_model();
     // mock-a is the active model, so query the lang model directly.
-    let lang_item = view.models.iter().find(|m| m.id == "mock-lang").unwrap();
+    let lang_item = view.find_model("mock-lang").unwrap();
     assert_eq!(lang_item.language.selected_locale.as_deref(), Some("ja-JP"));
     assert!(active.is_some());
 
@@ -564,15 +563,18 @@ fn view_projects_verified_downloadable_installed_and_selected_states() {
     let h = build_harness("view-states");
     let view = h.app.platform_view();
 
-    let a = view.models.iter().find(|m| m.id == "mock-a").unwrap();
-    assert!(a.is_selected && a.is_installed && a.is_verified);
+    let a = view.find_model("mock-a").unwrap();
+    assert!(a.selected && a.installed && a.is_verified);
 
-    let c = view.models.iter().find(|m| m.id == "mock-c").unwrap();
-    assert!(!c.is_installed && !c.is_selected);
-    assert_eq!(c.download, DownloadStatus::NotDownloading);
+    let c = view.find_model("mock-c").unwrap();
+    assert!(!c.installed && !c.selected);
+    assert_eq!(
+        c.download.phase,
+        echolet::ui::control_surface::DownloadPhase::NotDownloading
+    );
     assert!(!c.is_verified);
 
-    let lang = view.models.iter().find(|m| m.id == "mock-lang").unwrap();
+    let lang = view.find_model("mock-lang").unwrap();
     assert_eq!(lang.language.transcription_ready().count(), 1);
     assert_eq!(lang.language.broad_coverage().count(), 1);
 

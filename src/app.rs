@@ -10,10 +10,11 @@ use crate::models::{
     download_and_install_model_with_progress, InstallPhase, ModelManager, ProgressThrottle,
 };
 use crate::paths;
-use crate::platform::{
-    build_view, project_runtime_state, PlatformRuntime, PlatformView, RuntimeState,
-};
+use crate::platform::{PlatformRuntime, PlatformView};
 use crate::state::AppState;
+use crate::ui::control_surface::{
+    build_control_surface_state, project_runtime_state, ControlSurfaceState, RuntimeState,
+};
 use chrono::{DateTime, Local};
 use crossbeam_channel::{unbounded, Receiver, Sender};
 use std::collections::{HashMap, HashSet};
@@ -472,7 +473,7 @@ impl App {
     /// Builds the platform-neutral UI projection from current app state.
     pub fn platform_view(&self) -> PlatformView {
         let installed: HashSet<String> = self.model_manager.installed.keys().cloned().collect();
-        build_view(
+        build_control_surface_state(
             &self.model_manager.registry,
             self.model_manager.active_model_id.as_deref(),
             &installed,
@@ -480,7 +481,13 @@ impl App {
             &self.download_progress,
             &self.config,
             self.runtime_state(),
+            self.history_manager.enabled,
         )
+    }
+
+    /// Canonical ControlSurfaceState accessor.
+    pub fn control_surface_state(&self) -> ControlSurfaceState {
+        self.platform_view()
     }
 
     pub fn notify_models(&self) {
@@ -1018,6 +1025,19 @@ impl App {
                 println!("[Config] Idle unload policy set to {:?}", minutes);
                 self.set_idle_unload_policy(minutes);
             }
+            AppAction::SetHistoryEnabled(enabled) => {
+                if self.history_manager.enabled != enabled {
+                    self.history_manager.set_enabled(enabled);
+                    self.config.history_enabled = enabled;
+                    let _ = self.config.save();
+                    self.platform.handle.update_history_state(enabled);
+                    println!(
+                        "[History] Local History set: {}",
+                        if enabled { "ON" } else { "OFF" }
+                    );
+                    self.notify_models();
+                }
+            }
             AppAction::ToggleHistory => {
                 let new_enabled = !self.history_manager.enabled;
                 self.history_manager.set_enabled(new_enabled);
@@ -1028,6 +1048,7 @@ impl App {
                     "[History] Local History toggled: {}",
                     if new_enabled { "ON" } else { "OFF" }
                 );
+                self.notify_models();
             }
             AppAction::OpenHistoryFolder => {
                 self.platform

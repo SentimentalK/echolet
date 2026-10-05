@@ -65,14 +65,12 @@ impl PlatformHandle for MacPlatformHandle {
     fn update_models(&self, view: &PlatformView) {
         let active_id = view.selected_model().map(|m| m.id.clone());
         let installed_ids = view
-            .models
-            .iter()
-            .filter(|m| m.is_installed)
+            .all_models()
+            .filter(|m| m.installed)
             .map(|m| m.id.clone())
             .collect();
         let downloading_ids = view
-            .models
-            .iter()
+            .all_models()
             .filter(|m| m.download.is_in_progress())
             .map(|m| m.id.clone())
             .collect();

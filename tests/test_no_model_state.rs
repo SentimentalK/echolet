@@ -32,9 +32,8 @@ impl PlatformHandle for TestPlatformHandle {
     fn update_models(&self, view: &PlatformView) {
         *self.last_active_model.lock().unwrap() = view.selected_model().map(|m| m.id.clone());
         *self.last_installed_models.lock().unwrap() = view
-            .models
-            .iter()
-            .filter(|m| m.is_installed)
+            .all_models()
+            .filter(|m| m.installed)
             .map(|m| m.id.clone())
             .collect();
     }

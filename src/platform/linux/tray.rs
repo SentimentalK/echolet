@@ -2,8 +2,11 @@ use crate::actions::AppAction;
 use crate::config::EcholetConfig;
 use crate::models::registry::{LanguageTier, ModelRegistry};
 use crate::paths;
-use crate::platform::view::{download_status_label, PlatformModelItem, PlatformView, RuntimeState};
 use crate::platform::PlatformHandle;
+pub use crate::ui::control_surface::ControlSurfaceState as PlatformView;
+use crate::ui::control_surface::{
+    dispatch_surface_action, ControlSurfaceState, ModelPresentation, RuntimeState, SurfaceAction,
+};
 use crossbeam_channel::Sender;
 use ksni::menu::{MenuItem, StandardItem, SubMenu};
 use ksni::{Icon, Tray, TrayMethods};
@@ -61,7 +64,7 @@ impl Tray for LinuxTray {
                 activate: {
                     let tx = self.action_tx.clone();
                     Box::new(move |_| {
-                        let _ = tx.send(AppAction::ToggleListening);
+                        dispatch_surface_action(&tx, SurfaceAction::ToggleListening);
                     })
                 },
                 ..Default::default()
@@ -117,7 +120,7 @@ impl Tray for LinuxTray {
                     let tx = self.action_tx.clone();
                     let next = !view.preload_on_startup;
                     Box::new(move |_| {
-                        let _ = tx.send(AppAction::SetPreloadModelOnStartup(next));
+                        dispatch_surface_action(&tx, SurfaceAction::SetPreloadModelOnStartup(next));
                     })
                 },
                 ..Default::default()
@@ -137,7 +140,7 @@ impl Tray for LinuxTray {
         );
 
         // 7. Local History section
-        let hist_enabled = self.history_enabled.load(Ordering::SeqCst);
+        let hist_enabled = view.history_enabled;
         let hist_toggle_tx = self.action_tx.clone();
         let hist_open_tx = self.action_tx.clone();
 
@@ -146,7 +149,10 @@ impl Tray for LinuxTray {
                 StandardItem {
                     label: "Local History: Off".into(),
                     activate: Box::new(move |_| {
-                        let _ = hist_toggle_tx.send(AppAction::ToggleHistory);
+                        dispatch_surface_action(
+                            &hist_toggle_tx,
+                            SurfaceAction::SetHistoryEnabled(true),
+                        );
                     }),
                     ..Default::default()
                 }
@@ -161,7 +167,10 @@ impl Tray for LinuxTray {
                 StandardItem {
                     label: "✓ Local History".into(),
                     activate: Box::new(move |_| {
-                        let _ = hist_toggle_tx.send(AppAction::ToggleHistory);
+                        dispatch_surface_action(
+                            &hist_toggle_tx,
+                            SurfaceAction::SetHistoryEnabled(false),
+                        );
                     }),
                     ..Default::default()
                 }
@@ -172,7 +181,7 @@ impl Tray for LinuxTray {
                 StandardItem {
                     label: "    Open History Folder".into(),
                     activate: Box::new(move |_| {
-                        let _ = hist_open_tx.send(AppAction::OpenHistoryFolder);
+                        dispatch_surface_action(&hist_open_tx, SurfaceAction::OpenHistoryFolder);
                     }),
                     ..Default::default()
                 }
@@ -206,7 +215,7 @@ impl Tray for LinuxTray {
                 activate: {
                     let tx = self.action_tx.clone();
                     Box::new(move |_| {
-                        let _ = tx.send(AppAction::Quit);
+                        dispatch_surface_action(&tx, SurfaceAction::Quit);
                     })
                 },
                 ..Default::default()
@@ -218,28 +227,14 @@ impl Tray for LinuxTray {
     }
 }
 
-/// Concise, unambiguous model menu label including verification + state.
-fn model_item_label(m: &PlatformModelItem) -> String {
-    let base = if m.is_selected {
-        format!("✓ {} (Selected)", m.label)
-    } else if let Some(dl) = download_status_label(&m.download) {
-        format!("{} — {}", m.label, dl)
-    } else if m.is_installed {
-        format!("{} — Installed", m.label)
-    } else {
-        format!("{} — Download", m.label)
-    };
-    format!("{} · {}", base, m.verification_label)
-}
-
 fn build_model_submenu(
     tx: &Sender<AppAction>,
-    view: &PlatformView,
-    is_rec: bool,
+    view: &ControlSurfaceState,
+    _is_rec: bool,
 ) -> Vec<MenuItem<LinuxTray>> {
     let mut sub: Vec<MenuItem<LinuxTray>> = Vec::new();
 
-    let any_installed = view.models.iter().any(|m| m.is_installed);
+    let any_installed = view.all_models().any(|m| m.installed);
     if !any_installed && view.selected_model().is_none() {
         sub.push(
             StandardItem {
@@ -251,24 +246,18 @@ fn build_model_submenu(
         );
     }
 
-    for m in &view.models {
-        let enabled = !is_rec && !m.download.is_in_progress() && !m.is_selected;
+    for m in view.all_models() {
+        let enabled = m.enabled;
         let tx = tx.clone();
-        let id = m.id.clone();
-        let is_installed = m.is_installed;
+        let action = m.surface_action();
         sub.push(
             StandardItem {
-                label: model_item_label(m),
+                label: m.menu_item_label(),
                 enabled,
                 activate: Box::new(move |_| {
-                    // Download and selection are distinct actions: uninstalled
-                    // models only ever start a download.
-                    let action = if is_installed {
-                        AppAction::SelectModel(id.clone())
-                    } else {
-                        AppAction::DownloadModel(id.clone())
-                    };
-                    let _ = tx.send(action);
+                    if let Some(act) = action.clone() {
+                        dispatch_surface_action(&tx, act);
+                    }
                 }),
                 ..Default::default()
             }
@@ -281,7 +270,7 @@ fn build_model_submenu(
 
 fn build_language_submenu(
     tx: &Sender<AppAction>,
-    active: &PlatformModelItem,
+    active: &ModelPresentation,
     is_rec: bool,
 ) -> Vec<MenuItem<LinuxTray>> {
     let mut sub: Vec<MenuItem<LinuxTray>> = Vec::new();
@@ -294,10 +283,13 @@ fn build_language_submenu(
             label: if auto_checked { "✓ Auto" } else { "Auto" }.into(),
             enabled: !is_rec,
             activate: Box::new(move |_| {
-                let _ = auto_tx.send(AppAction::SelectLanguage {
-                    model_id: auto_id.clone(),
-                    locale: None,
-                });
+                dispatch_surface_action(
+                    &auto_tx,
+                    SurfaceAction::SelectLanguage {
+                        model_id: auto_id.clone(),
+                        locale: None,
+                    },
+                );
             }),
             ..Default::default()
         }
@@ -328,7 +320,7 @@ fn build_language_submenu(
 
 fn build_tier_submenu(
     tx: &Sender<AppAction>,
-    active: &PlatformModelItem,
+    active: &ModelPresentation,
     tier: LanguageTier,
     is_rec: bool,
 ) -> Vec<MenuItem<LinuxTray>> {
@@ -348,10 +340,13 @@ fn build_tier_submenu(
                 label,
                 enabled: !is_rec,
                 activate: Box::new(move |_| {
-                    let _ = tx.send(AppAction::SelectLanguage {
-                        model_id: model_id.clone(),
-                        locale: Some(locale.clone()),
-                    });
+                    dispatch_surface_action(
+                        &tx,
+                        SurfaceAction::SelectLanguage {
+                            model_id: model_id.clone(),
+                            locale: Some(locale.clone()),
+                        },
+                    );
                 }),
                 ..Default::default()
             }
@@ -384,7 +379,7 @@ fn build_idle_submenu(tx: &Sender<AppAction>, current: Option<u32>) -> Vec<MenuI
                     (*name).to_string()
                 },
                 activate: Box::new(move |_| {
-                    let _ = tx.send(AppAction::SetModelIdleUnloadMinutes(value));
+                    dispatch_surface_action(&tx, SurfaceAction::SetModelIdleUnloadMinutes(value));
                 }),
                 ..Default::default()
             }
@@ -575,18 +570,55 @@ fn create_circle_icon(filled: bool, size: i32) -> Icon {
 mod tests {
     use super::*;
     use crate::models::download::DownloadStatus;
-    use crate::platform::view::{LanguageOptionView, ModelLanguageView, PlatformModelItem};
+    use crate::platform::view::{LanguageOptionView, ModelLanguageView};
+    use crate::ui::control_surface::{
+        DownloadPhase, DownloadPresentation, ModelGroupPresentation, ModelLanguagePresentation,
+        ModelPresentation, ModelPrimaryAction,
+    };
 
-    fn sample_model(id: &str, label: &str) -> PlatformModelItem {
-        PlatformModelItem {
+    fn sample_model(
+        id: &str,
+        label: &str,
+        installed: bool,
+        selected: bool,
+        download: DownloadStatus,
+    ) -> ModelPresentation {
+        let dl = DownloadPresentation::from_status(&download);
+        let primary_action = if selected || dl.is_in_progress() {
+            ModelPrimaryAction::None
+        } else if dl.phase == DownloadPhase::Failed {
+            ModelPrimaryAction::RetryDownload
+        } else if installed {
+            ModelPrimaryAction::Select
+        } else {
+            ModelPrimaryAction::Download
+        };
+        let enabled = !selected && !dl.is_in_progress();
+        ModelPresentation {
             id: id.into(),
             label: label.into(),
             verification_label: "Echolet Verified".into(),
             is_verified: true,
-            is_selected: false,
-            is_installed: false,
-            download: DownloadStatus::NotDownloading,
-            language: ModelLanguageView::default(),
+            selected,
+            installed,
+            download: dl,
+            primary_action,
+            enabled,
+            language: ModelLanguagePresentation::default(),
+        }
+    }
+
+    fn make_view_with_models(models: Vec<ModelPresentation>) -> PlatformView {
+        PlatformView {
+            runtime_state: RuntimeState::Ready,
+            model_groups: vec![ModelGroupPresentation {
+                id: "default-group".into(),
+                label: "Default".into(),
+                models,
+            }],
+            preload_on_startup: false,
+            idle_unload_minutes: Some(10),
+            history_enabled: false,
         }
     }
 
@@ -645,10 +677,14 @@ mod tests {
 
     #[test]
     fn uninstalled_model_is_actionable_download_and_does_not_select() {
-        let mut view = PlatformView::default();
-        let mut m = sample_model("m1", "Model One");
-        m.download = DownloadStatus::NotDownloading;
-        view.models.push(m);
+        let m = sample_model(
+            "m1",
+            "Model One",
+            false,
+            false,
+            DownloadStatus::NotDownloading,
+        );
+        let view = make_view_with_models(vec![m]);
         let (mut tray, rx) = make_tray(view);
         let items = tray.menu();
         let item = find_item(&items, |l| {
@@ -665,10 +701,14 @@ mod tests {
 
     #[test]
     fn installed_model_row_selects_not_downloads() {
-        let mut view = PlatformView::default();
-        let mut m = sample_model("m1", "Model One");
-        m.is_installed = true;
-        view.models.push(m);
+        let m = sample_model(
+            "m1",
+            "Model One",
+            true,
+            false,
+            DownloadStatus::NotDownloading,
+        );
+        let view = make_view_with_models(vec![m]);
         let (mut tray, rx) = make_tray(view);
         let items = tray.menu();
         let item = find_item(&items, |l| l.contains("Installed")).expect("installed row");
@@ -682,17 +722,24 @@ mod tests {
 
     #[test]
     fn selected_and_downloading_rows_are_disabled() {
-        let mut view = PlatformView::default();
-        let mut selected = sample_model("m1", "Selected Model");
-        selected.is_selected = true;
-        selected.is_installed = true;
-        let mut downloading = sample_model("m2", "Downloading Model");
-        downloading.download = DownloadStatus::Downloading {
-            downloaded_bytes: 50,
-            total_bytes: Some(100),
-        };
-        view.models.push(selected);
-        view.models.push(downloading);
+        let selected = sample_model(
+            "m1",
+            "Selected Model",
+            true,
+            true,
+            DownloadStatus::NotDownloading,
+        );
+        let downloading = sample_model(
+            "m2",
+            "Downloading Model",
+            false,
+            false,
+            DownloadStatus::Downloading {
+                downloaded_bytes: 50,
+                total_bytes: Some(100),
+            },
+        );
+        let view = make_view_with_models(vec![selected, downloading]);
         let (tray, _rx) = make_tray(view);
         let items = tray.menu();
         let mut labels = Vec::new();
@@ -807,13 +854,12 @@ mod tests {
             .expect("registry parses");
         let view = initial_platform_view(&registry);
         assert_eq!(view.runtime_state, RuntimeState::NoModel);
-        assert!(view.models.iter().all(|m| !m.is_installed));
-        assert!(view.models.iter().all(|m| !m.is_selected));
+        assert!(view.all_models().all(|m| !m.installed));
+        assert!(view.all_models().all(|m| !m.selected));
         assert!(view.selected_model().is_none());
         assert!(view
-            .models
-            .iter()
-            .all(|m| m.download == DownloadStatus::NotDownloading));
+            .all_models()
+            .all(|m| m.download.phase == DownloadPhase::NotDownloading));
     }
 
     #[test]

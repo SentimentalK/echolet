@@ -30,6 +30,7 @@ pub enum AppAction {
     SetPreloadModelOnStartup(bool),
     /// `None` means "Never"; `Some(0)` means "Immediate".
     SetModelIdleUnloadMinutes(Option<u32>),
+    SetHistoryEnabled(bool),
     ToggleHistory,
     OpenHistoryFolder,
 }
