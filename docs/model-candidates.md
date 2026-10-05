@@ -24,7 +24,7 @@ against the current `Echolet Verified` X-ASR zh/en 480 ms baseline.
 
 | Decision | Pack | Why |
 | --- | --- | --- |
-| **J10 (recommended, 1 pack)** | NVIDIA **Nemotron 3.5 ASR Streaming 0.6B / 560 ms / int8** (`sherpa-onnx-nemotron-3.5-asr-streaming-0.6b-560ms-int8-2026-06-11`) | One 0.6B pack adds up to **40 language-locales** (32 transcription-ready out of the box incl. zh, ja, ko, es, fr, de, pt, ru, ar, hi, vi, uk), runs natively in the existing sherpa-onnx streaming path, is smaller than the current baseline archive, stays >1.8x realtime on a laptop CPU, and emits punctuation/capitalization. |
+| **J10 (recommended, 1 pack)** | NVIDIA **Nemotron 3.5 ASR Streaming 0.6B / 560 ms / int8** (`sherpa-onnx-nemotron-3.5-asr-streaming-0.6b-560ms-int8-2026-06-11`) | One 0.6B pack covers **40 language-locales** in three upstream tiers: **19 transcription-ready + 13 broad-coverage = 32 out-of-box ASR locales**, plus **8 adaptation-ready** locales that require fine-tuning and are **not product-ready**. It runs natively in the existing sherpa-onnx streaming path, is smaller than the current baseline archive, stays >1.8x realtime on a laptop CPU, and emits punctuation/capitalization. It is **not** a drop-in zh upgrade: Mandarin `zh-CN` is broad-coverage, not transcription-ready. |
 | **Keep baseline** | X-ASR zh/en 480 ms | Nothing measured clearly beats it for zh+en: it is faster (RTF 0.19 vs 0.51-0.62), smaller installed, and remains the default. Default answer to "replace X-ASR" is **NO**. |
 | **Watch (no J10)** | Chinese Zipformer XLarge int8; Korean / Vietnamese / Bengali Zipformer; streaming Paraformer trilingual zh/yue/en | Useful language coverage, but superseded by Nemotron 3.5 for most, or too large (Paraformer ~1 GB), or niche. Revisit only if a specific language gap is demand-driven. |
 | **Reject** | Omnilingual-ASR 1600-lang CTC, Qwen3-ASR 0.6B, Parakeet TDT 0.6B v3, Moonshine, Dolphin, NeMo FastConformer 10-lang, FunASR nano | No true cache-aware streaming / incremental decode path; they are offline or "simulated streaming" and violate Echolet's mandatory low-latency local dictation. |
@@ -56,7 +56,7 @@ Each candidate was filtered by:
 | --- | --- |
 | True streaming / practical incremental decode | Rejected all offline/CTC/LLM/encoder-decoder batch models (Omnilingual, Qwen3-ASR, Parakeet TDT, Moonshine, Dolphin, FastConformer 10-lang, FunASR nano). |
 | Fits current local CPU runtime without a new inference stack | Passing candidates all load through the existing `OnlineRecognizer` (NeMo transducer or Zipformer2 transducer). |
-| Redistribution license | OpenMDW-1.1 (Nemotron 3.5), NVIDIA Open Model License (Nemotron en), Apache-2.0 (icefall/k2-fsa Zipformer, FunASR Paraformer), Apache-2.0 (Vosk). No non-redistributable finalist. |
+| Redistribution license | OpenMDW-1.1 (Nemotron 3.5; redistribution permitted with license-copy + origin/copyright-notice obligations — see section 7.1), NVIDIA Open Model License (Nemotron en), Apache-2.0 (icefall/k2-fsa Zipformer, FunASR Paraformer), Apache-2.0 (Vosk). No non-redistributable finalist. |
 | Immutable/reproducible upstream revision | Finalists pinned by release URL + SHA256 in `models/candidates.lock.json`; NVIDIA weights by HF model card; sherpa export by release tag/PR. |
 | Architecture requiring large rewrite | None for finalists; multilingual prompt conditioning is the only new (small) integration need. |
 | Quality evidence | Upstream WER reported for Nemotron (see section 5); local smoke used only for sanity. |
@@ -71,7 +71,7 @@ Fields marked `-` were not authoritatively published and were not needed to deci
 
 | Candidate | Upstream (revision/date) | Langs | Streaming arch / chunk | License | Runtime path | State |
 | --- | --- | --- | --- | --- | --- | --- |
-| **Nemotron 3.5 ASR Streaming 0.6B int8** `...-560ms-int8-2026-06-11` | `nvidia/nemotron-3.5-asr-streaming-0.6b`; export k2-fsa PR #3671 merge `b74c4df`; pkg 2026-06-11 | 40 locales (32 out-of-the-box; zh, ja, ko, es, fr, de, pt, ru, ar, hi, vi, uk + others) | Cache-aware FastConformer-RNNT, `prompt_index` language conditioning; 80/160/560/1120 ms | OpenMDW-1.1 | Native sherpa-onnx NeMo transducer; per-stream `language` option | **J10 candidate** |
+| **Nemotron 3.5 ASR Streaming 0.6B int8** `...-560ms-int8-2026-06-11` | `nvidia/nemotron-3.5-asr-streaming-0.6b`; export k2-fsa PR #3671 merge `b74c4df`; pkg 2026-06-11 | 40 locales = **19 transcription-ready + 13 broad-coverage** (= 32 out-of-box ASR) **+ 8 adaptation-ready**; `zh-CN` is broad-coverage, `ja-JP`/`ko-KR` are transcription-ready | Cache-aware FastConformer-RNNT, `prompt_index` language conditioning; 80/160/560/1120 ms | OpenMDW-1.1 | Native sherpa-onnx NeMo transducer; per-stream `language` option | **J10 candidate** |
 | Nemotron Speech Streaming en 0.6B int8 `...-560ms-int8-2026-04-25` | `nvidia/nemotron-speech-streaming-en-0.6b` | en | Cache-aware FastConformer-RNNT; 80/160/560/1120 ms | NVIDIA Open Model License | Native sherpa-onnx NeMo transducer | Benchmark (en reference) |
 | Zipformer zh XLarge int8 `...-zh-xlarge-int8-2025-06-30` | `yuekai/icefall-asr-multi-zh-hans-zipformer-xl` | zh | Streaming Zipformer transducer | Apache-2.0 (icefall/k2-fsa) | Native sherpa-onnx Zipformer2 | Benchmark / Watch |
 | Zipformer zh (large) int8 `...-zh-int8-2025-06-30` | `yuekai/icefall-asr-multi-zh-hans-zipformer-large` | zh | Streaming Zipformer transducer | Apache-2.0 | Native Zipformer2 | Watch |
@@ -136,8 +136,15 @@ From the NVIDIA Nemo model cards, clearly attributed and **not** reproduced here
 
 - **Nemotron 3.5 ASR Streaming 0.6B** (FLEURS test, 1.12 s frame size, LangID):
   English 7.91, Spanish 4.11, French 9.03, Italian 4.25, Portuguese 5.48,
-  German 8.31, Hindi 6.81, Korean 7.12 WER. 40 language-locales total; 32
-  transcription-ready / 13 broad-coverage / 8 adaptation-ready (fine-tune).
+  German 8.31, Hindi 6.81, Korean 7.12 WER. **40 language-locales total**, in
+  three upstream tiers: **19 transcription-ready**, **13 broad-coverage**, and
+  **8 adaptation-ready** (tokenizer-supported; require fine-tuning). Only the
+  19 transcription-ready locales are the highest-accuracy tier; the 13
+  broad-coverage locales also produce ASR out of the box but at clearly lower /
+  less-established quality (upstream FLEURS average ~22% error vs ~9% for
+  transcription-ready); the 8 adaptation-ready locales do **not** transcribe out
+  of the box. Transcription-ready + broad-coverage = **32 out-of-box ASR
+  locales**. See section 5.1 for the authoritative tier membership.
 - **Nemotron Speech Streaming en 0.6B** (1.12 s frame size): AMI IHM 11.73,
   Earnings22 12.52, GigaSpeech 9.66 WER.
 - X-ASR has no upstream WER published in this repo; J8 validated identity and a
@@ -148,6 +155,51 @@ FLEURS for major languages) is credible for dictation but is measured at the
 1.12 s operating point, whereas Echolet would ship the 560 ms chunk size; expect
 some quality regression at the lower latency and require a J10 acceptance WER
 before promotion.
+
+### 5.1 Corrected language-coverage tiers (authoritative)
+
+The upstream NVIDIA model card partitions the **40 language-locales** into three
+tiers. This is the corrected, authoritative view; it replaces the earlier
+erroneous "32 transcription-ready" wording (32 is the **out-of-box ASR** total,
+i.e. transcription-ready + broad-coverage, not a single tier).
+
+| Tier | Count | Meaning |
+| --- | ---: | --- |
+| **Transcription-ready** | **19** | Highest-accuracy ASR, ready out of the box. |
+| **Broad-coverage** | **13** | Also produce ASR out of the box, but lower / less-established quality; **not** the top tier. |
+| **Adaptation-ready** | **8** | Tokenizer-supported only; require fine-tuning before full transcription. **Not product-ready.** |
+| **Total locales** | **40** | |
+| *Out-of-box ASR (transcription-ready + broad-coverage)* | *32* | |
+
+**Transcription-ready (19 locales):** English `en-US`, `en-GB`; Spanish `es-US`,
+`es-ES`; French `fr-FR`, `fr-CA`; Italian `it-IT`; Portuguese `pt-BR`, `pt-PT`;
+Dutch `nl-NL`; German `de-DE`; Turkish `tr-TR`; Russian `ru-RU`; Arabic `ar-AR`;
+Hindi `hi-IN`; **Japanese `ja-JP`**; Korean `ko-KR`; Vietnamese `vi-VN`;
+Ukrainian `uk-UA`.
+
+**Broad-coverage (13 locales):** Polish `pl-PL`; Swedish `sv-SE`; Czech `cs-CZ`;
+Norwegian Bokmål `nb-NO`; Danish `da-DK`; Bulgarian `bg-BG`; Finnish `fi-FI`;
+Croatian `hr-HR`; Slovak `sk-SK`; **Mandarin `zh-CN`**; Hungarian `hu-HU`;
+Romanian `ro-RO`; Estonian `et-EE`.
+
+**Adaptation-ready (8 locales):** Greek `el-GR`; Lithuanian `lt-LT`; Latvian
+`lv-LV`; Maltese `mt-MT`; Slovenian `sl-SI`; Hebrew `he-IL`; Thai `th-TH`;
+Norwegian Nynorsk `nn-NO`.
+
+Consequences that must not be lost:
+
+- **Mandarin `zh-CN` is broad-coverage, not transcription-ready.** A single
+  Nemotron 3.5 pack must not be described as a top-tier zh upgrade to X-ASR.
+- **Japanese `ja-JP` remains transcription-ready** (highest-accuracy tier).
+- **Broad-coverage quality must not be overstated.** Upstream FLEURS averages are
+  roughly ~22% error for the 13 broad-coverage locales versus ~9% for the 19
+  transcription-ready locales; broad-coverage locales are usable out of the box
+  but are a lower-confidence tier.
+- **Adaptation-ready locales are not normal supported languages.** They require a
+  separately fine-tuned / frozen model and must never be advertised as
+  product-supported without one.
+- **32 is only ever the out-of-box ASR count (19 + 13), never "32
+  transcription-ready."**
 
 ---
 
@@ -178,15 +230,21 @@ before promotion.
 
 1. **Move exactly one pack to J10:** Nemotron 3.5 ASR Streaming 0.6B, 560 ms, int8.
    It is the only candidate that simultaneously (a) truly streams, (b) runs on the
-   existing runtime, (c) expands one pack to 32 usable locales, (d) is no larger
-   than the current baseline, and (e) is permissively licensed (OpenMDW-1.1).
-2. **Expose per-stream language selection in J10.** Without it, auto-detect is
-   usable for zh/es/vi but demonstrably wrong for Japanese. Add a small FFI
-   declaration + `OnlineStream` method + registry/manifest language metadata, and a
-   user-facing language control (Auto + explicit codes).
+   existing runtime, (c) expands one pack to **32 out-of-box ASR locales across 19
+   transcription-ready + 13 broad-coverage**, plus **8 adaptation-ready** locales
+   that are *not* product-ready without fine-tuning, (d) is no larger than the
+   current baseline, and (e) is licensed under OpenMDW-1.1 with the standard
+   redistribution obligations recorded in section 7.1.
+2. **Expose per-stream language selection in J10 (core only).** Without it,
+   auto-detect is usable for zh/es/vi but demonstrably wrong for Japanese. J10 adds
+   a small FFI declaration + `OnlineStream` method + registry/manifest language
+   metadata, and must verify forced-language Japanese. J10 must **not** add Desktop
+   UI; any user-facing language control remains J11-J13 scope.
 3. **Do not replace X-ASR.** It remains the default: fastest measured RTF (0.19),
    smallest installed footprint, and already `Echolet Verified`. Nemotron 3.5 is an
-   additive multilingual pack, not a zh/en upgrade.
+   additive multilingual pack, not a zh/en upgrade. In particular, because
+   Mandarin `zh-CN` is only broad-coverage, Nemotron 3.5 must not be positioned as
+   a top-tier zh replacement.
 4. **No English-only pack in J10.** Nemotron en is slower than X-ASR and adds no
    language coverage; only reconsider if a measurable English-quality gap appears.
 5. **Watch, don't ship:** Korean / Vietnamese / Bengali Zipformer packs and
@@ -195,6 +253,32 @@ before promotion.
 6. **Reject offline models for dictation.** Omnilingual-ASR (1600 languages) is
    attractive for coverage but has no incremental decode; keep it as a possible
    future background/batch feature, not streaming dictation.
+
+### 7.1 OpenMDW-1.1 redistribution obligations (for J10 packaging)
+
+Nemotron 3.5 is distributed under **OpenMDW-1.1**. Redistribution **is
+permitted** (including commercial and derivative distribution); the concrete
+obligations that J10 must satisfy when it freezes an Echolet-owned pack are taken
+verbatim from the primary license text:
+
+- **License copy:** if you distribute any portion of the Model Materials, you
+  **shall retain in your distribution a copy of the OpenMDW-1.1 agreement.**
+- **Notices:** you shall retain **all copyright notices and other notices of
+  origin** included in the Model Materials that are applicable to your
+  distribution.
+- **Outputs are unrestricted** — OpenMDW-1.1 imposes no obligations on use,
+  modification, or sharing of outputs generated by the model.
+- **Patent/copyright termination:** rights terminate if you file, maintain, or
+  voluntarily participate in a lawsuit asserting that the Model Materials
+  infringe a patent or copyright (unless in response to a suit first brought
+  against you).
+- **Warranty/rights:** the Model Materials are provided "AS IS"; you are solely
+  responsible for clearing third-party rights and obtaining any necessary
+  consents.
+
+**J10 action:** the frozen artifact must ship the OpenMDW-1.1 text and preserve
+the applicable upstream copyright/origin notices. No additional restrictions
+should be invented beyond the license text.
 
 ---
 
@@ -240,8 +324,11 @@ was turned into product behavior.
 - Nemotron streaming docs: https://k2-fsa.github.io/sherpa/onnx/nemo/nemotron-streaming.html
 - Multilingual Nemotron support PR #3671 (merge `b74c4df`, 2026-06-12):
   https://github.com/k2-fsa/sherpa-onnx/pull/3671
-- NVIDIA `nvidia/nemotron-3.5-asr-streaming-0.6b` (OpenMDW-1.1, release 06/04/2026):
-  https://huggingface.co/nvidia/nemotron-3.5-asr-streaming-0.6b
+- NVIDIA `nvidia/nemotron-3.5-asr-streaming-0.6b` model card (OpenMDW-1.1, release
+  06/04/2026; "Supported Languages" 19/13/8 tiers and the "32 total out-of-box"
+  note): https://huggingface.co/nvidia/nemotron-3.5-asr-streaming-0.6b
+- NVIDIA fine-tuning blog referenced by the model card (adaptation-ready tiers):
+  https://huggingface.co/blog/nvidia/fine-tuning-nemotron-35-asr
 - NVIDIA `nvidia/nemotron-speech-streaming-en-0.6b`:
   https://huggingface.co/nvidia/nemotron-speech-streaming-en-0.6b
 - Zipformer zh XLarge (icefall `multi_zh-hans`): https://huggingface.co/yuekai/icefall-asr-multi-zh-hans-zipformer-xl
@@ -254,12 +341,18 @@ was turned into product behavior.
 ## 10. Blockers / unknowns
 
 - **Per-stream language API** is the only real J10 code change (section 1/7);
-  multilingual quality for langs other than en/zh/es/vi is upstream-reported, not
-  locally reproduced.
+  multilingual quality for locales other than the locally smoke-tested zh/es/vi is
+  upstream-reported, not locally reproduced.
+- **Language taxonomy is tiered, not flat** (section 5.1): 19 transcription-ready
+  + 13 broad-coverage + 8 adaptation-ready = 40 locales; only 32 are out-of-box ASR.
+  Broad-coverage (incl. Mandarin `zh-CN`) is lower-confidence, and adaptation-ready
+  locales are not product-ready without fine-tuning.
 - **License diligence:** Zipformer/Vosk/Paraformer are Apache-2.0 via icefall /
   k2-fsa / FunASR; the exact HF model-card license text for
   `yuekai/icefall-asr-multi-zh-hans-zipformer-xl` does not restate it, so J10 must
-  confirm the upstream license file before any frozen redistribution.
+  confirm the upstream license file before any frozen redistribution. For
+  Nemotron 3.5 (OpenMDW-1.1), J10 must carry the license copy and applicable
+  origin/copyright notices (section 7.1).
 - **560 ms vs 1.12 s quality:** upstream WER is reported at 1.12 s; the shipped
   560 ms operating point needs a J10 acceptance WER on an in-domain set.
 - **Benchmark dialect:** single-machine, single-thread, greedy search only; no
@@ -267,3 +360,32 @@ was turned into product behavior.
   environment-specific.
 - No J10 code, no registry edit, no `Echolet Verified` promotion, and no model
   artifacts were produced by J9.
+
+---
+
+## 11. J10 handoff (explicit)
+
+- **J10 candidate:** NVIDIA **Nemotron 3.5 ASR Streaming 0.6B / 560 ms / int8**
+  (`sherpa-onnx-nemotron-3.5-asr-streaming-0.6b-560ms-int8-2026-06-11`),
+  pinned in `models/candidates.lock.json`.
+- **Current X-ASR is NOT replaced.** The X-ASR zh/en 480 ms pack stays the default
+  and remains `Echolet Verified`; `models/registry.json` is unchanged by J9 and
+  must not be repointed by this rework.
+- **J10 must add core per-stream language option support** and **verify
+  forced-language Japanese (`language=ja`)**, since auto-detect mispredicted
+  Japanese in the J9 smoke test.
+- **J10 must NOT advertise the 8 adaptation-ready locales** (`el-GR`, `lt-LT`,
+  `lv-LV`, `mt-MT`, `sl-SI`, `he-IL`, `th-TH`, `nn-NO`) as normal supported
+  languages. Broad-coverage locales (`pl-PL`, `sv-SE`, `cs-CZ`, `nb-NO`, `da-DK`,
+  `bg-BG`, `fi-FI`, `hr-HR`, `sk-SK`, **`zh-CN`**, `hu-HU`, `ro-RO`, `et-EE`)
+  may be offered as out-of-box capabilities but must remain distinguishable from
+  transcription-ready in product metadata so quality/confidence can be surfaced.
+- **J10 frozen artifact must include the required OpenMDW-1.1 license copy and
+  applicable origin/copyright notices** (section 7.1).
+- **No UI scope in J10 beyond minimal core metadata/API.** Desktop UI work remains
+  J11-J13.
+- **Re-evaluation outcome:** after correcting the tier semantics, the
+  recommendation is unchanged — Nemotron 3.5 remains the single strongest J10
+  candidate. Its accurate value proposition is: *32 out-of-box ASR locales across
+  19 transcription-ready + 13 broad-coverage, plus 8 adaptation-ready that are not
+  product-ready without fine-tuning.*

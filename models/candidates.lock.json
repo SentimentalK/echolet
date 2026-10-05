@@ -40,18 +40,57 @@
       "export_revision": "PR #3671 merge b74c4dfee9b446c00eb88cf1364d61e26ee9b531 (2026-06-12); package built 2026-06-11",
       "release_date": "2026-06-11",
       "languages": [
-        "en", "es", "fr", "it", "pt", "nl", "de", "tr", "ru", "ar", "hi",
-        "ja", "ko", "vi", "uk", "pl", "sv", "cs", "nb", "da", "bg", "fi",
-        "hr", "sk", "zh", "hu", "ro", "et", "el", "lt", "lv", "mt", "sl",
-        "he", "th", "nn"
+        "en-US", "en-GB", "es-US", "es-ES", "fr-FR", "fr-CA", "it-IT",
+        "pt-BR", "pt-PT", "nl-NL", "de-DE", "tr-TR", "ru-RU", "ar-AR",
+        "hi-IN", "ja-JP", "ko-KR", "vi-VN", "uk-UA",
+        "pl-PL", "sv-SE", "cs-CZ", "nb-NO", "da-DK", "bg-BG", "fi-FI",
+        "hr-HR", "sk-SK", "zh-CN", "hu-HU", "ro-RO", "et-EE"
       ],
+      "language_tiers": {
+        "note": "NON-PRODUCT research metadata. Upstream NVIDIA taxonomy of 40 language-locales in three tiers. This is the authoritative reference for J10; do not consume `languages` as a flat advertised capability set. Locale distinctions (e.g. en-US/en-GB) are preserved where upstream distinguishes them.",
+        "transcription_ready": {
+          "count": 19,
+          "description": "Highest-accuracy ASR, ready out of the box. This is the only top-tier set.",
+          "locales": [
+            "en-US", "en-GB", "es-US", "es-ES", "fr-FR", "fr-CA", "it-IT",
+            "pt-BR", "pt-PT", "nl-NL", "de-DE", "tr-TR", "ru-RU", "ar-AR",
+            "hi-IN", "ja-JP", "ko-KR", "vi-VN", "uk-UA"
+          ]
+        },
+        "broad_coverage": {
+          "count": 13,
+          "description": "Also produce ASR out of the box, but at lower / less-established quality than transcription-ready. Mandarin zh-CN is broad-coverage, NOT transcription-ready. Do not advertise these as top-tier.",
+          "locales": [
+            "pl-PL", "sv-SE", "cs-CZ", "nb-NO", "da-DK", "bg-BG", "fi-FI",
+            "hr-HR", "sk-SK", "zh-CN", "hu-HU", "ro-RO", "et-EE"
+          ]
+        },
+        "adaptation_ready": {
+          "count": 8,
+          "description": "Tokenizer-supported only; require fine-tuning on in-domain data before full transcription. NOT product-ready.",
+          "locales": [
+            "el-GR", "lt-LT", "lv-LV", "mt-MT", "sl-SI", "he-IL", "th-TH",
+            "nn-NO"
+          ]
+        }
+      },
+      "product_eligibility": {
+        "out_of_box_asr_locales": 32,
+        "out_of_box_definition": "transcription_ready (19) + broad_coverage (13) = 32 locales that produce ASR out of the box.",
+        "transcription_ready_locales": 19,
+        "broad_coverage_locales": 13,
+        "adaptation_ready_locales": 8,
+        "adaptation_ready_policy": "MUST NOT be treated as normal Echolet supported languages. Enabling any adaptation-ready locale requires a separately fine-tuned / frozen model with its own evaluation and license review.",
+        "broad_coverage_policy": "J10 may consider transcription_ready + broad_coverage as out-of-box capabilities, but broad_coverage must remain distinguishable in product metadata so UI/docs can communicate confidence/quality later. Do not blend broad_coverage into transcription_ready.",
+        "registry_note": "NON-PRODUCT research metadata. models/registry.json is intentionally unchanged by J9."
+      },
       "architecture": "cache-aware streaming FastConformer-RNNT (prompt_index language conditioning)",
       "chunk_ms": 560,
       "license": {
         "spdx": "OpenMDW-1.1",
         "name": "Open Model Development and Weights License 1.1",
         "url": "https://openmdw.ai/license/1-1/",
-        "redistribution": "Permissive OpenMDW-1.1; NVIDIA model card states no additional restrictions for redistribution of the model."
+        "redistribution": "Permitted, including commercial and derivative distribution. If any portion of the Model Materials is distributed, the distribution MUST retain (1) a copy of the OpenMDW-1.1 agreement and (2) all copyright notices and other notices of origin included in the Model Materials that are applicable to the distribution. Rights terminate if you file/maintain/participate in a patent-or-copyright-infringement suit against the Model Materials. No restriction is imposed on use/modification/sharing of model outputs. J10 must preserve the required license copy and origin/copyright notices inside any Echolet-owned frozen pack."
       },
       "runtime_support": "native sherpa-onnx online transducer (NeMo). Per-stream language via SherpaOnnxOnlineStreamSetOption(stream, \"language\", \"<code>\"); empty/omitted = auto-detect.",
       "source": {
