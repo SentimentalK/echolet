@@ -21,9 +21,18 @@ static STAGING_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// Platform-neutral progress contract for a model download/install.
 ///
 /// This is intentionally small so it can be projected onto a future Desktop /
-/// Mobile UI without pulling UI dependencies into the core crate. Bytes are
-/// reported monotonically; `total_bytes` is `None` when the server did not
-/// advertise a `Content-Length`.
+/// Mobile UI without pulling UI dependencies into the core crate.
+///
+/// Byte progress is **globally monotonic across retries**:
+/// `downloaded_bytes` is the cumulative number of bytes transferred for this
+/// install, including bytes transferred by attempts that later failed. After a
+/// partial transfer is retried it therefore continues from the previous value
+/// instead of resetting to zero, and it may exceed `total_bytes` if one or more
+/// retries occurred. `total_bytes` is the expected final object size (the
+/// server's advertised `Content-Length`), or `None` when the server did not
+/// advertise one; UI code should treat it as a target rather than a hard cap.
+/// Consumers can divide `downloaded_bytes` by `total_bytes` only under the
+/// assumption of no retries.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InstallPhase {
     Starting,
@@ -178,8 +187,33 @@ pub fn download_and_install_model_with_progress(
     Ok(manifest)
 }
 
+/// Failure classification for a single download attempt.
+///
+/// Only [`DownloadError::Transient`] failures (HTTP transport / response-body
+/// read errors) are retried. Local filesystem failures are surfaced directly so
+/// that a broken disk, permissions problem, or full filesystem is not masked by
+/// two pointless network retries.
+enum DownloadError {
+    /// Network/transport or response-body read failure; safe to retry.
+    Transient(String),
+    /// Local filesystem failure (create/write/flush); not retryable.
+    Local(String),
+}
+
+impl std::fmt::Display for DownloadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DownloadError::Transient(msg) | DownloadError::Local(msg) => f.write_str(msg),
+        }
+    }
+}
+
 /// Runs the download loop with a bounded retry policy. Only transient failures
 /// (connection/transport errors and retryable HTTP statuses) are retried.
+///
+/// Byte progress is cumulative across attempts so the public
+/// [`InstallPhase::Downloading`] contract stays monotonic even when an attempt
+/// fails after emitting progress and is retried.
 fn download_with_retry(
     source_url: &str,
     archive_path: &Path,
@@ -190,6 +224,9 @@ fn download_with_retry(
         .build();
 
     let mut attempt: u32 = 0;
+    // Cumulative bytes transferred across every attempt. Handed to
+    // `stream_response_to_file` so a retry cannot regress reported progress.
+    let mut cumulative_downloaded: u64 = 0;
     loop {
         attempt += 1;
         match agent.get(source_url).call() {
@@ -201,17 +238,20 @@ fn download_with_retry(
                     response.into_reader(),
                     archive_path,
                     total_bytes,
+                    &mut cumulative_downloaded,
                     progress,
                 ) {
                     Ok(()) => return Ok(()),
-                    Err(err) if attempt < MAX_DOWNLOAD_ATTEMPTS => {
+                    // Local disk errors must not be retried as if they were network errors.
+                    Err(DownloadError::Local(err)) => return Err(err),
+                    Err(DownloadError::Transient(err)) if attempt < MAX_DOWNLOAD_ATTEMPTS => {
                         eprintln!(
                             "[Model] Download attempt {} failed ({}); retrying...",
                             attempt, err
                         );
                         backoff(attempt);
                     }
-                    Err(err) => return Err(err),
+                    Err(DownloadError::Transient(err)) => return Err(err),
                 }
             }
             Err(err) => {
@@ -230,49 +270,63 @@ fn download_with_retry(
     }
 }
 
+/// Streams one HTTP response body into `archive_path`.
+///
+/// `cumulative_downloaded` is owned by the retry loop and carried across
+/// attempts; this function adds the bytes it transfers to it and emits
+/// `Downloading` events from the cumulative total, so a retried partial
+/// transfer never reports a smaller byte count. Each attempt truncates and
+/// rewrites `archive_path` from scratch, but the progress counter is not reset.
 fn stream_response_to_file(
     mut reader: Box<dyn Read + Send + Sync + 'static>,
     archive_path: &Path,
     total_bytes: Option<u64>,
+    cumulative_downloaded: &mut u64,
     progress: &mut Option<ProgressCallback<'_>>,
-) -> Result<(), String> {
-    let mut file = File::create(archive_path)
-        .map_err(|e| format!("Failed to create archive file {:?}: {}", archive_path, e))?;
+) -> Result<(), DownloadError> {
+    let mut file = File::create(archive_path).map_err(|e| {
+        DownloadError::Local(format!(
+            "Failed to create archive file {:?}: {}",
+            archive_path, e
+        ))
+    })?;
 
     let mut hasher = Sha256::new();
     let mut buffer = [0u8; 64 * 1024];
-    let mut downloaded: u64 = 0;
-    let mut last_emitted: u64 = 0;
+    // Emit every PROGRESS_BYTE_STEP of *cumulative* progress. Seeding from the
+    // current cumulative value means a retry does not immediately re-emit (or
+    // regress) the last event of the previous attempt.
+    let mut last_emitted: u64 = *cumulative_downloaded;
 
     loop {
         let bytes_read = reader
             .read(&mut buffer)
-            .map_err(|e| format!("Error reading HTTP stream: {}", e))?;
+            .map_err(|e| DownloadError::Transient(format!("Error reading HTTP stream: {}", e)))?;
         if bytes_read == 0 {
             break;
         }
         file.write_all(&buffer[..bytes_read])
-            .map_err(|e| format!("Error writing archive file: {}", e))?;
+            .map_err(|e| DownloadError::Local(format!("Error writing archive file: {}", e)))?;
         hasher.update(&buffer[..bytes_read]);
-        downloaded += bytes_read as u64;
-        if downloaded - last_emitted >= PROGRESS_BYTE_STEP {
-            last_emitted = downloaded;
+        *cumulative_downloaded += bytes_read as u64;
+        if *cumulative_downloaded - last_emitted >= PROGRESS_BYTE_STEP {
+            last_emitted = *cumulative_downloaded;
             emit_progress(
                 progress,
                 InstallPhase::Downloading {
-                    downloaded_bytes: downloaded,
+                    downloaded_bytes: *cumulative_downloaded,
                     total_bytes,
                 },
             );
         }
     }
     file.flush()
-        .map_err(|e| format!("Failed to flush archive: {}", e))?;
+        .map_err(|e| DownloadError::Local(format!("Failed to flush archive: {}", e)))?;
 
     emit_progress(
         progress,
         InstallPhase::Downloading {
-            downloaded_bytes: downloaded,
+            downloaded_bytes: *cumulative_downloaded,
             total_bytes,
         },
     );
@@ -426,6 +480,30 @@ fn find_model_content_dir(base: &Path, entry: &RegistryModelEntry) -> Result<Pat
     ))
 }
 
+/// Filesystem operations used by the commit/swap step.
+///
+/// This is a deliberately tiny seam: production uses [`RealCommitFs`] while
+/// tests inject failures for the rename/copy stages without a heavyweight
+/// filesystem abstraction. Keeping it this small avoids leaking test-only
+/// concepts into the public API.
+trait CommitFs {
+    fn rename(&self, from: &Path, to: &Path) -> Result<(), String>;
+    fn copy_dir(&self, from: &Path, to: &Path) -> Result<(), String>;
+}
+
+/// Production [`CommitFs`] backed by the real filesystem.
+struct RealCommitFs;
+
+impl CommitFs for RealCommitFs {
+    fn rename(&self, from: &Path, to: &Path) -> Result<(), String> {
+        rename_dir(from, to)
+    }
+
+    fn copy_dir(&self, from: &Path, to: &Path) -> Result<(), String> {
+        copy_dir_all(from, to)
+    }
+}
+
 /// Commits validated `content_dir` to `target_dir` with a safe swap:
 /// the previous model is moved aside first, the new model is renamed into
 /// place, and the previous model is restored if the rename fails.
@@ -433,6 +511,25 @@ fn commit_install(
     content_dir: &Path,
     target_dir: &Path,
     staging_root: &Path,
+) -> Result<(), String> {
+    commit_install_with(content_dir, target_dir, staging_root, &RealCommitFs)
+}
+
+/// Testable implementation of [`commit_install`] with injectable filesystem
+/// operations.
+///
+/// Failure-safety contract:
+/// * if the new commit fails and the old target can be restored, the returned
+///   error reports the install failure and the old model is back in place;
+/// * if the restore itself also fails, the returned error is an explicit
+///   high-severity error reporting **both** failures, naming the backup path,
+///   and the backup directory is left on disk for manual recovery (it is never
+///   deleted on restore failure).
+fn commit_install_with(
+    content_dir: &Path,
+    target_dir: &Path,
+    staging_root: &Path,
+    fs_ops: &dyn CommitFs,
 ) -> Result<(), String> {
     let parent = target_dir
         .parent()
@@ -449,7 +546,7 @@ fn commit_install(
     if target_dir.exists() {
         let backup_dir = parent.join(format!(".echolet-old-{}", nonce));
         let _ = fs::remove_dir_all(&backup_dir);
-        fs::rename(target_dir, &backup_dir).map_err(|e| {
+        fs_ops.rename(target_dir, &backup_dir).map_err(|e| {
             format!(
                 "Failed to move existing model {:?} aside: {}",
                 target_dir, e
@@ -458,39 +555,55 @@ fn commit_install(
         backup = Some(backup_dir);
     }
 
-    match rename_dir(content_dir, target_dir) {
+    // Fast path: same-filesystem rename of the fully staged, validated content.
+    let commit_result = match fs_ops.rename(content_dir, target_dir) {
+        Ok(()) => Ok(()),
+        Err(rename_err) => {
+            // Cross-device fallback: copy into a temporary sibling, then rename.
+            let temp_commit = parent.join(format!(".echolet-commit-{}", nonce));
+            let _ = fs::remove_dir_all(&temp_commit);
+            match fs_ops
+                .copy_dir(content_dir, &temp_commit)
+                .and_then(|_| fs_ops.rename(&temp_commit, target_dir))
+            {
+                Ok(()) => Ok(()),
+                Err(copy_err) => {
+                    let _ = fs::remove_dir_all(&temp_commit);
+                    Err(format!(
+                        "rename error: {}; copy error: {}",
+                        rename_err, copy_err
+                    ))
+                }
+            }
+        }
+    };
+
+    match commit_result {
         Ok(()) => {
+            // Replacement succeeded: the old model is no longer needed.
             if let Some(backup_dir) = backup {
                 let _ = fs::remove_dir_all(backup_dir);
             }
             Ok(())
         }
-        Err(rename_err) => {
-            // Cross-device fallback: copy into a temporary sibling, then rename.
-            let temp_commit = parent.join(format!(".echolet-commit-{}", nonce));
-            let _ = fs::remove_dir_all(&temp_commit);
-            let copy_result = copy_dir_all(content_dir, &temp_commit).and_then(|_| {
-                fs::rename(&temp_commit, target_dir)
-                    .map_err(|e| format!("Failed to commit model to {:?}: {}", target_dir, e))
-            });
-
-            match copy_result {
-                Ok(()) => {
-                    if let Some(backup_dir) = backup {
-                        let _ = fs::remove_dir_all(backup_dir);
-                    }
-                    Ok(())
+        Err(commit_err) => {
+            // Commit failed after the old target was moved aside. Try to put it back.
+            if let Some(backup_dir) = backup {
+                match fs_ops.rename(&backup_dir, target_dir) {
+                    Ok(()) => Err(format!(
+                        "Failed to install model into {:?} ({}); previous model was restored",
+                        target_dir, commit_err
+                    )),
+                    Err(restore_err) => Err(format!(
+                        "CRITICAL: failed to install model into {:?} AND failed to restore the previous model from backup {:?}. Install error: {}. Restore error: {}. The previous model is preserved at the backup path for manual recovery.",
+                        target_dir, backup_dir, commit_err, restore_err
+                    )),
                 }
-                Err(copy_err) => {
-                    let _ = fs::remove_dir_all(&temp_commit);
-                    if let Some(backup_dir) = backup {
-                        let _ = fs::rename(&backup_dir, target_dir);
-                    }
-                    Err(format!(
-                        "Failed to install model into {:?} (rename error: {}; copy error: {})",
-                        target_dir, rename_err, copy_err
-                    ))
-                }
+            } else {
+                Err(format!(
+                    "Failed to install model into {:?} ({})",
+                    target_dir, commit_err
+                ))
             }
         }
     }
@@ -600,6 +713,283 @@ mod tests {
             builder.finish().unwrap();
         }
         tar_buf
+    }
+
+    use std::net::TcpListener;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::Arc;
+    use std::thread;
+
+    fn unique_tmp_dir(prefix: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("echolet-{}-{}", prefix, unique_nonce()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn write_file(path: &Path, contents: &[u8]) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(path, contents).unwrap();
+    }
+
+    fn has_prefix(dir: &Path, prefix: &str) -> bool {
+        match fs::read_dir(dir) {
+            Ok(entries) => entries.flatten().any(|e| {
+                e.file_name()
+                    .to_str()
+                    .map(|n| n.starts_with(prefix))
+                    .unwrap_or(false)
+            }),
+            Err(_) => false,
+        }
+    }
+
+    fn find_prefix(dir: &Path, prefix: &str) -> Option<PathBuf> {
+        fs::read_dir(dir).ok()?.flatten().find_map(|e| {
+            let name = e.file_name();
+            if name.to_str().map(|n| n.starts_with(prefix)) == Some(true) {
+                Some(e.path())
+            } else {
+                None
+            }
+        })
+    }
+
+    /// Injectable [`CommitFs`] for forcing failures in the commit/swap stages.
+    struct ControlledFs {
+        content_dir: PathBuf,
+        fail_commit_rename: bool,
+        fail_copy: bool,
+        fail_restore_rename: bool,
+    }
+
+    impl CommitFs for ControlledFs {
+        fn rename(&self, from: &Path, to: &Path) -> Result<(), String> {
+            if self.fail_commit_rename && from == self.content_dir {
+                return Err("simulated commit rename failure".to_string());
+            }
+            let is_backup = from
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n.starts_with(".echolet-old-"))
+                .unwrap_or(false);
+            if self.fail_restore_rename && is_backup {
+                return Err("simulated restore rename failure".to_string());
+            }
+            RealCommitFs.rename(from, to)
+        }
+
+        fn copy_dir(&self, from: &Path, to: &Path) -> Result<(), String> {
+            if self.fail_copy {
+                return Err("simulated copy failure".to_string());
+            }
+            RealCommitFs.copy_dir(from, to)
+        }
+    }
+
+    #[test]
+    fn commit_failure_restores_old_target_and_cleans_temp() {
+        let tmp = unique_tmp_dir("commit-restore");
+        let parent = tmp.join("models");
+        fs::create_dir_all(&parent).unwrap();
+        let target = parent.join("m");
+        let content = tmp.join("staged-content");
+        let staging = tmp.join(".echolet-staging-x");
+        write_file(&target.join("model.txt"), b"old");
+        write_file(&content.join("model.txt"), b"new");
+
+        let ops = ControlledFs {
+            content_dir: content.clone(),
+            fail_commit_rename: true,
+            fail_copy: true,
+            fail_restore_rename: false,
+        };
+        let err = commit_install_with(&content, &target, &staging, &ops).unwrap_err();
+        assert!(
+            err.contains("previous model was restored"),
+            "unexpected error: {}",
+            err
+        );
+        assert_eq!(fs::read(target.join("model.txt")).unwrap(), b"old");
+        assert!(
+            !has_prefix(&parent, ".echolet-old-"),
+            "backup must be consumed by a successful restore"
+        );
+        assert!(
+            !has_prefix(&parent, ".echolet-commit-"),
+            "temp commit dir must be cleaned"
+        );
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn restore_failure_is_reported_and_backup_preserved() {
+        let tmp = unique_tmp_dir("commit-restore-fail");
+        let parent = tmp.join("models");
+        fs::create_dir_all(&parent).unwrap();
+        let target = parent.join("m");
+        let content = tmp.join("staged-content");
+        let staging = tmp.join(".echolet-staging-x");
+        write_file(&target.join("model.txt"), b"old");
+        write_file(&content.join("model.txt"), b"new");
+
+        let ops = ControlledFs {
+            content_dir: content.clone(),
+            fail_commit_rename: true,
+            fail_copy: true,
+            fail_restore_rename: true,
+        };
+        let err = commit_install_with(&content, &target, &staging, &ops).unwrap_err();
+        assert!(err.contains("CRITICAL"), "unexpected error: {}", err);
+        assert!(
+            err.contains("restore") && err.contains("simulated restore rename failure"),
+            "restore failure must be surfaced: {}",
+            err
+        );
+        assert!(
+            !target.exists(),
+            "restore failed so the target must not be claimed as intact"
+        );
+        let backup = find_prefix(&parent, ".echolet-old-").expect("backup must be preserved");
+        assert_eq!(fs::read(backup.join("model.txt")).unwrap(), b"old");
+        assert!(
+            err.contains(backup.to_str().unwrap()),
+            "error must name the preserved backup path: {}",
+            err
+        );
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn successful_commit_cleans_backup_and_leaves_siblings_untouched() {
+        let tmp = unique_tmp_dir("commit-ok");
+        let parent = tmp.join("models");
+        fs::create_dir_all(&parent).unwrap();
+        let target = parent.join("m");
+        let content = tmp.join("staged-content");
+        let staging = tmp.join(".echolet-staging-x");
+        let sibling = parent.join("unrelated");
+        write_file(&target.join("model.txt"), b"old");
+        write_file(&content.join("model.txt"), b"new");
+        write_file(&sibling.join("keep.txt"), b"keep");
+
+        let ops = ControlledFs {
+            content_dir: content.clone(),
+            fail_commit_rename: false,
+            fail_copy: false,
+            fail_restore_rename: false,
+        };
+        commit_install_with(&content, &target, &staging, &ops).expect("commit must succeed");
+
+        assert_eq!(fs::read(target.join("model.txt")).unwrap(), b"new");
+        assert!(!has_prefix(&parent, ".echolet-old-"));
+        assert!(
+            !has_prefix(&parent, ".echolet-commit-"),
+            "temp commit dir must be cleaned"
+        );
+        assert_eq!(
+            fs::read(sibling.join("keep.txt")).unwrap(),
+            b"keep",
+            "unrelated sibling directory must not be touched"
+        );
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn local_file_creation_failure_is_classified_local() {
+        let archive = std::env::temp_dir().join(format!(
+            "echolet-missing-parent-{}/archive.download",
+            unique_nonce()
+        ));
+        let mut progress: Option<ProgressCallback<'_>> = None;
+        let reader: Box<dyn Read + Send + Sync + 'static> =
+            Box::new(std::io::Cursor::new(vec![1u8, 2, 3]));
+        let mut cumulative = 0u64;
+        let err =
+            stream_response_to_file(reader, &archive, Some(3), &mut cumulative, &mut progress)
+                .unwrap_err();
+        assert!(
+            matches!(err, DownloadError::Local(_)),
+            "filesystem error must be classified Local"
+        );
+    }
+
+    struct FailingReader;
+
+    impl Read for FailingReader {
+        fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::ConnectionReset,
+                "simulated reset",
+            ))
+        }
+    }
+
+    #[test]
+    fn stream_read_failure_is_classified_transient() {
+        let tmp = unique_tmp_dir("transient-classify");
+        let archive = tmp.join("archive.download");
+        let mut progress: Option<ProgressCallback<'_>> = None;
+        let reader: Box<dyn Read + Send + Sync + 'static> = Box::new(FailingReader);
+        let mut cumulative = 0u64;
+        let err = stream_response_to_file(reader, &archive, None, &mut cumulative, &mut progress)
+            .unwrap_err();
+        assert!(
+            matches!(err, DownloadError::Transient(_)),
+            "stream read error must stay retryable"
+        );
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// Minimal HTTP server used to prove local filesystem errors are not retried.
+    fn tiny_http_server(body: Vec<u8>) -> (String, Arc<AtomicUsize>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = Arc::new(AtomicUsize::new(0));
+        let hits_thread = hits.clone();
+        thread::spawn(move || {
+            for stream in listener.incoming() {
+                let mut stream = match stream {
+                    Ok(s) => s,
+                    Err(_) => continue,
+                };
+                hits_thread.fetch_add(1, Ordering::SeqCst);
+                let mut buf = [0u8; 2048];
+                let _ = stream.read(&mut buf);
+                let header = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(header.as_bytes());
+                let _ = stream.write_all(&body);
+                let _ = stream.flush();
+            }
+        });
+        (format!("http://{}/m.tar.zst", addr), hits)
+    }
+
+    #[test]
+    fn local_filesystem_errors_are_not_retried() {
+        let (url, hits) = tiny_http_server(vec![0u8; 8]);
+        // Parent directory does not exist, so `File::create` fails locally.
+        let bad_archive = std::env::temp_dir().join(format!(
+            "echolet-missing-{}/archive.download",
+            unique_nonce()
+        ));
+        let mut progress: Option<ProgressCallback<'_>> = None;
+        let err = download_with_retry(&url, &bad_archive, &mut progress).unwrap_err();
+        assert!(
+            err.contains("Failed to create archive file"),
+            "unexpected error: {}",
+            err
+        );
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            1,
+            "a local filesystem error must not be retried"
+        );
     }
 
     #[test]

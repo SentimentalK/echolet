@@ -20,10 +20,34 @@ struct TestServer {
     hits: Arc<AtomicUsize>,
 }
 
+/// A fully-controlled HTTP response: `declared_len` is written as
+/// `Content-Length` while `body` is what is actually sent. Setting
+/// `declared_len > body.len()` plus connection close simulates a truncated
+/// transfer that the client must observe as a read failure.
+struct RawResponse {
+    status: u16,
+    declared_len: usize,
+    body: Vec<u8>,
+}
+
 impl TestServer {
     fn start<F>(handler: F) -> Self
     where
         F: Fn(usize) -> (u16, Vec<u8>) + Send + 'static,
+    {
+        Self::start_raw(move |n| {
+            let (status, body) = handler(n);
+            RawResponse {
+                status,
+                declared_len: body.len(),
+                body,
+            }
+        })
+    }
+
+    fn start_raw<F>(handler: F) -> Self
+    where
+        F: Fn(usize) -> RawResponse + Send + 'static,
     {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind local test server");
         let addr = listener.local_addr().unwrap();
@@ -41,7 +65,11 @@ impl TestServer {
                 let mut buf = [0u8; 2048];
                 let _ = stream.read(&mut buf);
 
-                let (status, body) = handler(request_number);
+                let RawResponse {
+                    status,
+                    declared_len,
+                    body,
+                } = handler(request_number);
                 let reason = match status {
                     200 => "OK",
                     404 => "Not Found",
@@ -52,7 +80,7 @@ impl TestServer {
                     "HTTP/1.1 {} {}\r\nContent-Length: {}\r\nContent-Type: application/octet-stream\r\nConnection: close\r\n\r\n",
                     status,
                     reason,
-                    body.len()
+                    declared_len
                 );
                 let _ = stream.write_all(header.as_bytes());
                 let _ = stream.write_all(&body);
@@ -188,6 +216,26 @@ fn model_files(tag: &str, root: Option<&str>) -> Vec<(String, Vec<u8>)> {
             (path, format!("{}::{}", name, tag).into_bytes())
         })
         .collect()
+}
+
+/// Deterministic, effectively incompressible bytes so a zstd archive stays
+/// larger than the downloader's 256 KiB progress step.
+fn incompressible_bytes(len: usize) -> Vec<u8> {
+    let mut state: u32 = 0x1234_5678;
+    let mut out = Vec::with_capacity(len);
+    for _ in 0..len {
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        out.push((state & 0xFF) as u8);
+    }
+    out
+}
+
+fn model_files_with_padding(tag: &str, pad: usize) -> Vec<(String, Vec<u8>)> {
+    let mut files = model_files(tag, None);
+    files.push(("pad.bin".to_string(), incompressible_bytes(pad)));
+    files
 }
 
 fn build_tar_bytes(files: &[(String, Vec<u8>)]) -> Vec<u8> {
@@ -570,6 +618,86 @@ fn test_progress_phases_are_monotonic_and_ordered() {
             last = *downloaded_bytes;
         }
     }
+}
+
+#[test]
+fn test_partial_transfer_retry_keeps_progress_monotonic() {
+    // Archive must comfortably exceed one progress step (256 KiB) so the first
+    // attempt emits at least one Downloading event before it fails.
+    let files = model_files_with_padding("partial-retry", 400 * 1024);
+    let archive = build_tar_zst(&files);
+    assert!(
+        archive.len() > 300 * 1024,
+        "test archive too small to exercise incremental progress: {}",
+        archive.len()
+    );
+    let declared = archive.len();
+    let sha = sha256_hex(&archive);
+
+    let full = archive.clone();
+    let cut = 300 * 1024;
+    assert!(cut < declared);
+    // First request: declare the full length but send only a 300 KiB prefix and
+    // close. The client reads >= one progress step, then hits a read error and
+    // retries. Subsequent requests serve the full archive.
+    let server = TestServer::start_raw(move |attempt| {
+        if attempt == 0 {
+            RawResponse {
+                status: 200,
+                declared_len: declared,
+                body: full[..cut].to_vec(),
+            }
+        } else {
+            RawResponse {
+                status: 200,
+                declared_len: full.len(),
+                body: full.clone(),
+            }
+        }
+    });
+
+    let fx = Fixture::new("partial-retry");
+    let mut manager = fx.manager();
+    let id = "test-partial-retry";
+    register_entry(&mut manager, test_entry(id, server.url("/m.tar.zst"), &sha));
+
+    let mut phases: Vec<InstallPhase> = Vec::new();
+    manager
+        .install_registry_model(id, Some(&mut |p| phases.push(p)))
+        .expect("retry after a partial transfer must succeed");
+
+    assert!(server.hits() >= 2, "server must observe a retry");
+
+    let mut last = 0u64;
+    let mut downloading_events = 0usize;
+    for phase in &phases {
+        if let InstallPhase::Downloading {
+            downloaded_bytes,
+            total_bytes,
+        } = phase
+        {
+            assert!(
+                *downloaded_bytes >= last,
+                "downloaded bytes must be monotonic across retries: {:?}",
+                phases
+            );
+            last = *downloaded_bytes;
+            downloading_events += 1;
+            if let Some(total) = total_bytes {
+                assert_eq!(
+                    *total, declared as u64,
+                    "total_bytes must stay the expected final object size"
+                );
+            }
+        }
+    }
+    assert!(
+        downloading_events > 0,
+        "a partial transfer must emit progress before failing"
+    );
+
+    assert_target_has_tag(&fx.user_model_dir(id), "partial-retry");
+    assert!(!fx.has_staging_residue());
 }
 
 #[test]
