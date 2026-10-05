@@ -119,3 +119,16 @@ Measured on macOS Darwin 24.3.0 (arm64 Apple Silicon) using `scripts/benchmark-s
    - Slint needs a small native event hook or OS window message listener to automatically hide the panel when the user clicks elsewhere on the desktop.
 3. **Linux Wayland Native Shell**:
    - On native Wayland compositors (without XWayland), absolute window positioning is disallowed by standard Wayland protocols. A Layer Shell surface (`wlr-layer-shell`) or XWayland fallback is needed for utility positioning.
+
+---
+
+## 7. CI & Cross-Platform Verification Results
+
+All platform targets compile the opt-in Slint UI spike and verify that the production release bundles exclude the spike binary:
+
+| Target Platform | Runner Architecture | Spike Compile Step | Production Package Verification | CI Run / Job Reference |
+|---|---|---|---|---|
+| **macOS Apple Silicon** | `aarch64-apple-darwin` (macOS 15) | **PASSED** | **PASSED** (absent from `Echolet.app`) | Run `37356325776` / Job `111919587725` |
+| **Windows x86_64** | `x86_64-pc-windows-msvc` (windows-latest) | **PASSED** | **PASSED** (absent from zip) | Run `37356325776` / Job `111919587849` |
+| **Linux x86_64** | `x86_64-unknown-linux-gnu` (ubuntu-24.04) | **PASSED** | **PASSED** (absent from tar.gz) | Run `37357085136` / Job `111922170712` |
+| **Linux ARM64** | `aarch64-unknown-linux-gnu` (ubuntu-24.04-arm) | **PASSED** | **PASSED** (absent from tar.gz) | Run `37357085136` / Job `111922170842` |
