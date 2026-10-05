@@ -1,0 +1,66 @@
+{
+  "schema_version": 1,
+  "id": "echolet-nemotron-3.5-asr-streaming-0.6b-560ms-int8-2026-06-11-r1",
+  "revision": "r1",
+  "display_name": "Multilingual Nemotron 3.5 ASR Streaming 0.6B / 560ms (int8)",
+  "archive": "model-nemotron-3.5-asr-streaming-0.6b-560ms-int8-2026-06-11-r1.tar.zst",
+  "url": "https://github.com/SentimentalK/echolet/releases/download/model-nemotron-3.5-asr-streaming-0.6b-560ms-int8-2026-06-11-r1/model-nemotron-3.5-asr-streaming-0.6b-560ms-int8-2026-06-11-r1.tar.zst",
+  "sha256": "c3b0253b6526f4dd67093f8b9e758eacd846adb508c34503b7e53cb864aff7ab",
+  "size_bytes": 456709352,
+  "installed_size_bytes": 682215356,
+  "upstream_source": {
+    "archive": "sherpa-onnx-nemotron-3.5-asr-streaming-0.6b-560ms-int8-2026-06-11.tar.bz2",
+    "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-nemotron-3.5-asr-streaming-0.6b-560ms-int8-2026-06-11.tar.bz2",
+    "sha256": "c6bf5e0df765f9d5b43bc9e0536d4b4b3e7d40bdf5ecf13e45f134c51c05ae3a",
+    "size_bytes": 475271763
+  },
+  "upstream_project": "NVIDIA NeMo / nvidia/nemotron-3.5-asr-streaming-0.6b",
+  "upstream_repository": "https://huggingface.co/nvidia/nemotron-3.5-asr-streaming-0.6b",
+  "export_project": "k2-fsa/sherpa-onnx (official export_onnx.py + CI)",
+  "export_revision": "PR #3671 merge b74c4dfee9b446c00eb88cf1364d61e26ee9b531 (2026-06-12); package built 2026-06-11",
+  "release_date": "2026-06-11",
+  "chunk_ms": 560,
+  "license": {
+    "spdx": "OpenMDW-1.1",
+    "name": "Open Model Development and Weights License 1.1",
+    "url": "https://openmdw.ai/license/1-1/"
+  },
+  "files": {
+    "encoder": "encoder.int8.onnx",
+    "decoder": "decoder.int8.onnx",
+    "joiner": "joiner.int8.onnx",
+    "tokens": "tokens.txt"
+  },
+  "file_sha256": {
+    "encoder.int8.onnx": "012e9321373af99021415e0b0eb3ec827b4be3153be6f30d9b448fe65e896e68",
+    "decoder.int8.onnx": "19f9c98fc6d0a2c33a65a43b36fdb2e914c26c0aa9764be3aebc502a1e982fb0",
+    "joiner.int8.onnx": "4101c7c679a0bc30483794b27a059e34e79232aa2068d78d51231a22c8b0d7ce",
+    "tokens.txt": "729cc103155bafa785f9cd45746cd41cabe97eab7182fc04d594129587958f8a"
+  },
+  "canonical_files": [
+    "encoder.int8.onnx",
+    "decoder.int8.onnx",
+    "joiner.int8.onnx",
+    "tokens.txt",
+    "model.json",
+    "LICENSE",
+    "NOTICE",
+    "UPSTREAM.json",
+    "UPSTREAM_README.md"
+  ],
+  "required_license_files": ["LICENSE", "NOTICE"],
+  "verification_wavs": {
+    "ja": {
+      "name": "test_wavs/ja.wav",
+      "sha256": "780f95a86ba6cc33a4431fcafeacd213417dfa0a6613f93e4400c18f4dd467b0",
+      "runtime_code": "ja",
+      "source": "sherpa-onnx-nemotron-3.5-asr-streaming-0.6b-560ms-int8-2026-06-11.tar.bz2"
+    },
+    "ja_auto": {
+      "name": "test_wavs/ja.wav",
+      "sha256": "780f95a86ba6cc33a4431fcafeacd213417dfa0a6613f93e4400c18f4dd467b0",
+      "runtime_code": "ja",
+      "source": "sherpa-onnx-nemotron-3.5-asr-streaming-0.6b-560ms-int8-2026-06-11.tar.bz2"
+    }
+  }
+}

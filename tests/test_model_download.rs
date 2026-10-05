@@ -303,6 +303,7 @@ fn test_entry(id: &str, url: String, sha256: &str) -> RegistryModelEntry {
         installed_size_bytes: None,
         upstream_release_date: None,
         license: None,
+        language_options: None,
         verification_status: VerificationStatus::Experimental,
     }
 }

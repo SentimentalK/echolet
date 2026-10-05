@@ -12,5 +12,6 @@ pub use download::{
 pub use manager::{InstalledModel, ModelManager};
 pub use manifest::ModelManifest;
 pub use registry::{
-    ModelLicense, ModelRegistry, RegistryModelEntry, VerificationStatus, CURRENT_SCHEMA_VERSION,
+    LanguageTier, ModelLanguageOption, ModelLanguageOptions, ModelLicense, ModelRegistry,
+    RegistryModelEntry, VerificationStatus, CURRENT_SCHEMA_VERSION,
 };

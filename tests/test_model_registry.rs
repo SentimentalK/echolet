@@ -57,8 +57,8 @@ fn test_registry_parsing_and_invariants() {
     );
     assert_eq!(
         registry.models.len(),
-        1,
-        "Registry must contain single default X-ASR model"
+        2,
+        "Registry must contain the default X-ASR model plus the additive J10 Nemotron pack"
     );
 
     // 1. X-ASR Bilingual Model (2026 Default Bundled)
@@ -497,17 +497,31 @@ fn test_shipped_registry_xasr_is_verified_and_matches_authorities() {
     assert_eq!(xasr.download_size_bytes, Some(551_847_917));
     assert_eq!(xasr.installed_size_bytes, Some(614_596_718));
 
-    // Only this exact frozen identity may be Verified in the shipped registry.
-    let verified_ids: Vec<&str> = registry
+    // Every Verified entry must be one of the two frozen identities and must
+    // point at its own immutable Echolet Release lock. After J8/J10 that is the
+    // X-ASR baseline and the additive Nemotron multilingual pack.
+    let nemotron_lock: serde_json::Value =
+        serde_json::from_str(include_str!("../models/nemotron-model.lock.json"))
+            .expect("nemotron-model.lock.json");
+    for entry in registry
         .models
         .iter()
         .filter(|m| m.verification_status.is_verified())
-        .map(|m| m.id.as_str())
-        .collect();
-    assert_eq!(
-        verified_ids,
-        vec![xasr.id.as_str()],
-        "only the canonical X-ASR entry may be Echolet Verified"
+    {
+        let is_baseline =
+            entry.id == xasr.id && entry.source.sha256.as_deref() == lock["sha256"].as_str();
+        let is_nemotron = entry.id.as_str() == nemotron_lock["id"].as_str().unwrap_or_default()
+            && entry.source.url.as_deref() == nemotron_lock["url"].as_str()
+            && entry.source.sha256.as_deref() == nemotron_lock["sha256"].as_str();
+        assert!(
+            is_baseline || is_nemotron,
+            "Verified entry '{}' does not match any frozen Echolet release identity",
+            entry.id
+        );
+    }
+    assert!(
+        xasr.verification_status.is_verified(),
+        "X-ASR must remain Echolet Verified"
     );
 
     // Round-trip of the shipped registry is stable.

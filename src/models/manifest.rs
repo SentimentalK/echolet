@@ -1,4 +1,5 @@
 use crate::models::language::{self, deserialize_languages};
+use crate::models::registry::{ModelLanguageOption, ModelLanguageOptions};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
@@ -35,6 +36,11 @@ pub struct ModelManifest {
     pub decoding_method: String,
     #[serde(default = "default_max_active_paths")]
     pub max_active_paths: i32,
+
+    /// Typed tiered locale metadata for multilingual models (propagated from
+    /// the registry). `None` for single-language models such as X-ASR.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language_options: Option<ModelLanguageOptions>,
 }
 
 fn default_sample_rate() -> u32 {
@@ -75,6 +81,7 @@ impl Default for ModelManifest {
             provider: "cpu".into(),
             decoding_method: "greedy_search".into(),
             max_active_paths: 4,
+            language_options: None,
         }
     }
 }
@@ -105,6 +112,40 @@ impl ModelManifest {
     /// Human-readable language label (for example `"Chinese + English"`).
     pub fn language_label(&self) -> String {
         language::language_label(&self.languages)
+    }
+
+    /// Runtime-selectable language options (out-of-box only). Empty for
+    /// single-language models. Mirrors
+    /// [`crate::models::registry::RegistryModelEntry::supported_language_options`].
+    pub fn supported_language_options(&self) -> &[ModelLanguageOption] {
+        self.language_options
+            .as_ref()
+            .map(|o| o.supported.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// Validates a requested language selection against this manifest's typed
+    /// metadata. See
+    /// [`crate::models::registry::ModelLanguageOptions::validate_selection`].
+    pub fn validate_language_selection(
+        &self,
+        selection: Option<&str>,
+    ) -> Result<Option<&ModelLanguageOption>, String> {
+        match &self.language_options {
+            Some(opts) => opts.validate_selection(&self.id, selection),
+            None => {
+                let query = selection
+                    .map(str::trim)
+                    .filter(|q| !q.is_empty() && !q.eq_ignore_ascii_case("auto"));
+                match query {
+                    None => Ok(None),
+                    Some(q) => Err(format!(
+                        "Language '{}' is not a supported language option for model '{}'",
+                        q, self.id
+                    )),
+                }
+            }
+        }
     }
 
     pub fn from_file(path: &Path) -> Result<Self, String> {

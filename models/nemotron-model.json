@@ -1,0 +1,347 @@
+{
+  "schema_version": 1,
+  "description": "PROJECT-041 Stage 3 / J10 product definition + authority for the frozen Echolet-owned Nemotron 3.5 ASR Streaming 0.6B (560ms, int8) pack. Read by scripts/package-nemotron-model.sh to rebuild the deterministic pack and by tests/test_j10_language_metadata.rs as the tier/runtime authority. NOT read by the Echolet runtime.",
+  "id": "echolet-nemotron-3.5-asr-streaming-0.6b-560ms-int8-2026-06-11-r1",
+  "revision": "r1",
+  "display_name": "Multilingual Nemotron 3.5 ASR Streaming 0.6B / 560ms (int8)",
+  "version": "2026-06-11-r1",
+  "family": "online-transducer",
+  "model_type": null,
+  "sample_rate": 16000,
+  "feature_dim": 80,
+  "num_threads": 1,
+  "provider": "cpu",
+  "decoding_method": "greedy_search",
+  "max_active_paths": 4,
+  "languages": [
+    "en",
+    "es",
+    "fr",
+    "it",
+    "pt",
+    "nl",
+    "de",
+    "tr",
+    "ru",
+    "ar",
+    "hi",
+    "ja",
+    "ko",
+    "vi",
+    "uk",
+    "pl",
+    "sv",
+    "cs",
+    "nb",
+    "da",
+    "bg",
+    "fi",
+    "hr",
+    "sk",
+    "zh",
+    "hu",
+    "ro",
+    "et"
+  ],
+  "chunk_ms": 560,
+  "upstream_project": "NVIDIA NeMo / nvidia/nemotron-3.5-asr-streaming-0.6b",
+  "upstream_repository": "https://huggingface.co/nvidia/nemotron-3.5-asr-streaming-0.6b",
+  "upstream_revision": "nvidia/nemotron-3.5-asr-streaming-0.6b",
+  "export_project": "k2-fsa/sherpa-onnx (official export_onnx.py + CI)",
+  "export_revision": "PR #3671 merge b74c4dfee9b446c00eb88cf1364d61e26ee9b531 (2026-06-12); package built 2026-06-11",
+  "release_date": "2026-06-11",
+  "license": {
+    "spdx": "OpenMDW-1.1",
+    "name": "Open Model Development and Weights License 1.1",
+    "url": "https://openmdw.ai/license/1-1/",
+    "redistribution": "Permitted, including commercial and derivative distribution. If any portion of the Model Materials is distributed, the distribution MUST retain (1) a copy of the OpenMDW-1.1 agreement and (2) all copyright notices and other notices of origin included in the Model Materials that are applicable to the distribution. Rights terminate if you file/maintain/participate in a patent-or-copyright-infringement suit against the Model Materials. No restriction is imposed on use/modification/sharing of model outputs."
+  },
+  "files": {
+    "encoder": "encoder.int8.onnx",
+    "decoder": "decoder.int8.onnx",
+    "joiner": "joiner.int8.onnx",
+    "tokens": "tokens.txt"
+  },
+  "canonical_files": [
+    "encoder.int8.onnx",
+    "decoder.int8.onnx",
+    "joiner.int8.onnx",
+    "tokens.txt",
+    "model.json",
+    "LICENSE",
+    "NOTICE",
+    "UPSTREAM.json",
+    "UPSTREAM_README.md"
+  ],
+  "upstream_source": {
+    "archive": "sherpa-onnx-nemotron-3.5-asr-streaming-0.6b-560ms-int8-2026-06-11.tar.bz2",
+    "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-nemotron-3.5-asr-streaming-0.6b-560ms-int8-2026-06-11.tar.bz2",
+    "sha256": "c6bf5e0df765f9d5b43bc9e0536d4b4b3e7d40bdf5ecf13e45f134c51c05ae3a",
+    "size_bytes": 475271763,
+    "extracted_dir": "sherpa-onnx-nemotron-3.5-asr-streaming-0.6b-560ms-int8-2026-06-11"
+  },
+  "file_sha256": {
+    "encoder.int8.onnx": "012e9321373af99021415e0b0eb3ec827b4be3153be6f30d9b448fe65e896e68",
+    "decoder.int8.onnx": "19f9c98fc6d0a2c33a65a43b36fdb2e914c26c0aa9764be3aebc502a1e982fb0",
+    "joiner.int8.onnx": "4101c7c679a0bc30483794b27a059e34e79232aa2068d78d51231a22c8b0d7ce",
+    "tokens.txt": "729cc103155bafa785f9cd45746cd41cabe97eab7182fc04d594129587958f8a"
+  },
+  "verification_wavs": {
+    "ja": {
+      "name": "test_wavs/ja.wav",
+      "sha256": "780f95a86ba6cc33a4431fcafeacd213417dfa0a6613f93e4400c18f4dd467b0",
+      "source": "sherpa-onnx-nemotron-3.5-asr-streaming-0.6b-560ms-int8-2026-06-11.tar.bz2"
+    },
+    "zh": {
+      "name": "test_wavs/zh.wav",
+      "sha256": "7f383a320af7d23200a3cf7313a9bc938972acdb1bc180db4e970bfd648cb641",
+      "source": "sherpa-onnx-nemotron-3.5-asr-streaming-0.6b-560ms-int8-2026-06-11.tar.bz2"
+    }
+  },
+  "language_options": {
+    "supported": [
+      {
+        "locale": "en-US",
+        "runtime_code": "en",
+        "tier": "TranscriptionReady",
+        "display_name": "English (United States)"
+      },
+      {
+        "locale": "en-GB",
+        "runtime_code": "en",
+        "tier": "TranscriptionReady",
+        "display_name": "English (United Kingdom)"
+      },
+      {
+        "locale": "es-US",
+        "runtime_code": "es",
+        "tier": "TranscriptionReady",
+        "display_name": "Spanish (United States)"
+      },
+      {
+        "locale": "es-ES",
+        "runtime_code": "es",
+        "tier": "TranscriptionReady",
+        "display_name": "Spanish (Spain)"
+      },
+      {
+        "locale": "fr-FR",
+        "runtime_code": "fr",
+        "tier": "TranscriptionReady",
+        "display_name": "French (France)"
+      },
+      {
+        "locale": "fr-CA",
+        "runtime_code": "fr",
+        "tier": "TranscriptionReady",
+        "display_name": "French (Canada)"
+      },
+      {
+        "locale": "it-IT",
+        "runtime_code": "it",
+        "tier": "TranscriptionReady",
+        "display_name": "Italian (Italy)"
+      },
+      {
+        "locale": "pt-BR",
+        "runtime_code": "pt",
+        "tier": "TranscriptionReady",
+        "display_name": "Portuguese (Brazil)"
+      },
+      {
+        "locale": "pt-PT",
+        "runtime_code": "pt",
+        "tier": "TranscriptionReady",
+        "display_name": "Portuguese (Portugal)"
+      },
+      {
+        "locale": "nl-NL",
+        "runtime_code": "nl",
+        "tier": "TranscriptionReady",
+        "display_name": "Dutch (Netherlands)"
+      },
+      {
+        "locale": "de-DE",
+        "runtime_code": "de",
+        "tier": "TranscriptionReady",
+        "display_name": "German (Germany)"
+      },
+      {
+        "locale": "tr-TR",
+        "runtime_code": "tr",
+        "tier": "TranscriptionReady",
+        "display_name": "Turkish (Turkey)"
+      },
+      {
+        "locale": "ru-RU",
+        "runtime_code": "ru",
+        "tier": "TranscriptionReady",
+        "display_name": "Russian (Russia)"
+      },
+      {
+        "locale": "ar-AR",
+        "runtime_code": "ar",
+        "tier": "TranscriptionReady",
+        "display_name": "Arabic"
+      },
+      {
+        "locale": "hi-IN",
+        "runtime_code": "hi",
+        "tier": "TranscriptionReady",
+        "display_name": "Hindi (India)"
+      },
+      {
+        "locale": "ja-JP",
+        "runtime_code": "ja",
+        "tier": "TranscriptionReady",
+        "display_name": "Japanese (Japan)"
+      },
+      {
+        "locale": "ko-KR",
+        "runtime_code": "ko",
+        "tier": "TranscriptionReady",
+        "display_name": "Korean (South Korea)"
+      },
+      {
+        "locale": "vi-VN",
+        "runtime_code": "vi",
+        "tier": "TranscriptionReady",
+        "display_name": "Vietnamese (Vietnam)"
+      },
+      {
+        "locale": "uk-UA",
+        "runtime_code": "uk",
+        "tier": "TranscriptionReady",
+        "display_name": "Ukrainian (Ukraine)"
+      },
+      {
+        "locale": "pl-PL",
+        "runtime_code": "pl",
+        "tier": "BroadCoverage",
+        "display_name": "Polish (Poland)"
+      },
+      {
+        "locale": "sv-SE",
+        "runtime_code": "sv",
+        "tier": "BroadCoverage",
+        "display_name": "Swedish (Sweden)"
+      },
+      {
+        "locale": "cs-CZ",
+        "runtime_code": "cs",
+        "tier": "BroadCoverage",
+        "display_name": "Czech (Czechia)"
+      },
+      {
+        "locale": "nb-NO",
+        "runtime_code": "nb",
+        "tier": "BroadCoverage",
+        "display_name": "Norwegian Bokmal (Norway)"
+      },
+      {
+        "locale": "da-DK",
+        "runtime_code": "da",
+        "tier": "BroadCoverage",
+        "display_name": "Danish (Denmark)"
+      },
+      {
+        "locale": "bg-BG",
+        "runtime_code": "bg",
+        "tier": "BroadCoverage",
+        "display_name": "Bulgarian (Bulgaria)"
+      },
+      {
+        "locale": "fi-FI",
+        "runtime_code": "fi",
+        "tier": "BroadCoverage",
+        "display_name": "Finnish (Finland)"
+      },
+      {
+        "locale": "hr-HR",
+        "runtime_code": "hr",
+        "tier": "BroadCoverage",
+        "display_name": "Croatian (Croatia)"
+      },
+      {
+        "locale": "sk-SK",
+        "runtime_code": "sk",
+        "tier": "BroadCoverage",
+        "display_name": "Slovak (Slovakia)"
+      },
+      {
+        "locale": "zh-CN",
+        "runtime_code": "zh",
+        "tier": "BroadCoverage",
+        "display_name": "Mandarin Chinese (China)"
+      },
+      {
+        "locale": "hu-HU",
+        "runtime_code": "hu",
+        "tier": "BroadCoverage",
+        "display_name": "Hungarian (Hungary)"
+      },
+      {
+        "locale": "ro-RO",
+        "runtime_code": "ro",
+        "tier": "BroadCoverage",
+        "display_name": "Romanian (Romania)"
+      },
+      {
+        "locale": "et-EE",
+        "runtime_code": "et",
+        "tier": "BroadCoverage",
+        "display_name": "Estonian (Estonia)"
+      }
+    ],
+    "adaptation_ready": [
+      {
+        "locale": "el-GR",
+        "runtime_code": "el",
+        "tier": "AdaptationReady",
+        "display_name": "Greek (Greece)"
+      },
+      {
+        "locale": "lt-LT",
+        "runtime_code": "lt",
+        "tier": "AdaptationReady",
+        "display_name": "Lithuanian (Lithuania)"
+      },
+      {
+        "locale": "lv-LV",
+        "runtime_code": "lv",
+        "tier": "AdaptationReady",
+        "display_name": "Latvian (Latvia)"
+      },
+      {
+        "locale": "mt-MT",
+        "runtime_code": "mt",
+        "tier": "AdaptationReady",
+        "display_name": "Maltese (Malta)"
+      },
+      {
+        "locale": "sl-SI",
+        "runtime_code": "sl",
+        "tier": "AdaptationReady",
+        "display_name": "Slovenian (Slovenia)"
+      },
+      {
+        "locale": "he-IL",
+        "runtime_code": "he",
+        "tier": "AdaptationReady",
+        "display_name": "Hebrew (Israel)"
+      },
+      {
+        "locale": "th-TH",
+        "runtime_code": "th",
+        "tier": "AdaptationReady",
+        "display_name": "Thai (Thailand)"
+      },
+      {
+        "locale": "nn-NO",
+        "runtime_code": "nn",
+        "tier": "AdaptationReady",
+        "display_name": "Norwegian Nynorsk (Norway)"
+      }
+    ]
+  }
+}

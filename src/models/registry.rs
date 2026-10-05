@@ -75,6 +75,147 @@ impl VerificationStatus {
     }
 }
 
+/// Product quality/confidence tier for a single language-locale.
+///
+/// This is a *typed* product concept and is deliberately separate from the
+/// coarse base-language `languages` list, which the legacy hyphen-splitting
+/// normalizer owns. BCP-47 locale values (for example `ja-JP`) must never be
+/// pushed through that normalizer; they live here instead.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+pub enum LanguageTier {
+    /// Highest-accuracy ASR, ready out of the box.
+    #[serde(rename = "TranscriptionReady")]
+    TranscriptionReady,
+    /// Produces ASR out of the box at clearly lower / less-established quality.
+    #[serde(rename = "BroadCoverage")]
+    BroadCoverage,
+    /// Tokenizer-supported but requires fine-tuning; NOT product-ready.
+    #[serde(rename = "AdaptationReady")]
+    AdaptationReady,
+}
+
+impl LanguageTier {
+    pub fn label(self) -> &'static str {
+        match self {
+            LanguageTier::TranscriptionReady => "TranscriptionReady",
+            LanguageTier::BroadCoverage => "BroadCoverage",
+            LanguageTier::AdaptationReady => "AdaptationReady",
+        }
+    }
+
+    /// Whether a locale in this tier may be offered as a normal selectable
+    /// option. Adaptation-ready locales must never be selectable.
+    pub fn is_selectable(self) -> bool {
+        matches!(
+            self,
+            LanguageTier::TranscriptionReady | LanguageTier::BroadCoverage
+        )
+    }
+}
+
+/// A single locale understood by a multilingual model, with the runtime code
+/// Sherpa actually consumes on the stream.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ModelLanguageOption {
+    /// BCP-47 locale identifier, for example `ja-JP`. Kept verbatim.
+    pub locale: String,
+    /// Runtime code passed to the model (for example `ja`, or `auto`).
+    pub runtime_code: String,
+    pub tier: LanguageTier,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+}
+
+/// Typed, tiered language metadata for a multilingual model.
+///
+/// Only [`ModelLanguageOptions::supported`] may be exposed as runtime-selectable.
+/// [`ModelLanguageOptions::adaptation_ready`] is provenance/catalog metadata and
+/// must never be returned by the normal selection API.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct ModelLanguageOptions {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub supported: Vec<ModelLanguageOption>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub adaptation_ready: Vec<ModelLanguageOption>,
+}
+
+impl ModelLanguageOptions {
+    pub fn transcription_ready_count(&self) -> usize {
+        self.supported
+            .iter()
+            .filter(|o| o.tier == LanguageTier::TranscriptionReady)
+            .count()
+    }
+
+    pub fn broad_coverage_count(&self) -> usize {
+        self.supported
+            .iter()
+            .filter(|o| o.tier == LanguageTier::BroadCoverage)
+            .count()
+    }
+
+    pub fn adaptation_ready_count(&self) -> usize {
+        self.adaptation_ready.len()
+    }
+
+    /// Case-insensitive lookup over selectable options by BCP-47 locale or by
+    /// runtime code. This intentionally does NOT use the legacy language
+    /// normalizer, so `ja-JP` is never split into `ja` + `jp`.
+    pub fn find_supported(&self, query: &str) -> Option<&ModelLanguageOption> {
+        let q = query.trim();
+        if q.is_empty() {
+            return None;
+        }
+        self.supported
+            .iter()
+            .find(|o| o.locale.eq_ignore_ascii_case(q) || o.runtime_code.eq_ignore_ascii_case(q))
+    }
+
+    /// Case-insensitive lookup over adaptation-ready (non-selectable) options.
+    pub fn find_adaptation_ready(&self, query: &str) -> Option<&ModelLanguageOption> {
+        let q = query.trim();
+        if q.is_empty() {
+            return None;
+        }
+        self.adaptation_ready
+            .iter()
+            .find(|o| o.locale.eq_ignore_ascii_case(q) || o.runtime_code.eq_ignore_ascii_case(q))
+    }
+
+    /// Shared selection contract used by both the registry entry and the
+    /// on-disk manifest so there is exactly one language-selection authority.
+    ///
+    /// `None`/empty means auto-detect (always valid). Adaptation-ready locales
+    /// are rejected explicitly. `model_id` is only used for error messages.
+    pub fn validate_selection<'a>(
+        &'a self,
+        model_id: &str,
+        selection: Option<&str>,
+    ) -> Result<Option<&'a ModelLanguageOption>, String> {
+        let Some(query) = selection.map(str::trim).filter(|q| !q.is_empty()) else {
+            return Ok(None);
+        };
+        // The runtime documents "auto" as the explicit auto-detect sentinel.
+        if query.eq_ignore_ascii_case("auto") {
+            return Ok(None);
+        }
+        if let Some(opt) = self.find_supported(query) {
+            return Ok(Some(opt));
+        }
+        if let Some(opt) = self.find_adaptation_ready(query) {
+            return Err(format!(
+                "Language '{}' is adaptation-ready for model '{}' and is not a supported \
+                 Echolet language; it requires a separately fine-tuned model.",
+                opt.locale, model_id
+            ));
+        }
+        Err(format!(
+            "Language '{}' is not a supported language option for model '{}'",
+            query, model_id
+        ))
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ModelFilesConfig {
     pub encoder: String,
@@ -148,6 +289,11 @@ pub struct RegistryModelEntry {
     pub upstream_release_date: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub license: Option<ModelLicense>,
+    /// Typed tiered locale metadata for multilingual models. `None` for
+    /// single-language models such as the X-ASR baseline; the coarse
+    /// `languages` list remains the only language authority for those.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language_options: Option<ModelLanguageOptions>,
     #[serde(default)]
     pub verification_status: VerificationStatus,
 }
@@ -204,6 +350,59 @@ impl RegistryModelEntry {
             .all(|lang| tokens.iter().any(|token| token == lang))
     }
 
+    /// Runtime-selectable language options for this model.
+    ///
+    /// Returns only the out-of-box options ([`LanguageTier::TranscriptionReady`]
+    /// and [`LanguageTier::BroadCoverage`]). Adaptation-ready locales are never
+    /// returned here; use [`RegistryModelEntry::adaptation_ready_locales`] when
+    /// catalog/provenance data is needed.
+    pub fn supported_language_options(&self) -> &[ModelLanguageOption] {
+        self.language_options
+            .as_ref()
+            .map(|o| o.supported.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// Non-selectable, adaptation-only locales (catalog/provenance only).
+    pub fn adaptation_ready_locales(&self) -> &[ModelLanguageOption] {
+        self.language_options
+            .as_ref()
+            .map(|o| o.adaptation_ready.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// Validates a requested language selection against this model's typed
+    /// metadata.
+    ///
+    /// * `None` or an empty string means auto-detect and is always valid.
+    /// * A supported locale/runtime code returns the resolved option.
+    /// * An adaptation-ready locale is explicitly rejected so it can never be
+    ///   treated as a normal supported language.
+    /// * Anything else is rejected.
+    ///
+    /// Models without typed metadata (for example X-ASR) reject any forced
+    /// language, preserving their simple base-language behavior.
+    pub fn validate_language_selection(
+        &self,
+        selection: Option<&str>,
+    ) -> Result<Option<&ModelLanguageOption>, String> {
+        match &self.language_options {
+            Some(opts) => opts.validate_selection(&self.id, selection),
+            None => {
+                let query = selection
+                    .map(str::trim)
+                    .filter(|q| !q.is_empty() && !q.eq_ignore_ascii_case("auto"));
+                match query {
+                    None => Ok(None),
+                    Some(q) => Err(format!(
+                        "Language '{}' is not a supported language option for model '{}'",
+                        q, self.id
+                    )),
+                }
+            }
+        }
+    }
+
     pub fn to_manifest(&self) -> ModelManifest {
         ModelManifest {
             id: self.id.clone(),
@@ -222,6 +421,7 @@ impl RegistryModelEntry {
             provider: self.runtime.provider.clone(),
             decoding_method: self.runtime.decoding_method.clone(),
             max_active_paths: self.runtime.max_active_paths,
+            language_options: self.language_options.clone(),
         }
     }
 }

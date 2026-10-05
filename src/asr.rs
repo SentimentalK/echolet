@@ -77,8 +77,10 @@ impl OnlineRecognizer {
         let c_decoder = CString::new(decoder.to_str().ok_or("Invalid decoder path")?).unwrap();
         let c_joiner = CString::new(joiner.to_str().ok_or("Invalid joiner path")?).unwrap();
         let c_tokens = CString::new(tokens.to_str().ok_or("Invalid tokens path")?).unwrap();
-        let c_provider = CString::new(manifest.provider.as_str()).unwrap_or_else(|_| CString::new("cpu").unwrap());
-        let c_decoding = CString::new(manifest.decoding_method.as_str()).unwrap_or_else(|_| CString::new("greedy_search").unwrap());
+        let c_provider = CString::new(manifest.provider.as_str())
+            .unwrap_or_else(|_| CString::new("cpu").unwrap());
+        let c_decoding = CString::new(manifest.decoding_method.as_str())
+            .unwrap_or_else(|_| CString::new("greedy_search").unwrap());
         let c_model_type = manifest
             .model_type
             .as_deref()
@@ -106,7 +108,10 @@ impl OnlineRecognizer {
 
         let raw = unsafe { SherpaOnnxCreateOnlineRecognizer(&config) };
         if raw.is_null() {
-            return Err(format!("SherpaOnnxCreateOnlineRecognizer failed for model '{}'", manifest.id));
+            return Err(format!(
+                "SherpaOnnxCreateOnlineRecognizer failed for model '{}'",
+                manifest.id
+            ));
         }
 
         Ok(Self { raw })
@@ -178,5 +183,75 @@ impl OnlineStream {
         unsafe {
             SherpaOnnxOnlineStreamReset(self.recognizer.raw, self.raw);
         }
+    }
+
+    /// Sets a generic per-stream runtime option (Sherpa `OnlineStreamSetOption`).
+    ///
+    /// `value == None` maps to the empty string, which is the documented
+    /// "unset / model default" value for the options Echolet uses (in particular
+    /// the multilingual NeMo `"language"` option, where empty means
+    /// auto-detect). The Rust wrapper rejects embedded NUL bytes up front so the
+    /// C API never receives a truncated key/value.
+    pub fn set_option(&self, key: &str, value: Option<&str>) -> Result<(), String> {
+        let c_key = checked_cstring("option key", key)?;
+        let value_owned = checked_cstring("option value", value.unwrap_or(""))
+            .map_err(|e| format!("{} (key {:?})", e, key))?;
+        // `value_owned` stays alive for the whole call; the C API copies the
+        // string synchronously into the stream's option map.
+        unsafe {
+            SherpaOnnxOnlineStreamSetOption(self.raw, c_key.as_ptr(), value_owned.as_ptr());
+        }
+        Ok(())
+    }
+
+    /// Forces the per-stream language for multilingual NeMo transducers via the
+    /// `"language"` option.
+    ///
+    /// * `None` or `Some("")` selects auto-detect.
+    /// * `Some(code)` (for example `"ja"`) forces that language.
+    ///
+    /// Must be called after stream creation and before any waveform is fed.
+    /// X-ASR (and other single-language models) simply ignore this option, so
+    /// calling it is optional and never required for X-ASR inference.
+    pub fn set_language(&self, code: Option<&str>) -> Result<(), String> {
+        match code {
+            None => self.set_option("language", None),
+            Some(c) => self.set_option("language", Some(c)),
+        }
+    }
+}
+
+/// Builds a NUL-terminated C string for the Sherpa option API, rejecting any
+/// embedded interior NUL so the C layer can never receive a truncated value.
+fn checked_cstring(label: &str, value: &str) -> Result<CString, String> {
+    CString::new(value).map_err(|_| format!("{} contains an embedded NUL byte: {:?}", label, value))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::checked_cstring;
+
+    #[test]
+    fn checked_cstring_accepts_plain_language_codes() {
+        let c = checked_cstring("option value", "ja").expect("plain code must be accepted");
+        assert_eq!(c.to_bytes(), b"ja");
+        let auto = checked_cstring("option value", "").expect("empty means auto");
+        assert_eq!(c_str_bytes(&auto), b"");
+    }
+
+    #[test]
+    fn checked_cstring_rejects_embedded_nul() {
+        let err = checked_cstring("option value", "ja\0evil").expect_err("interior NUL rejected");
+        assert!(err.contains("embedded NUL"), "unexpected error: {}", err);
+        let key_err = checked_cstring("option key", "lang\0").expect_err("interior NUL rejected");
+        assert!(
+            key_err.contains("option key"),
+            "unexpected error: {}",
+            key_err
+        );
+    }
+
+    fn c_str_bytes(c: &std::ffi::CString) -> &[u8] {
+        c.as_c_str().to_bytes()
     }
 }

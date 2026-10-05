@@ -116,9 +116,7 @@ extern "C" {
         config: *const SherpaOnnxOnlineRecognizerConfig,
     ) -> *const SherpaOnnxOnlineRecognizer;
 
-    pub fn SherpaOnnxDestroyOnlineRecognizer(
-        recognizer: *const SherpaOnnxOnlineRecognizer,
-    );
+    pub fn SherpaOnnxDestroyOnlineRecognizer(recognizer: *const SherpaOnnxOnlineRecognizer);
 
     pub fn SherpaOnnxCreateOnlineStream(
         recognizer: *const SherpaOnnxOnlineRecognizer,
@@ -148,9 +146,7 @@ extern "C" {
         stream: *const SherpaOnnxOnlineStream,
     ) -> *const SherpaOnnxOnlineRecognizerResult;
 
-    pub fn SherpaOnnxDestroyOnlineRecognizerResult(
-        r: *const SherpaOnnxOnlineRecognizerResult,
-    );
+    pub fn SherpaOnnxDestroyOnlineRecognizerResult(r: *const SherpaOnnxOnlineRecognizerResult);
 
     pub fn SherpaOnnxOnlineStreamIsEndpoint(
         recognizer: *const SherpaOnnxOnlineRecognizer,
@@ -162,7 +158,24 @@ extern "C" {
         stream: *const SherpaOnnxOnlineStream,
     );
 
-    pub fn SherpaOnnxOnlineStreamInputFinished(
+    pub fn SherpaOnnxOnlineStreamInputFinished(stream: *const SherpaOnnxOnlineStream);
+
+    /// Set a per-stream runtime option (generic C API extension point).
+    ///
+    /// Multilingual NeMo transducers use the `"language"` option; empty/unset
+    /// means auto-detect. The C implementation copies `key`/`value` synchronously,
+    /// so the caller only needs the buffers to stay valid for the duration of the
+    /// call.
+    pub fn SherpaOnnxOnlineStreamSetOption(
         stream: *const SherpaOnnxOnlineStream,
+        key: *const c_char,
+        value: *const c_char,
     );
+
+    /// Get a per-stream runtime option previously set. The returned pointer is
+    /// owned by the stream and must not be freed by the caller.
+    pub fn SherpaOnnxOnlineStreamGetOption(
+        stream: *const SherpaOnnxOnlineStream,
+        key: *const c_char,
+    ) -> *const c_char;
 }
