@@ -1,5 +1,6 @@
 use crate::paths;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
@@ -13,6 +14,12 @@ pub struct EcholetConfig {
     pub preload_model_on_startup: bool,
     #[serde(default = "default_model_idle_unload_minutes")]
     pub model_idle_unload_minutes: Option<u32>,
+    /// Per-model forced-language preference: model id -> BCP-47 locale or
+    /// [`EcholetConfig::LANGUAGE_AUTO`]. Stored per model (never a single global
+    /// locale) so switching models cannot carry an invalid locale across.
+    /// Defaults to empty for backward-compatible parsing of legacy configs.
+    #[serde(default)]
+    pub model_language_preferences: BTreeMap<String, String>,
 }
 
 fn default_selected_model() -> String {
@@ -34,11 +41,41 @@ impl Default for EcholetConfig {
             history_enabled: false,
             preload_model_on_startup: default_preload_model_on_startup(),
             model_idle_unload_minutes: default_model_idle_unload_minutes(),
+            model_language_preferences: BTreeMap::new(),
         }
     }
 }
 
 impl EcholetConfig {
+    /// Sentinel stored when the user chooses Auto-detect for a model.
+    pub const LANGUAGE_AUTO: &'static str = "auto";
+
+    pub fn language_preference(&self, model_id: &str) -> Option<&str> {
+        self.model_language_preferences
+            .get(model_id)
+            .map(String::as_str)
+    }
+
+    /// Stores the preference for one model. `None` stores the explicit Auto
+    /// sentinel so a user's "Auto" choice is remembered without becoming a
+    /// global setting.
+    pub fn set_language_preference(&mut self, model_id: &str, locale: Option<&str>) {
+        let value = locale
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .unwrap_or(Self::LANGUAGE_AUTO)
+            .to_string();
+        self.model_language_preferences
+            .insert(model_id.to_string(), value);
+    }
+
+    pub fn language_preference_is_auto(&self, model_id: &str) -> bool {
+        matches!(
+            self.language_preference(model_id),
+            None | Some(EcholetConfig::LANGUAGE_AUTO)
+        )
+    }
+
     pub fn load() -> Self {
         Self::load_from(&paths::user_config_path())
     }
@@ -95,6 +132,39 @@ mod tests {
     }
 
     #[test]
+    fn test_legacy_config_without_language_preferences_parses() {
+        // A pre-J11 config has no model_language_preferences field at all and
+        // must still parse, defaulting to an empty per-model map.
+        let legacy_json = r#"{
+            "selected_model": "echolet-xasr-zh-en-480ms-689ff18c584d29910da37b6fe904db0c1489c9d1",
+            "history_enabled": false,
+            "preload_model_on_startup": true,
+            "model_idle_unload_minutes": 5
+        }"#;
+        let config: EcholetConfig = serde_json::from_str(legacy_json).unwrap();
+        assert!(config.model_language_preferences.is_empty());
+        assert!(config.language_preference_is_auto("some-model"));
+    }
+
+    #[test]
+    fn test_per_model_language_preference_round_trip() {
+        let mut config = EcholetConfig::default();
+        config.set_language_preference("model-a", Some("ja-JP"));
+        config.set_language_preference("model-b", None); // explicit Auto
+        let json = serde_json::to_string(&config).unwrap();
+        let back: EcholetConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.language_preference("model-a"), Some("ja-JP"));
+        assert_eq!(
+            back.language_preference("model-b"),
+            Some(EcholetConfig::LANGUAGE_AUTO)
+        );
+        assert!(!back.language_preference_is_auto("model-a"));
+        assert!(back.language_preference_is_auto("model-b"));
+        // A model with no stored preference is also Auto.
+        assert!(back.language_preference_is_auto("model-c"));
+    }
+
+    #[test]
     fn test_config_serialize_deserialize_matrix() {
         // Case 1: preload=false, idle=Some(0)
         let c1 = EcholetConfig {
@@ -102,6 +172,7 @@ mod tests {
             history_enabled: false,
             preload_model_on_startup: false,
             model_idle_unload_minutes: Some(0),
+            model_language_preferences: BTreeMap::new(),
         };
         let s1 = serde_json::to_string(&c1).unwrap();
         let d1: EcholetConfig = serde_json::from_str(&s1).unwrap();
@@ -113,6 +184,7 @@ mod tests {
             history_enabled: true,
             preload_model_on_startup: true,
             model_idle_unload_minutes: Some(10),
+            model_language_preferences: BTreeMap::new(),
         };
         let s2 = serde_json::to_string(&c2).unwrap();
         let d2: EcholetConfig = serde_json::from_str(&s2).unwrap();
@@ -124,6 +196,7 @@ mod tests {
             history_enabled: false,
             preload_model_on_startup: false,
             model_idle_unload_minutes: None,
+            model_language_preferences: BTreeMap::new(),
         };
         let s3 = serde_json::to_string(&c3).unwrap();
         assert!(s3.contains("\"model_idle_unload_minutes\":null"));
@@ -136,6 +209,7 @@ mod tests {
             history_enabled: false,
             preload_model_on_startup: true,
             model_idle_unload_minutes: Some(30),
+            model_language_preferences: BTreeMap::new(),
         };
         let s4 = serde_json::to_string(&c4).unwrap();
         let d4: EcholetConfig = serde_json::from_str(&s4).unwrap();

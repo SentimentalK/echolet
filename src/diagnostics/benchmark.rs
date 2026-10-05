@@ -211,6 +211,7 @@ fn measure_f10_latency() -> Result<F10LatencyResult, Box<dyn std::error::Error>>
         history_enabled: false,
         preload_model_on_startup: false,
         model_idle_unload_minutes: None,
+        model_language_preferences: Default::default(),
     };
 
     let starter: AudioStarter = Box::new(|_tx| Ok(Box::new(()) as Box<dyn AudioSource>));

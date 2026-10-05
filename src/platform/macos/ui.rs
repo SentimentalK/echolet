@@ -4,7 +4,7 @@ use crate::actions::AppAction;
 use crate::paths;
 use crate::platform::macos::hotkey::register_global_f10;
 use crate::platform::macos::injector::execute_diff;
-use crate::platform::PlatformHandle;
+use crate::platform::{PlatformHandle, PlatformView};
 use cocoa::appkit::{
     NSApp, NSApplication, NSApplicationActivationPolicyAccessory, NSButton, NSMenu, NSMenuItem,
     NSStatusBar, NSStatusItem, NSVariableStatusItemLength,
@@ -62,16 +62,24 @@ impl PlatformHandle for MacPlatformHandle {
         let _ = self.cmd_tx.send(MacUiCommand::Shutdown);
     }
 
-    fn update_models(
-        &self,
-        active_id: Option<&str>,
-        installed_ids: &[String],
-        downloading_ids: &[String],
-    ) {
+    fn update_models(&self, view: &PlatformView) {
+        let active_id = view.selected_model().map(|m| m.id.clone());
+        let installed_ids = view
+            .models
+            .iter()
+            .filter(|m| m.is_installed)
+            .map(|m| m.id.clone())
+            .collect();
+        let downloading_ids = view
+            .models
+            .iter()
+            .filter(|m| m.download.is_in_progress())
+            .map(|m| m.id.clone())
+            .collect();
         let _ = self.cmd_tx.send(MacUiCommand::UpdateModels {
-            active_id: active_id.map(|s| s.to_string()),
-            installed_ids: installed_ids.to_vec(),
-            downloading_ids: downloading_ids.to_vec(),
+            active_id,
+            installed_ids,
+            downloading_ids,
         });
     }
 

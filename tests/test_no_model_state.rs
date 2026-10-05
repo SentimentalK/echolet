@@ -5,7 +5,7 @@ use echolet::audio::{AudioChunk, AudioSource, AudioStarter};
 use echolet::config::EcholetConfig;
 use echolet::models::manager::ModelManager;
 use echolet::models::manifest::ModelManifest;
-use echolet::platform::{PlatformHandle, PlatformRuntime, TextInjector};
+use echolet::platform::{PlatformHandle, PlatformRuntime, PlatformView, TextInjector};
 use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -29,14 +29,14 @@ impl PlatformHandle for TestPlatformHandle {
         self.listening_history.lock().unwrap().push(listening);
     }
     fn shutdown(&self) {}
-    fn update_models(
-        &self,
-        active_id: Option<&str>,
-        installed_ids: &[String],
-        _downloading_ids: &[String],
-    ) {
-        *self.last_active_model.lock().unwrap() = active_id.map(|s| s.to_string());
-        *self.last_installed_models.lock().unwrap() = installed_ids.to_vec();
+    fn update_models(&self, view: &PlatformView) {
+        *self.last_active_model.lock().unwrap() = view.selected_model().map(|m| m.id.clone());
+        *self.last_installed_models.lock().unwrap() = view
+            .models
+            .iter()
+            .filter(|m| m.is_installed)
+            .map(|m| m.id.clone())
+            .collect();
     }
 }
 
@@ -486,8 +486,8 @@ fn test_platform_projection_marks_no_entry_selected() {
         last_installed_models: last_installed.clone(),
     };
 
-    // Platform projection called with active_id: None
-    handle.update_models(None, &[], &[]);
+    // Platform projection called with a neutral view (no model selected).
+    handle.update_models(&PlatformView::default());
 
     assert_eq!(
         *last_active.lock().unwrap(),

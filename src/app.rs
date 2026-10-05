@@ -5,12 +5,18 @@ use crate::beep::{beep_start, beep_stop};
 use crate::config::EcholetConfig;
 use crate::diff::PartialSession;
 use crate::history::HistoryManager;
-use crate::models::{download_and_install_model, ModelManager};
+use crate::models::download::DownloadStatus;
+use crate::models::{
+    download_and_install_model_with_progress, InstallPhase, ModelManager, ProgressThrottle,
+};
 use crate::paths;
-use crate::platform::PlatformRuntime;
+use crate::platform::{
+    build_view, project_runtime_state, PlatformRuntime, PlatformView, RuntimeState,
+};
 use crate::state::AppState;
 use chrono::{DateTime, Local};
 use crossbeam_channel::{unbounded, Receiver, Sender};
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -44,6 +50,11 @@ pub struct App {
     current_utterance_start: Option<DateTime<Local>>,
     idle_unload_deadline: Option<std::time::Instant>,
     idle_unload_model_id: Option<String>,
+    /// True while the active recognizer is being created, so the platform UI
+    /// can publish LOADING before the expensive work begins.
+    model_loading: bool,
+    /// Last projected download status per model id.
+    download_progress: HashMap<String, DownloadStatus>,
 }
 
 impl App {
@@ -206,11 +217,6 @@ impl App {
         let history_dir = paths::history_dir();
         let history_manager = HistoryManager::new(config.history_enabled, history_dir);
 
-        // Initial UI projection
-        platform.handle.set_listening(false);
-        platform.handle.update_history_state(config.history_enabled);
-        notify_platform_models(&platform, &model_manager);
-
         let mut app = Self {
             state: AppState::new(),
             config,
@@ -230,7 +236,18 @@ impl App {
             current_utterance_start: None,
             idle_unload_deadline: None,
             idle_unload_model_id: None,
+            model_loading: false,
+            download_progress: HashMap::new(),
         };
+
+        // Initial UI projection: neutral state derived from the manager so the
+        // platform never has to guess (in particular Linux must not assume the
+        // registry default is installed before the manager projects it).
+        app.platform.handle.set_listening(false);
+        app.platform
+            .handle
+            .update_history_state(app.config.history_enabled);
+        app.notify_models();
 
         // If preload is requested, load active model during startup and begin idle deadline
         if app.config.preload_model_on_startup {
@@ -274,47 +291,127 @@ impl App {
         let active_model = self
             .model_manager
             .get_active_model()
-            .map_err(|e| format!("Failed to get active model: {}", e))?;
+            .map_err(|e| format!("Failed to get active model: {}", e))?
+            .clone();
 
         println!(
             "[ASR] Active model: {} ({}) at {:?}",
             active_model.manifest.display_name, active_model.id, active_model.dir
         );
 
+        // Publish LOADING before the expensive recognizer creation so the UI can
+        // show a truthful state instead of a stale READY/UNLOADED.
+        self.model_loading = true;
+        self.notify_models();
+
         crate::log::log("INFO", &format!("loading ASR model: {}", active_model.id));
         let t_recog_start = std::time::Instant::now();
-        let recognizer = Arc::new(OnlineRecognizer::from_manifest(
-            &active_model.dir,
-            &active_model.manifest,
-        )?);
+        let build_result = (|| -> Result<(Arc<OnlineRecognizer>, OnlineStream), String> {
+            let recognizer = Arc::new(OnlineRecognizer::from_manifest(
+                &active_model.dir,
+                &active_model.manifest,
+            )?);
+            let stream = recognizer.create_stream()?;
+            Ok((recognizer, stream))
+        })();
         let recog_duration = t_recog_start.elapsed();
 
-        let t_stream_start = std::time::Instant::now();
-        let stream = recognizer.create_stream()?;
-        let stream_duration = t_stream_start.elapsed();
-        let total_load_duration = t_total_start.elapsed();
+        self.model_loading = false;
 
+        let (recognizer, stream) = match build_result {
+            Ok(built) => built,
+            Err(err) => {
+                self.notify_models();
+                return Err(err.into());
+            }
+        };
+
+        // Apply the persisted per-model language preference BEFORE any waveform
+        // is ever fed to the fresh stream.
+        self.apply_language_to_stream(&active_model.id, &active_model.manifest, &stream);
+
+        let total_load_duration = t_total_start.elapsed();
         crate::log::log(
             "INFO",
             &format!(
-                "ASR model loaded: id='{}', total={:.2}ms, recognizer={:.2}ms, stream={:.2}ms",
+                "ASR model loaded: id='{}', total={:.2}ms, recognizer={:.2}ms",
                 active_model.id,
                 total_load_duration.as_secs_f64() * 1000.0,
                 recog_duration.as_secs_f64() * 1000.0,
-                stream_duration.as_secs_f64() * 1000.0,
             ),
         );
         println!(
-            "[ASR] Recognizer initialized successfully in {:.2}ms (recognizer: {:.2}ms, stream: {:.2}ms).",
+            "[ASR] Recognizer initialized successfully in {:.2}ms.",
             total_load_duration.as_secs_f64() * 1000.0,
-            recog_duration.as_secs_f64() * 1000.0,
-            stream_duration.as_secs_f64() * 1000.0,
         );
 
         // Publish only after both recognizer and stream creation succeed
         self._recognizer = Some(recognizer);
         self.stream = Some(stream);
+        self.notify_models();
         Ok(())
+    }
+
+    /// Resolves the forced runtime language code for `model_id` from the
+    /// persisted per-model preference, validating it against `manifest`.
+    ///
+    /// Returns `None` for Auto, for models without language options (e.g.
+    /// X-ASR), or when a stale/invalid preference was repaired back to Auto.
+    pub fn resolve_language_code(
+        &mut self,
+        model_id: &str,
+        manifest: &crate::models::manifest::ModelManifest,
+    ) -> Option<String> {
+        if manifest.supported_language_options().is_empty() {
+            return None;
+        }
+        let pref = self.config.language_preference(model_id)?;
+        if pref.eq_ignore_ascii_case(EcholetConfig::LANGUAGE_AUTO) {
+            return None;
+        }
+        match manifest.validate_language_selection(Some(pref)) {
+            Ok(Some(opt)) => Some(opt.runtime_code.clone()),
+            Ok(None) => None,
+            Err(err) => {
+                // A catalog change can invalidate a stored locale. Fall back to
+                // Auto and repair the config rather than bricking model use.
+                crate::log::log(
+                    "WARN",
+                    &format!(
+                        "invalid stored language preference {:?} for model '{}': {}; resetting to Auto",
+                        pref, model_id, err
+                    ),
+                );
+                self.config.set_language_preference(model_id, None);
+                let _ = self.config.save();
+                None
+            }
+        }
+    }
+
+    /// Applies the resolved language option to a freshly created stream. Models
+    /// without language options are left untouched (X-ASR keeps working with no
+    /// forced language).
+    fn apply_language_to_stream(
+        &mut self,
+        model_id: &str,
+        manifest: &crate::models::manifest::ModelManifest,
+        stream: &OnlineStream,
+    ) {
+        if manifest.supported_language_options().is_empty() {
+            return;
+        }
+        let code = self.resolve_language_code(model_id, manifest);
+        if let Err(err) = stream.set_language(code.as_deref()) {
+            crate::log::log(
+                "WARN",
+                &format!(
+                    "failed to set language option on stream for '{}': {}; falling back to Auto",
+                    model_id, err
+                ),
+            );
+            let _ = stream.set_language(None);
+        }
     }
 
     /// Safely unloads the active model and stream runtime.
@@ -354,6 +451,7 @@ impl App {
                 unload_duration.as_secs_f64() * 1000.0
             );
         }
+        self.notify_models();
         true
     }
 
@@ -361,8 +459,37 @@ impl App {
         self._audio_source.is_some()
     }
 
+    /// Single authority for the projected runtime residency/activity state.
+    pub fn runtime_state(&self) -> RuntimeState {
+        project_runtime_state(
+            self.model_manager.active_model_id.is_some(),
+            self.is_model_loaded(),
+            self.model_loading,
+            self.state.listening,
+        )
+    }
+
+    /// Builds the platform-neutral UI projection from current app state.
+    pub fn platform_view(&self) -> PlatformView {
+        let installed: HashSet<String> = self.model_manager.installed.keys().cloned().collect();
+        build_view(
+            &self.model_manager.registry,
+            self.model_manager.active_model_id.as_deref(),
+            &installed,
+            &self.model_manager.downloading,
+            &self.download_progress,
+            &self.config,
+            self.runtime_state(),
+        )
+    }
+
     pub fn notify_models(&self) {
-        notify_platform_models(&self.platform, &self.model_manager);
+        self.platform.handle.update_models(&self.platform_view());
+    }
+
+    /// Current projected download status for a model, if any.
+    pub fn download_status(&self, model_id: &str) -> Option<&DownloadStatus> {
+        self.download_progress.get(model_id)
     }
 
     pub fn cancel_idle_unload(&mut self) {
@@ -379,14 +506,12 @@ impl App {
             return;
         }
 
-        match self.config.model_idle_unload_minutes {
-            Some(0) => {
-                self.idle_unload_deadline = Some(std::time::Instant::now());
-                self.idle_unload_model_id = self.model_manager.active_model_id.clone();
-            }
-            Some(minutes) => {
-                let duration = Duration::from_secs(minutes as u64 * 60);
-                self.idle_unload_deadline = Some(std::time::Instant::now() + duration);
+        match idle_unload_deadline_for(
+            self.config.model_idle_unload_minutes,
+            std::time::Instant::now(),
+        ) {
+            Some(deadline) => {
+                self.idle_unload_deadline = Some(deadline);
                 self.idle_unload_model_id = self.model_manager.active_model_id.clone();
             }
             None => {
@@ -489,6 +614,7 @@ impl App {
         self.state.listening = true;
         beep_start();
         self.platform.handle.set_listening(true);
+        self.notify_models();
         let total_transition_duration = t_start.elapsed();
 
         crate::log::log(
@@ -556,6 +682,7 @@ impl App {
 
         // 6. Schedule unload according to policy
         self.schedule_idle_unload();
+        self.notify_models();
     }
 
     pub fn toggle_listening(&mut self) {
@@ -596,7 +723,9 @@ impl App {
             return false;
         }
 
-        // If installed, perform transactional switch
+        // If installed, perform transactional switch. Selection is deliberately
+        // separate from download: an uninstalled model is never auto-downloaded
+        // by selecting it.
         if let Some(candidate) = self.model_manager.get_model(model_id).cloned() {
             println!(
                 "[Model] Switching to installed model '{}' ({:?})...",
@@ -626,6 +755,10 @@ impl App {
                 }
             };
 
+            // Apply the candidate model's persisted language preference before
+            // publishing the stream (and thus before any future audio).
+            self.apply_language_to_stream(&candidate.id, &candidate.manifest, &new_stream);
+
             // Transactional swap: explicitly drop previous stream before previous recognizer Arc
             drop(self.stream.take());
             drop(self._recognizer.take());
@@ -651,44 +784,172 @@ impl App {
             return true;
         }
 
-        // If not installed, trigger background download
-        if let Some(entry) = self.model_manager.registry.get_model(model_id).cloned() {
-            if self.model_manager.downloading.contains(model_id) {
-                println!("[Model] Model '{}' is already downloading.", model_id);
-                return false;
-            }
-
-            self.model_manager.downloading.insert(model_id.to_string());
-            self.notify_models();
-
-            let target_dir = self.model_manager.get_user_install_dir(model_id);
-            let action_tx = self.action_tx.clone();
-            let dl_model_id = model_id.to_string();
-
-            std::thread::spawn(move || {
-                println!(
-                    "[Model] Background download thread started for '{}'...",
-                    dl_model_id
-                );
-                let result = download_and_install_model(&entry, &target_dir);
-                let (success, error) = match result {
-                    Ok(_) => (true, None),
-                    Err(e) => (false, Some(e)),
-                };
-
-                if let Some(tx) = action_tx {
-                    let _ = tx.send(AppAction::ModelInstalled {
-                        model_id: dl_model_id,
-                        success,
-                        error,
-                    });
-                }
-            });
+        if self.model_manager.registry.get_model(model_id).is_some() {
+            println!(
+                "[Model] Model '{}' is not installed; use the Download action first.",
+                model_id
+            );
         } else {
             eprintln!("[Model] Model ID '{}' not found in registry.", model_id);
         }
 
         false
+    }
+
+    /// Starts a background download/install for an uninstalled registry model.
+    ///
+    /// This is intentionally separate from [`App::select_model`]: a successful
+    /// download makes the model selectable but never changes the active model.
+    pub fn start_download(&mut self, model_id: &str) -> bool {
+        if self.state.listening {
+            println!("[Model] Download requested while Listening; ignoring until Standby.");
+            return false;
+        }
+        if self.model_manager.installed.contains_key(model_id) {
+            println!("[Model] Model '{}' is already installed.", model_id);
+            return false;
+        }
+        if self.model_manager.downloading.contains(model_id) {
+            println!("[Model] Model '{}' is already downloading.", model_id);
+            return false;
+        }
+        let Some(entry) = self.model_manager.registry.get_model(model_id).cloned() else {
+            eprintln!("[Model] Model ID '{}' not found in registry.", model_id);
+            return false;
+        };
+
+        self.model_manager.downloading.insert(model_id.to_string());
+        self.download_progress
+            .insert(model_id.to_string(), DownloadStatus::Starting);
+        self.notify_models();
+
+        let target_dir = self.model_manager.get_user_install_dir(model_id);
+        let action_tx = self.action_tx.clone();
+        let dl_model_id = model_id.to_string();
+        let progress_model_id = dl_model_id.clone();
+
+        std::thread::spawn(move || {
+            println!(
+                "[Model] Background download thread started for '{}'...",
+                dl_model_id
+            );
+            let mut throttle = ProgressThrottle::new();
+            let progress_tx = action_tx.clone();
+            let mut on_progress = move |phase: InstallPhase| {
+                let status = DownloadStatus::from_phase(&phase);
+                if throttle.should_emit(status.clone()) {
+                    if let Some(tx) = &progress_tx {
+                        let _ = tx.send(AppAction::ModelDownloadProgress {
+                            model_id: progress_model_id.clone(),
+                            status,
+                        });
+                    }
+                }
+            };
+            let result = download_and_install_model_with_progress(
+                &entry,
+                &target_dir,
+                Some(&mut on_progress),
+            );
+            let (success, error) = match result {
+                Ok(_) => (true, None),
+                Err(e) => (false, Some(e)),
+            };
+
+            if let Some(tx) = action_tx {
+                let _ = tx.send(AppAction::ModelInstalled {
+                    model_id: dl_model_id,
+                    success,
+                    error,
+                });
+            }
+        });
+        true
+    }
+
+    /// Applies the persisted per-model language preference for `model_id`.
+    ///
+    /// Only legal while not Listening. Validates against the model's typed
+    /// language metadata, persists the choice, and (when the model's recognizer
+    /// is loaded in Standby) updates the live stream option so the next audio
+    /// uses it. Returns whether the selection was applied.
+    pub fn set_language(&mut self, model_id: &str, locale: Option<&str>) -> bool {
+        if self.state.listening {
+            println!("[Language] Selection requested while Listening; ignoring until Standby.");
+            return false;
+        }
+
+        let manifest = match self.model_manager.get_model(model_id) {
+            Some(m) => m.manifest.clone(),
+            None => match self.model_manager.registry.get_model(model_id) {
+                Some(entry) => entry.to_manifest(),
+                None => {
+                    eprintln!("[Language] Model ID '{}' not found.", model_id);
+                    return false;
+                }
+            },
+        };
+
+        if manifest.supported_language_options().is_empty() {
+            println!(
+                "[Language] Model '{}' does not support forced-language selection.",
+                model_id
+            );
+            return false;
+        }
+
+        let resolved = match manifest.validate_language_selection(locale) {
+            Ok(opt) => opt.map(|o| o.runtime_code.clone()),
+            Err(err) => {
+                eprintln!("[Language] Invalid selection for '{}': {}", model_id, err);
+                return false;
+            }
+        };
+
+        self.config.set_language_preference(model_id, locale);
+        let _ = self.config.save();
+
+        // If this is the active model and it is resident in Standby, update the
+        // live stream option without reloading the recognizer.
+        if self.model_manager.active_model_id.as_deref() == Some(model_id) {
+            if let Some(ref stream) = self.stream {
+                if let Err(err) = stream.set_language(resolved.as_deref()) {
+                    eprintln!("[Language] Failed to update stream option: {}", err);
+                }
+            }
+        }
+
+        self.notify_models();
+        true
+    }
+
+    /// Updates the idle-unload policy and applies it consistently to the live
+    /// residency state.
+    ///
+    /// * While Listening the policy is persisted but not enforced; it takes
+    ///   effect when listening stops (via the normal `schedule_idle_unload`).
+    /// * `Some(0)` (Immediate) while resident in Standby unloads promptly.
+    /// * Any other value (including `None`/Never) reschedules or cancels the
+    ///   active deadline.
+    pub fn set_idle_unload_policy(&mut self, minutes: Option<u32>) {
+        self.config.model_idle_unload_minutes = minutes;
+        let _ = self.config.save();
+
+        if self.state.listening {
+            // Do not unload the model that is actively in use; the new policy is
+            // applied by stop_listening -> schedule_idle_unload.
+        } else if self.is_model_loaded() {
+            match minutes {
+                Some(0) => {
+                    self.unload_model();
+                }
+                _ => self.schedule_idle_unload(),
+            }
+        } else {
+            self.cancel_idle_unload();
+        }
+
+        self.notify_models();
     }
 
     pub fn handle_action(&mut self, action: AppAction) {
@@ -704,8 +965,19 @@ impl App {
                 self.state.running = false;
                 self.platform.handle.shutdown();
             }
+            AppAction::DownloadModel(model_id) => {
+                self.start_download(&model_id);
+            }
             AppAction::SelectModel(model_id) => {
                 self.select_model(&model_id);
+            }
+            AppAction::ModelDownloadProgress { model_id, status } => {
+                // Coalesce: only re-project when the projected status actually
+                // changed (the background thread already throttles raw events).
+                if self.download_progress.get(&model_id) != Some(&status) {
+                    self.download_progress.insert(model_id, status);
+                    self.notify_models();
+                }
             }
             AppAction::ModelInstalled {
                 model_id,
@@ -715,21 +987,36 @@ impl App {
                 self.model_manager.downloading.remove(&model_id);
                 if success {
                     println!(
-                        "[Model] Download finished for '{}'. Updating installed models...",
+                        "[Model] Download finished for '{}'. Marking installed (not auto-selecting).",
                         model_id
                     );
                     self.model_manager.discover_installed();
-                    self.notify_models();
-                    if !self.state.listening {
-                        self.select_model(&model_id);
-                    }
+                    self.download_progress.remove(&model_id);
                 } else {
                     eprintln!(
                         "[Model] Download or verification failed for '{}': {:?}",
                         model_id, error
                     );
-                    self.notify_models();
+                    self.download_progress
+                        .insert(model_id, DownloadStatus::Failed);
                 }
+                self.notify_models();
+            }
+            AppAction::SelectLanguage { model_id, locale } => {
+                self.set_language(&model_id, locale.as_deref());
+            }
+            AppAction::SetPreloadModelOnStartup(enabled) => {
+                self.config.preload_model_on_startup = enabled;
+                let _ = self.config.save();
+                println!(
+                    "[Config] Preload on startup set to {}",
+                    if enabled { "ON" } else { "OFF" }
+                );
+                self.notify_models();
+            }
+            AppAction::SetModelIdleUnloadMinutes(minutes) => {
+                println!("[Config] Idle unload policy set to {:?}", minutes);
+                self.set_idle_unload_policy(minutes);
             }
             AppAction::ToggleHistory => {
                 let new_enabled = !self.history_manager.enabled;
@@ -847,12 +1134,43 @@ impl Drop for App {
     }
 }
 
-fn notify_platform_models(platform: &PlatformRuntime, manager: &ModelManager) {
-    let installed_ids: Vec<String> = manager.installed.keys().cloned().collect();
-    let downloading_ids: Vec<String> = manager.downloading.iter().cloned().collect();
-    platform.handle.update_models(
-        manager.active_model_id.as_deref(),
-        &installed_ids,
-        &downloading_ids,
-    );
+/// Pure mapping from the accepted idle-unload policy to an absolute deadline.
+///
+/// This is the single scheduling authority used by
+/// [`App::schedule_idle_unload`], exposed so the reschedule/cancel contract can
+/// be tested without a live recognizer.
+pub fn idle_unload_deadline_for(
+    minutes: Option<u32>,
+    now: std::time::Instant,
+) -> Option<std::time::Instant> {
+    match minutes {
+        Some(0) => Some(now),
+        Some(m) => Some(now + Duration::from_secs(m as u64 * 60)),
+        None => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Instant;
+
+    #[test]
+    fn idle_deadline_maps_all_accepted_policies() {
+        let now = Instant::now();
+        assert_eq!(idle_unload_deadline_for(Some(0), now), Some(now));
+        assert_eq!(
+            idle_unload_deadline_for(Some(1), now),
+            Some(now + Duration::from_secs(60))
+        );
+        assert_eq!(
+            idle_unload_deadline_for(Some(10), now),
+            Some(now + Duration::from_secs(600))
+        );
+        assert_eq!(
+            idle_unload_deadline_for(Some(30), now),
+            Some(now + Duration::from_secs(1800))
+        );
+        assert_eq!(idle_unload_deadline_for(None, now), None);
+    }
 }

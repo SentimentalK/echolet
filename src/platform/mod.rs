@@ -2,20 +2,25 @@ use crate::actions::AppAction;
 use crossbeam_channel::Sender;
 use std::path::Path;
 
+pub mod view;
+
+pub use view::{
+    build_view, download_status_label, format_bytes, project_runtime_state, LanguageOptionView,
+    ModelLanguageView, PlatformModelItem, PlatformView, RuntimeState,
+};
+
 pub trait TextInjector: Send + Sync {
     fn apply_diff(&self, backspaces: usize, new_suffix: &str);
 }
 
 pub trait PlatformHandle: Send + Sync {
-    fn set_listening(&self, listening: bool);
-    fn shutdown(&self);
-    fn update_models(
-        &self,
-        _active_id: Option<&str>,
-        _installed_ids: &[String],
-        _downloading_ids: &[String],
-    ) {
-    }
+    fn set_listening(&self, _listening: bool) {}
+    fn shutdown(&self) {}
+    /// Projects the complete platform-neutral model/runtime/settings view.
+    ///
+    /// Windows/macOS use only the model name today; the richer fields keep the
+    /// Linux tray a pure function of this projection.
+    fn update_models(&self, _view: &PlatformView) {}
     fn update_history_state(&self, _enabled: bool) {}
     fn open_history_folder(&self, _history_dir: &Path) {}
 }

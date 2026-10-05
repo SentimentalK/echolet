@@ -6,7 +6,7 @@ use echolet::models::manifest::ModelManifest;
 use echolet::models::registry::{
     ModelLicense, ModelRegistry, VerificationStatus, CURRENT_SCHEMA_VERSION,
 };
-use echolet::platform::{PlatformHandle, PlatformRuntime, TextInjector};
+use echolet::platform::{PlatformHandle, PlatformRuntime, PlatformView, TextInjector};
 use std::fs;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -31,16 +31,12 @@ impl PlatformHandle for FakePlatformHandle {
         self.shutdown_called.store(true, Ordering::SeqCst);
     }
 
-    fn update_models(
-        &self,
-        active_id: Option<&str>,
-        _installed_ids: &[String],
-        _downloading_ids: &[String],
-    ) {
-        self.models_history
-            .lock()
-            .unwrap()
-            .push(active_id.unwrap_or("").to_string());
+    fn update_models(&self, view: &PlatformView) {
+        self.models_history.lock().unwrap().push(
+            view.selected_model()
+                .map(|m| m.id.clone())
+                .unwrap_or_default(),
+        );
     }
 }
 
