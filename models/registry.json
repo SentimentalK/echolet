@@ -58,7 +58,7 @@
       },
       "files": {
         "encoder": "encoder-epoch-99-avg-1-chunk-16-left-128.int8.onnx",
-        "decoder": "decoder-epoch-99-avg-1-chunk-16-left-128.int8.onnx",
+        "decoder": "decoder-epoch-99-avg-1-chunk-16-left-128.onnx",
         "joiner": "joiner-epoch-99-avg-1-chunk-16-left-128.int8.onnx",
         "tokens": "tokens.txt"
       },
@@ -71,7 +71,7 @@
         "max_active_paths": 4
       },
       "download_size_bytes": 310414022,
-      "installed_size_bytes": 70913968,
+      "installed_size_bytes": 72466360,
       "upstream_release_date": "2023-06-26",
       "license": {
         "spdx": "Apache-2.0",

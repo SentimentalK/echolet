@@ -1,6 +1,6 @@
+use std::sync::Arc;
 use echolet::asr;
 use echolet::paths;
-use std::sync::Arc;
 
 #[test]
 fn test_streaming_decode_wav() {
@@ -8,14 +8,9 @@ fn test_streaming_decode_wav() {
     let wav_path = model_dir.join("test_wavs/0.wav");
 
     paths::validate_model_bundle(&model_dir).expect("Model bundle validation failed in test");
-    assert!(
-        wav_path.exists(),
-        "test_wavs/0.wav must exist at {:?}",
-        wav_path
-    );
+    assert!(wav_path.exists(), "test_wavs/0.wav must exist at {:?}", wav_path);
 
-    let recognizer =
-        Arc::new(asr::OnlineRecognizer::new(&model_dir).expect("Failed to create recognizer"));
+    let recognizer = Arc::new(asr::OnlineRecognizer::new(&model_dir).expect("Failed to create recognizer"));
     let stream = recognizer.create_stream().expect("Failed to create stream");
 
     // Read 16-bit PCM wav file (skip 44 bytes header)
@@ -33,9 +28,7 @@ fn test_streaming_decode_wav() {
         stream.accept_waveform(16000, chunk);
         stream.decode_all_ready();
         let r = stream.get_result();
-        if !r.is_empty()
-            && (intermediate_results.is_empty() || intermediate_results.last() != Some(&r))
-        {
+        if !r.is_empty() && (intermediate_results.is_empty() || intermediate_results.last() != Some(&r)) {
             intermediate_results.push(r.clone());
         }
     }

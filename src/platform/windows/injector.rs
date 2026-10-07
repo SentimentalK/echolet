@@ -1,8 +1,8 @@
 use crate::platform::TextInjector;
 use std::mem::size_of;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE,
-    VK_BACK,
+    SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP,
+    KEYEVENTF_UNICODE, VK_BACK,
 };
 
 pub struct WindowsInjector;

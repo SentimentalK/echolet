@@ -17,20 +17,11 @@ fn main() {
 
     // 2. Validate that required native shared libraries / import libraries exist
     let (lib_name, prep_script) = if target_os == "macos" {
-        (
-            "libsherpa-onnx-c-api.dylib",
-            "./scripts/macos/prepare-assets.sh",
-        )
+        ("libsherpa-onnx-c-api.dylib", "./scripts/macos/prepare-assets.sh")
     } else if target_os == "windows" {
-        (
-            "sherpa-onnx-c-api.lib",
-            ".\\scripts\\windows\\prepare-assets.ps1",
-        )
+        ("sherpa-onnx-c-api.lib", ".\\scripts\\windows\\prepare-assets.ps1")
     } else {
-        (
-            "libsherpa-onnx-c-api.so",
-            "./scripts/prepare-local-assets.sh",
-        )
+        ("libsherpa-onnx-c-api.so", "./scripts/prepare-local-assets.sh")
     };
 
     let sherpa_c_api = native_lib_dir.join(lib_name);
@@ -48,10 +39,7 @@ fn main() {
     }
 
     // 3. Link against shared libraries
-    println!(
-        "cargo:rustc-link-search=native={}",
-        native_lib_dir.display()
-    );
+    println!("cargo:rustc-link-search=native={}", native_lib_dir.display());
     println!("cargo:rustc-link-lib=dylib=sherpa-onnx-c-api");
     println!("cargo:rustc-link-lib=dylib=onnxruntime");
 
@@ -71,16 +59,9 @@ fn main() {
             println!("cargo:rustc-link-arg=-Wl,-rpath,@executable_path/../Frameworks");
         } else {
             println!("cargo:rustc-link-arg=-Wl,-rpath,@executable_path/../Frameworks");
-            println!(
-                "cargo:rustc-link-arg=-Wl,-rpath,{}",
-                native_lib_dir.display()
-            );
-            println!(
-                "cargo:rustc-link-arg=-Wl,-rpath,@loader_path/../../.local-runtime/runtime/lib"
-            );
-            println!(
-                "cargo:rustc-link-arg=-Wl,-rpath,@loader_path/../../../.local-runtime/runtime/lib"
-            );
+            println!("cargo:rustc-link-arg=-Wl,-rpath,{}", native_lib_dir.display());
+            println!("cargo:rustc-link-arg=-Wl,-rpath,@loader_path/../../.local-runtime/runtime/lib");
+            println!("cargo:rustc-link-arg=-Wl,-rpath,@loader_path/../../../.local-runtime/runtime/lib");
         }
     } else if target_os == "linux" {
         if is_bundle_build {
@@ -96,12 +77,10 @@ fn main() {
         println!("cargo:rerun-if-changed=assets/windows/echolet.ico");
         let mut res = winresource::WindowsResource::new();
         res.set_icon("assets/windows/echolet.ico");
-        res.compile()
-            .expect("Failed to compile Windows application icon resource");
+        res.compile().expect("Failed to compile Windows application icon resource");
     }
 
     if target_os == "macos" || target_os == "linux" || target_os == "windows" {
-        slint_build::compile("ui/desktop/EcholetPanel.slint")
-            .expect("Failed to compile EcholetPanel.slint");
+        slint_build::compile("ui/desktop/EcholetPanel.slint").expect("Failed to compile EcholetPanel.slint");
     }
 }

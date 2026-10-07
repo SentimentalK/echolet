@@ -79,8 +79,5 @@ pub fn register_gnome_shortcut() {
         .args(["set", &schema, "binding", "F10"])
         .output();
 
-    println!(
-        "[Hotkey] Global shortcut F10 registered via GNOME: `{}`",
-        cmd
-    );
+    println!("[Hotkey] Global shortcut F10 registered via GNOME: `{}`", cmd);
 }

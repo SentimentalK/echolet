@@ -72,10 +72,7 @@ impl LinuxInjector {
                 Some(cb)
             }
             Err(e) => {
-                eprintln!(
-                    "[Injector] Warning: Failed to initialize clipboard: {}. Fast paste disabled.",
-                    e
-                );
+                eprintln!("[Injector] Warning: Failed to initialize clipboard: {}. Fast paste disabled.", e);
                 None
             }
         };
@@ -138,23 +135,19 @@ impl LinuxInjector {
         // 1. Try opening directly
         match Self::try_open_and_setup_uinput() {
             Ok(file) => return Ok(file),
-            Err(e)
-                if e.raw_os_error() == Some(libc::EACCES)
-                    || e.raw_os_error() == Some(libc::EPERM) =>
-            {
+            Err(e) if e.raw_os_error() == Some(libc::EACCES) || e.raw_os_error() == Some(libc::EPERM) => {
                 println!("[Injector] Notice: /dev/uinput requires user access permissions. Triggering system authorization...");
                 Self::bootstrap_permission_and_retry()?;
                 // Retry opening
-                Self::try_open_and_setup_uinput()
-                    .map_err(|e| format!("Failed to open /dev/uinput after authorization: {}", e))
+                Self::try_open_and_setup_uinput().map_err(|e| format!("Failed to open /dev/uinput after authorization: {}", e))
             }
             Err(e) => Err(format!("Failed to open /dev/uinput: {}", e)),
         }
     }
 
     fn bootstrap_permission_and_retry() -> Result<(), String> {
-        let exe =
-            env::current_exe().map_err(|e| format!("Cannot locate current executable: {}", e))?;
+        let exe = env::current_exe()
+            .map_err(|e| format!("Cannot locate current executable: {}", e))?;
 
         let status = Command::new("pkexec")
             .arg(&exe)

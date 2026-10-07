@@ -8,7 +8,7 @@
 use std::mem::size_of;
 use std::ptr;
 use windows_sys::Win32::Graphics::Gdi::{
-    CreateBitmap, CreateDIBSection, DeleteObject, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS,
+    BITMAPINFO, BITMAPINFOHEADER, CreateBitmap, CreateDIBSection, DeleteObject, DIB_RGB_COLORS,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{CreateIconIndirect, HICON, ICONINFO};
 

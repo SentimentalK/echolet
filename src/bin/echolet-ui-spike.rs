@@ -23,9 +23,7 @@ fn print_usage() {
     println!("    -h, --help                 Print help information");
     println!("    --dry-run                  Initialize and bind view model, then exit without showing window");
     println!("    --bench                    Run benchmark suite (measures startup, open/hide latency, and RSS)");
-    println!(
-        "    --long-names               Use extreme length text fixture to verify layout bounds"
-    );
+    println!("    --long-names               Use extreme length text fixture to verify layout bounds");
     println!("    --close-after-ms <MS>      Auto-close and exit event loop after specified milliseconds");
     println!("    --iterations <N>           Number of open/hide iterations for benchmarking (default: 5)");
 }
@@ -64,10 +62,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("============================================================");
     println!("Logical Panel Width : {} px", PANEL_WIDTH_PX);
     println!("Logical Panel Height: {} px", PANEL_HEIGHT_PX);
-    println!(
-        "SLINT_BACKEND       : {}",
-        env::var("SLINT_BACKEND").unwrap_or_default()
-    );
+    println!("SLINT_BACKEND       : {}", env::var("SLINT_BACKEND").unwrap_or_default());
 
     // 1. Build deterministic representative fixture
     let state = if use_long_names {
@@ -89,11 +84,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("ViewModel binding   : {:?}", bind_duration);
 
     if let Some(rss) = get_current_rss() {
-        println!(
-            "Initial Process RSS : {:.2} MiB ({} bytes)",
-            rss.mib(),
-            rss.bytes()
-        );
+        println!("Initial Process RSS : {:.2} MiB ({} bytes)", rss.mib(), rss.bytes());
     }
 
     if is_dry_run {
@@ -139,16 +130,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     // 5. Position window (deterministic test anchor)
-    panel
-        .window()
-        .set_position(slint::LogicalPosition::new(100.0, 100.0));
+    panel.window().set_position(slint::LogicalPosition::new(100.0, 100.0));
 
     // 6. Benchmark repeated open/hide cycles if requested
     if is_bench {
-        println!(
-            "--- Starting repeated open/hide benchmark ({} iterations) ---",
-            iterations
-        );
+        println!("--- Starting repeated open/hide benchmark ({} iterations) ---", iterations);
         let mut open_latencies = Vec::new();
         let mut hide_latencies = Vec::new();
 
@@ -160,11 +146,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             if i == 0 {
                 if let Some(rss) = get_current_rss() {
-                    println!(
-                        "[Bench] Visible window RSS (iteration 1): {:.2} MiB ({} bytes)",
-                        rss.mib(),
-                        rss.bytes()
-                    );
+                    println!("[Bench] Visible window RSS (iteration 1): {:.2} MiB ({} bytes)", rss.mib(), rss.bytes());
                 }
             }
 
@@ -175,12 +157,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         if let Some(rss) = get_current_rss() {
-            println!(
-                "[Bench] Hidden window RSS (after {} iterations): {:.2} MiB ({} bytes)",
-                iterations,
-                rss.mib(),
-                rss.bytes()
-            );
+            println!("[Bench] Hidden window RSS (after {} iterations): {:.2} MiB ({} bytes)", iterations, rss.mib(), rss.bytes());
         }
 
         open_latencies.sort();
@@ -222,12 +199,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             move || {
                 tf.store(true, Ordering::SeqCst);
                 if let Some(rss) = get_current_rss() {
-                    println!(
-                        "[Timer] Stable visible RSS at {}ms: {:.2} MiB ({} bytes)",
-                        ms,
-                        rss.mib(),
-                        rss.bytes()
-                    );
+                    println!("[Timer] Stable visible RSS at {}ms: {:.2} MiB ({} bytes)", ms, rss.mib(), rss.bytes());
                 }
                 println!("[Timer] close-after-ms ({ms}ms) reached. Quitting event loop.");
                 if let Some(p) = panel_weak_timer.upgrade() {
@@ -246,11 +218,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("--> Event loop terminated successfully.");
 
     if let Some(rss) = get_current_rss() {
-        println!(
-            "Final Process RSS   : {:.2} MiB ({} bytes)",
-            rss.mib(),
-            rss.bytes()
-        );
+        println!("Final Process RSS   : {:.2} MiB ({} bytes)", rss.mib(), rss.bytes());
     }
 
     Ok(())

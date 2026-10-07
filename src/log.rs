@@ -55,16 +55,10 @@ pub fn init() {
 
     {
         let mut g = LOG.lock().unwrap();
-        *g = Some(LogState {
-            path: log_path,
-            buf,
-        });
+        *g = Some(LogState { path: log_path, buf });
     }
 
-    log(
-        "INFO",
-        &format!("=== Echolet starting (pid={}) ===", std::process::id()),
-    );
+    log("INFO", &format!("=== Echolet starting (pid={}) ===", std::process::id()));
 
     std::panic::set_hook(Box::new(|info| {
         let bt = std::backtrace::Backtrace::force_capture();
@@ -101,11 +95,7 @@ pub fn log(level: &str, msg: &str) {
 /// handler, which may run on a thread that already holds `LOG`.
 fn log_crash_direct(line: &str) {
     if let Some(path) = LOG_PATH.get() {
-        if let Ok(mut f) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-        {
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
             let _ = writeln!(f, "{}", line);
             let _ = f.flush();
         }
@@ -122,9 +112,7 @@ fn ts() -> String {
 #[cfg(target_os = "windows")]
 mod win_exc {
     use super::log_crash_direct;
-    use windows_sys::Win32::System::Diagnostics::Debug::{
-        SetUnhandledExceptionFilter, EXCEPTION_POINTERS,
-    };
+    use windows_sys::Win32::System::Diagnostics::Debug::{EXCEPTION_POINTERS, SetUnhandledExceptionFilter};
 
     // EXCEPTION_CONTINUE_SEARCH — log, then let the default crash handling
     // (Windows Error Reporting / minidump) proceed so the process still exits.

@@ -61,31 +61,13 @@ mod tests {
         let mut session = PartialSession::new();
 
         let a1 = session.update("昨天").unwrap();
-        assert_eq!(
-            a1,
-            DiffAction {
-                backspaces: 0,
-                new_suffix: "昨天".to_string()
-            }
-        );
+        assert_eq!(a1, DiffAction { backspaces: 0, new_suffix: "昨天".to_string() });
 
         let a2 = session.update("昨天是").unwrap();
-        assert_eq!(
-            a2,
-            DiffAction {
-                backspaces: 0,
-                new_suffix: "是".to_string()
-            }
-        );
+        assert_eq!(a2, DiffAction { backspaces: 0, new_suffix: "是".to_string() });
 
         let a3 = session.update("昨天是 Monday").unwrap();
-        assert_eq!(
-            a3,
-            DiffAction {
-                backspaces: 0,
-                new_suffix: " Monday".to_string()
-            }
-        );
+        assert_eq!(a3, DiffAction { backspaces: 0, new_suffix: " Monday".to_string() });
     }
 
     #[test]
@@ -94,13 +76,10 @@ mod tests {
 
         session.update("我觉得这个 link");
         let a2 = session.update("我觉得这个 Linux").unwrap();
-        assert_eq!(
-            a2,
-            DiffAction {
-                backspaces: 4, // deletes 'l', 'i', 'n', 'k'
-                new_suffix: "Linux".to_string()
-            }
-        );
+        assert_eq!(a2, DiffAction {
+            backspaces: 4, // deletes 'l', 'i', 'n', 'k'
+            new_suffix: "Linux".to_string()
+        });
     }
 
     #[test]
@@ -112,12 +91,9 @@ mod tests {
 
         // Second utterance
         let a2 = session.update("第二句话").unwrap();
-        assert_eq!(
-            a2,
-            DiffAction {
-                backspaces: 0, // Must NOT delete "第一句话。"
-                new_suffix: "第二句话".to_string()
-            }
-        );
+        assert_eq!(a2, DiffAction {
+            backspaces: 0, // Must NOT delete "第一句话。"
+            new_suffix: "第二句话".to_string()
+        });
     }
 }

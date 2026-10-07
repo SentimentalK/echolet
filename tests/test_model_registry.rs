@@ -128,7 +128,7 @@ fn test_registry_parsing_and_invariants() {
     );
     assert_eq!(
         zipformer.files.decoder,
-        "decoder-epoch-99-avg-1-chunk-16-left-128.int8.onnx"
+        "decoder-epoch-99-avg-1-chunk-16-left-128.onnx"
     );
     assert_eq!(
         zipformer.files.joiner,
@@ -155,7 +155,7 @@ fn test_registry_parsing_and_invariants() {
         Some("37cb5606808f3d5e55a3fc73554bdf757d82465a")
     );
     assert_eq!(zipformer.download_size_bytes, Some(310414022));
-    assert_eq!(zipformer.installed_size_bytes, Some(70913968));
+    assert_eq!(zipformer.installed_size_bytes, Some(72466360));
     assert_eq!(
         zipformer.license.as_ref().and_then(|l| l.spdx.as_deref()),
         Some("Apache-2.0")
