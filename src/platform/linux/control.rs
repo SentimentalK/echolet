@@ -20,8 +20,12 @@ pub fn get_socket_path() -> PathBuf {
 
 pub fn send_toggle_signal() -> Result<(), String> {
     let socket_path = get_socket_path();
-    let mut stream = UnixStream::connect(&socket_path)
-        .map_err(|e| format!("Failed to connect to daemon socket at {:?}: {}", socket_path, e))?;
+    let mut stream = UnixStream::connect(&socket_path).map_err(|e| {
+        format!(
+            "Failed to connect to daemon socket at {:?}: {}",
+            socket_path, e
+        )
+    })?;
     stream
         .write_all(b"TOGGLE\n")
         .map_err(|e| format!("Failed to write to socket: {}", e))?;
@@ -31,8 +35,12 @@ pub fn send_toggle_signal() -> Result<(), String> {
 
 pub fn send_stop_signal() -> Result<(), String> {
     let socket_path = get_socket_path();
-    let mut stream = UnixStream::connect(&socket_path)
-        .map_err(|e| format!("Echolet daemon is not running (cannot connect to {:?}): {}", socket_path, e))?;
+    let mut stream = UnixStream::connect(&socket_path).map_err(|e| {
+        format!(
+            "Echolet daemon is not running (cannot connect to {:?}): {}",
+            socket_path, e
+        )
+    })?;
     stream
         .write_all(b"QUIT\n")
         .map_err(|e| format!("Failed to write to socket: {}", e))?;
@@ -42,8 +50,12 @@ pub fn send_stop_signal() -> Result<(), String> {
 
 pub fn send_status_signal() -> Result<(), String> {
     let socket_path = get_socket_path();
-    let mut stream = UnixStream::connect(&socket_path)
-        .map_err(|_| format!("Echolet is NOT running (no active socket at {:?})", socket_path))?;
+    let mut stream = UnixStream::connect(&socket_path).map_err(|_| {
+        format!(
+            "Echolet is NOT running (no active socket at {:?})",
+            socket_path
+        )
+    })?;
     let _ = stream.set_read_timeout(Some(Duration::from_millis(1000)));
     stream
         .write_all(b"STATUS\n")
@@ -87,7 +99,9 @@ pub fn start_control_listener(
     if socket_path.exists() {
         match UnixStream::connect(&socket_path) {
             Ok(_) => {
-                println!("[SingleInstance] Another instance of Echolet is already running. Exiting.");
+                println!(
+                    "[SingleInstance] Another instance of Echolet is already running. Exiting."
+                );
                 return Ok(None);
             }
             Err(_) => {

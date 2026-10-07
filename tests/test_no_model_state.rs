@@ -636,8 +636,8 @@ fn test_staged_bundle_layout_first_run_smoke() {
     let mm = ModelManager::new().expect("ModelManager::new() must succeed with bundle layout");
 
     // 1. Must load registry from the bundle file, not fallback
-    //    (X-ASR default + additive J10 Nemotron multilingual pack)
-    assert_eq!(mm.registry.models.len(), 2);
+    //    (X-ASR default + 2 English models)
+    assert_eq!(mm.registry.models.len(), 3);
     assert_eq!(
         mm.registry.default_model_id,
         "echolet-xasr-zh-en-480ms-689ff18c584d29910da37b6fe904db0c1489c9d1"

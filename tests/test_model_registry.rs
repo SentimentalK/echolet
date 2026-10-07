@@ -53,17 +53,35 @@ fn test_registry_parsing_and_invariants() {
     );
     assert_eq!(
         registry.models.len(),
-        2,
-        "Registry must contain the default X-ASR model plus the additive J10 Nemotron pack"
+        3,
+        "Registry must contain exactly 3 models: X-ASR, Zipformer Streaming, and Nemotron Speech Streaming 0.6B"
     );
+
+    let model_ids: Vec<&str> = registry.models.iter().map(|m| m.id.as_str()).collect();
+    assert_eq!(
+        model_ids,
+        vec![
+            "echolet-xasr-zh-en-480ms-689ff18c584d29910da37b6fe904db0c1489c9d1",
+            "echolet-zipformer-streaming-en-2023-06-26-r1",
+            "echolet-nemotron-speech-streaming-en-0.6b-560ms-int8-2026-04-25-r1",
+        ]
+    );
+
+    // Old multilingual model ID must NOT be present
+    assert!(registry
+        .get_model("echolet-nemotron-3.5-asr-streaming-0.6b-560ms-int8-2026-06-11-r1")
+        .is_none());
 
     // 1. X-ASR Bilingual Model (2026 Default Bundled)
     let xasr = registry
         .get_model("echolet-xasr-zh-en-480ms-689ff18c584d29910da37b6fe904db0c1489c9d1")
         .expect("Missing X-ASR model");
+    assert_eq!(xasr.display_name, "X-ASR");
+    assert_eq!(xasr.version, "2026");
+    assert_eq!(xasr.display_title(), "X-ASR — 2026");
     assert_eq!(
-        xasr.display_title(),
-        "Chinese + English (X-ASR / 480ms) — 2026"
+        xasr.verification_status,
+        VerificationStatus::EcholetVerified
     );
     assert_eq!(xasr.languages, vec!["zh", "en"]);
     assert_eq!(xasr.language_key(), "zh-en");
@@ -86,6 +104,117 @@ fn test_registry_parsing_and_invariants() {
     assert_eq!(xasr.files.joiner, "joiner-480ms.onnx");
     assert_eq!(xasr.files.tokens, "tokens.txt");
     assert_eq!(xasr.runtime.model_type, Some("zipformer2".into()));
+
+    // 2. Zipformer Streaming English Model
+    let zipformer = registry
+        .get_model("echolet-zipformer-streaming-en-2023-06-26-r1")
+        .expect("Missing Zipformer model");
+    assert_eq!(zipformer.display_name, "Zipformer Streaming");
+    assert_eq!(zipformer.version, "2023");
+    assert_eq!(zipformer.display_title(), "Zipformer Streaming — 2023");
+    assert!(!zipformer.display_title().contains("Small English"));
+    assert_eq!(
+        zipformer.verification_status,
+        VerificationStatus::Experimental
+    );
+    assert_eq!(zipformer.languages, vec!["en"]);
+    assert_eq!(zipformer.language_key(), "en");
+    assert_eq!(zipformer.language_label(), "English");
+    assert!(zipformer.language_options.is_none());
+    assert!(zipformer.supported_language_options().is_empty());
+    assert_eq!(
+        zipformer.files.encoder,
+        "encoder-epoch-99-avg-1-chunk-16-left-128.int8.onnx"
+    );
+    assert_eq!(
+        zipformer.files.decoder,
+        "decoder-epoch-99-avg-1-chunk-16-left-128.int8.onnx"
+    );
+    assert_eq!(
+        zipformer.files.joiner,
+        "joiner-epoch-99-avg-1-chunk-16-left-128.int8.onnx"
+    );
+    assert_eq!(zipformer.files.tokens, "tokens.txt");
+    assert_eq!(zipformer.runtime.model_type, None);
+    assert_eq!(
+        zipformer.source.url.as_deref(),
+        Some("https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-en-2023-06-26.tar.bz2")
+    );
+    assert_eq!(
+        zipformer.source.sha256.as_deref(),
+        Some("639e25b578e9e997131402199419c13a941f8e4e198e2da1ce57dbf5cf401282")
+    );
+    assert_eq!(
+        zipformer.source.repository.as_deref(),
+        Some(
+            "https://huggingface.co/Zengwei/icefall-asr-librispeech-streaming-zipformer-2023-05-17"
+        )
+    );
+    assert_eq!(
+        zipformer.source.revision.as_deref(),
+        Some("37cb5606808f3d5e55a3fc73554bdf757d82465a")
+    );
+    assert_eq!(zipformer.download_size_bytes, Some(310414022));
+    assert_eq!(zipformer.installed_size_bytes, Some(70913968));
+    assert_eq!(
+        zipformer.license.as_ref().and_then(|l| l.spdx.as_deref()),
+        Some("Apache-2.0")
+    );
+
+    // 3. Nemotron Speech Streaming 0.6B English Model
+    let nemotron = registry
+        .get_model("echolet-nemotron-speech-streaming-en-0.6b-560ms-int8-2026-04-25-r1")
+        .expect("Missing Nemotron model");
+    assert_eq!(nemotron.display_name, "Nemotron Speech Streaming 0.6B");
+    assert_eq!(nemotron.version, "2026");
+    assert_eq!(
+        nemotron.display_title(),
+        "Nemotron Speech Streaming 0.6B — 2026"
+    );
+    assert!(!nemotron.display_title().contains("Large English"));
+    assert_eq!(
+        nemotron.verification_status,
+        VerificationStatus::Experimental
+    );
+    assert_eq!(nemotron.languages, vec!["en"]);
+    assert_eq!(nemotron.language_key(), "en");
+    assert_eq!(nemotron.language_label(), "English");
+    assert!(nemotron.language_options.is_none());
+    assert!(nemotron.supported_language_options().is_empty());
+    assert_eq!(nemotron.files.encoder, "encoder.int8.onnx");
+    assert_eq!(nemotron.files.decoder, "decoder.int8.onnx");
+    assert_eq!(nemotron.files.joiner, "joiner.int8.onnx");
+    assert_eq!(nemotron.files.tokens, "tokens.txt");
+    assert_eq!(nemotron.runtime.model_type, None);
+    assert_eq!(
+        nemotron.source.url.as_deref(),
+        Some("https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-nemotron-speech-streaming-en-0.6b-560ms-int8-2026-04-25.tar.bz2")
+    );
+    assert_eq!(
+        nemotron.source.sha256.as_deref(),
+        Some("78e2b79fcf7271553a74402a76b771b09ea40117a39566a79f52235b23db6358")
+    );
+    assert_eq!(
+        nemotron.source.repository.as_deref(),
+        Some("https://huggingface.co/nvidia/nemotron-speech-streaming-en-0.6b")
+    );
+    assert_eq!(
+        nemotron.source.revision.as_deref(),
+        Some("ebe59e5a817142986528bbbee5dba8db7b38ed50")
+    );
+    assert_eq!(nemotron.download_size_bytes, Some(463945051));
+    assert_eq!(nemotron.installed_size_bytes, Some(661919416));
+    assert_eq!(
+        nemotron
+            .license
+            .as_ref()
+            .map(|l| l.name.as_deref().unwrap_or("")),
+        Some("NVIDIA Open Model License Agreement")
+    );
+    assert_eq!(
+        nemotron.license.as_ref().and_then(|l| l.spdx.as_deref()),
+        None
+    );
 }
 
 #[test]
@@ -566,11 +695,164 @@ fn test_platform_projection_derives_language_label_from_normalized_schema() {
     let entry = registry.default_entry().expect("default entry");
     // The platform tray projection derives a display title; the language label
     // is derived from the normalized plural schema.
-    assert!(entry.display_title().contains("Chinese + English"));
+    assert_eq!(entry.display_title(), "X-ASR — 2026");
     assert_eq!(entry.language_label(), "Chinese + English");
     assert_eq!(entry.language_key(), "zh-en");
     assert!(entry.matches_install_dir("bilingual-zh-en"));
     assert!(entry
         .matches_install_dir("echolet-xasr-zh-en-480ms-689ff18c584d29910da37b6fe904db0c1489c9d1"));
     assert!(!entry.matches_install_dir("bilingual-ja-en"));
+}
+
+#[test]
+fn test_project_041_control_surface_grouping_and_actions() {
+    use echolet::config::EcholetConfig;
+    use echolet::ui::control_surface::{
+        build_control_surface_state, ModelPrimaryAction, RuntimeState, SurfaceAction,
+    };
+    use std::collections::{HashMap, HashSet};
+
+    let registry = ModelRegistry::from_str(include_str!("../models/registry.json")).unwrap();
+
+    // Default model remains X-ASR
+    assert_eq!(
+        registry.default_model_id,
+        "echolet-xasr-zh-en-480ms-689ff18c584d29910da37b6fe904db0c1489c9d1"
+    );
+
+    let zipformer_id = "echolet-zipformer-streaming-en-2023-06-26-r1";
+    let nemotron_id = "echolet-nemotron-speech-streaming-en-0.6b-560ms-int8-2026-04-25-r1";
+    let xasr_id = "echolet-xasr-zh-en-480ms-689ff18c584d29910da37b6fe904db0c1489c9d1";
+
+    // 1. Uninstalled state
+    let state = build_control_surface_state(
+        &registry,
+        None,
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashMap::new(),
+        &EcholetConfig::default(),
+        RuntimeState::NoModel,
+        false,
+    );
+
+    // Grouping assertions
+    assert_eq!(state.model_groups.len(), 2);
+    assert_eq!(state.model_groups[0].id, "zh-en");
+    assert_eq!(state.model_groups[0].label, "Chinese + English");
+    assert_eq!(state.model_groups[0].models.len(), 1);
+    assert_eq!(state.model_groups[0].models[0].id, xasr_id);
+
+    assert_eq!(state.model_groups[1].id, "en");
+    assert_eq!(state.model_groups[1].label, "English");
+    assert_eq!(state.model_groups[1].models.len(), 2);
+    assert_eq!(state.model_groups[1].models[0].id, zipformer_id);
+    assert_eq!(state.model_groups[1].models[1].id, nemotron_id);
+
+    // No Multilingual group from current catalog
+    assert!(state.model_groups.iter().all(|g| g.id != "multilingual"));
+
+    // Product names & clean labels
+    let m_xasr = state.find_model(xasr_id).unwrap();
+    assert_eq!(m_xasr.label, "X-ASR — 2026");
+    assert!(m_xasr.is_verified);
+
+    let m_zip = state.find_model(zipformer_id).unwrap();
+    assert_eq!(m_zip.label, "Zipformer Streaming — 2023");
+    assert!(!m_zip.label.contains("Small English"));
+    assert!(!m_zip.is_verified);
+    assert!(m_zip.language.options.is_empty());
+
+    let m_nemo = state.find_model(nemotron_id).unwrap();
+    assert_eq!(m_nemo.label, "Nemotron Speech Streaming 0.6B — 2026");
+    assert!(!m_nemo.label.contains("Large English"));
+    assert!(!m_nemo.is_verified);
+    assert!(m_nemo.language.options.is_empty());
+
+    // Action when uninstalled: Download
+    assert_eq!(m_zip.primary_action, ModelPrimaryAction::Download);
+    assert!(m_zip.enabled);
+    assert_eq!(
+        m_zip.surface_action(),
+        Some(SurfaceAction::DownloadModel(zipformer_id.to_string()))
+    );
+
+    assert_eq!(m_nemo.primary_action, ModelPrimaryAction::Download);
+    assert!(m_nemo.enabled);
+    assert_eq!(
+        m_nemo.surface_action(),
+        Some(SurfaceAction::DownloadModel(nemotron_id.to_string()))
+    );
+
+    // 2. Installed, non-selected state
+    let mut installed = HashSet::new();
+    installed.insert(zipformer_id.to_string());
+    installed.insert(nemotron_id.to_string());
+    installed.insert(xasr_id.to_string());
+
+    let state_installed = build_control_surface_state(
+        &registry,
+        Some(xasr_id),
+        &installed,
+        &HashSet::new(),
+        &HashMap::new(),
+        &EcholetConfig::default(),
+        RuntimeState::Ready,
+        false,
+    );
+
+    let m_zip_inst = state_installed.find_model(zipformer_id).unwrap();
+    assert_eq!(m_zip_inst.primary_action, ModelPrimaryAction::Select);
+    assert!(m_zip_inst.enabled);
+    assert_eq!(
+        m_zip_inst.surface_action(),
+        Some(SurfaceAction::SelectModel(zipformer_id.to_string()))
+    );
+
+    let m_xasr_sel = state_installed.find_model(xasr_id).unwrap();
+    assert_eq!(m_xasr_sel.primary_action, ModelPrimaryAction::None);
+    assert!(!m_xasr_sel.enabled);
+    assert_eq!(m_xasr_sel.surface_action(), None);
+    assert!(state_installed.active_language().is_none());
+
+    // 3. Selected English model exposes no language options / active language
+    let state_selected_zip = build_control_surface_state(
+        &registry,
+        Some(zipformer_id),
+        &installed,
+        &HashSet::new(),
+        &HashMap::new(),
+        &EcholetConfig::default(),
+        RuntimeState::Ready,
+        false,
+    );
+    assert!(state_selected_zip.active_language().is_none());
+
+    let state_selected_nemo = build_control_surface_state(
+        &registry,
+        Some(nemotron_id),
+        &installed,
+        &HashSet::new(),
+        &HashMap::new(),
+        &EcholetConfig::default(),
+        RuntimeState::Ready,
+        false,
+    );
+    assert!(state_selected_nemo.active_language().is_none());
+
+    // 4. Listening safety prevents actions
+    let state_listening = build_control_surface_state(
+        &registry,
+        Some(xasr_id),
+        &installed,
+        &HashSet::new(),
+        &HashMap::new(),
+        &EcholetConfig::default(),
+        RuntimeState::Listening,
+        false,
+    );
+    let m_zip_listening = state_listening.find_model(zipformer_id).unwrap();
+    assert_eq!(m_zip_listening.primary_action, ModelPrimaryAction::Select);
+    assert!(!m_zip_listening.enabled);
+    assert_eq!(m_zip_listening.surface_action(), None);
 }

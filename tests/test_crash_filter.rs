@@ -14,7 +14,10 @@
 #[ignore]
 fn trigger_native_crash() {
     echolet::log::init();
-    echolet::log::log("INFO", "about to trigger a deliberate native crash (null deref)");
+    echolet::log::log(
+        "INFO",
+        "about to trigger a deliberate native crash (null deref)",
+    );
     // Force a real access violation so the unhandled-exception filter runs.
     unsafe {
         let p: *mut u8 = std::ptr::null_mut();

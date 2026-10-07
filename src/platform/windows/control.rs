@@ -12,8 +12,8 @@ use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, ReadFile, WriteFile, OPEN_EXISTING, PIPE_ACCESS_DUPLEX,
 };
 use windows_sys::Win32::System::Pipes::{
-    ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe,
-    PIPE_READMODE_MESSAGE, PIPE_TYPE_MESSAGE, PIPE_WAIT,
+    ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_MESSAGE,
+    PIPE_TYPE_MESSAGE, PIPE_WAIT,
 };
 
 const PIPE_NAME: &str = "\\\\.\\pipe\\echolet-control";

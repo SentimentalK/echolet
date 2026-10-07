@@ -1,0 +1,19 @@
+NVIDIA Open Model License Agreement
+
+Pretrained model: Nemotron Speech Streaming 0.6B English (560 ms chunk, int8)
+Upstream repository: https://huggingface.co/nvidia/nemotron-speech-streaming-en-0.6b
+Revision: ebe59e5a817142986528bbbee5dba8db7b38ed50
+
+sherpa-onnx export: sherpa-onnx-nemotron-speech-streaming-en-0.6b-560ms-int8-2026-04-25
+Official artifact:
+https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-nemotron-speech-streaming-en-0.6b-560ms-int8-2026-04-25.tar.bz2
+
+The NVIDIA model card states that use of this model is governed by the
+NVIDIA Open Model License Agreement:
+https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-open-model-license/
+
+This is not an Apache-2.0 model. The sherpa-onnx export code being Apache-2.0
+does not relicense these weights.
+
+Echolet registry id: echolet-nemotron-speech-streaming-en-0.6b-560ms-int8-2026-04-25-r1
+Verification status: Experimental

@@ -110,8 +110,8 @@ impl HistoryManager {
         let filename = format!("{}.jsonl", date.format("%Y-%m-%d"));
         let file_path = self.history_dir.join(filename);
 
-        let json_line = serde_json::to_string(entry)
-            .map_err(|e| format!("Serialization error: {}", e))?;
+        let json_line =
+            serde_json::to_string(entry).map_err(|e| format!("Serialization error: {}", e))?;
 
         let mut file = OpenOptions::new()
             .create(true)

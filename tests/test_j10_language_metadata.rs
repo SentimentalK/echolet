@@ -104,37 +104,91 @@ fn test_language_options_round_trip_is_lossless() {
     assert_eq!(opts, back, "language metadata round-trip must be lossless");
 }
 
+fn historical_multilingual_entry() -> echolet::models::registry::RegistryModelEntry {
+    echolet::models::registry::RegistryModelEntry {
+        id: NEMOTRON_ID.to_string(),
+        display_name: "Multilingual Nemotron 3.5 ASR Streaming 0.6B / 560ms (int8)".to_string(),
+        version: "2026-06-11-r1".to_string(),
+        languages: vec![
+            "en".into(),
+            "es".into(),
+            "fr".into(),
+            "it".into(),
+            "pt".into(),
+            "nl".into(),
+            "de".into(),
+            "tr".into(),
+            "ru".into(),
+            "ar".into(),
+            "hi".into(),
+            "ja".into(),
+            "ko".into(),
+            "vi".into(),
+            "uk".into(),
+            "pl".into(),
+            "sv".into(),
+            "cs".into(),
+            "nb".into(),
+            "da".into(),
+            "bg".into(),
+            "fi".into(),
+            "hr".into(),
+            "sk".into(),
+            "zh".into(),
+            "hu".into(),
+            "ro".into(),
+            "et".into(),
+        ],
+        family: "online-transducer".to_string(),
+        source: echolet::models::registry::ModelSource {
+            bundled: false,
+            url: None,
+            sha256: None,
+            repository: Some(
+                "https://huggingface.co/nvidia/nemotron-3.5-asr-streaming-0.6b".into(),
+            ),
+            revision: Some("nvidia/nemotron-3.5-asr-streaming-0.6b".into()),
+        },
+        files: echolet::models::registry::ModelFilesConfig {
+            encoder: "encoder.int8.onnx".into(),
+            decoder: "decoder.int8.onnx".into(),
+            joiner: "joiner.int8.onnx".into(),
+            tokens: "tokens.txt".into(),
+        },
+        runtime: echolet::models::registry::ModelRuntimeConfig {
+            model_type: None,
+            sample_rate: 16000,
+            feature_dim: 80,
+            num_threads: 1,
+            provider: "cpu".into(),
+            decoding_method: "greedy_search".into(),
+            max_active_paths: 4,
+        },
+        download_size_bytes: Some(456709352),
+        installed_size_bytes: Some(682215356),
+        upstream_release_date: Some("2026-06-11".into()),
+        license: None,
+        language_options: Some(def_options()),
+        verification_status: VerificationStatus::EcholetVerified,
+    }
+}
+
 #[test]
-fn test_registry_nemotron_entry_matches_definition_and_lock() {
+fn test_registry_does_not_contain_multilingual_nemotron_and_authorities_agree() {
     let reg = registry();
     let lock: serde_json::Value =
         serde_json::from_str(include_str!("../models/nemotron-model.lock.json")).unwrap();
     let def: serde_json::Value =
         serde_json::from_str(include_str!("../models/nemotron-model.json")).unwrap();
 
-    let entry = reg.get_model(NEMOTRON_ID).expect("Nemotron registry entry");
-    assert_eq!(
-        entry.verification_status,
-        VerificationStatus::EcholetVerified,
-        "Nemotron is promoted only after the full J10 verification gates pass"
+    // The current product catalog must NOT contain the historical multilingual Nemotron model.
+    assert!(
+        reg.get_model(NEMOTRON_ID).is_none(),
+        "Old multilingual Nemotron model must be removed from current product registry"
     );
-    assert_eq!(entry.source.url.as_deref(), lock["url"].as_str());
-    assert_eq!(entry.source.sha256.as_deref(), lock["sha256"].as_str());
-    assert_eq!(
-        entry.download_size_bytes,
-        lock["size_bytes"].as_u64(),
-        "download_size_bytes must match frozen lock"
-    );
-    assert_eq!(
-        entry.installed_size_bytes,
-        lock["installed_size_bytes"].as_u64()
-    );
-    assert_eq!(entry.upstream_release_date.as_deref(), Some("2026-06-11"));
-    let license = entry.license.as_ref().expect("license");
-    assert_eq!(license.spdx.as_deref(), Some("OpenMDW-1.1"));
-    // The typed options in the registry must equal the definition authority.
-    assert_eq!(entry.language_options.as_ref(), Some(&def_options()));
-    // And the raw definition must agree with the registry JSON.
+
+    // Historical definition and lock authorities agree with each other.
+    assert_eq!(def["id"].as_str(), lock["id"].as_str());
     assert_eq!(
         def["language_options"]["supported"]
             .as_array()
@@ -146,8 +200,7 @@ fn test_registry_nemotron_entry_matches_definition_and_lock() {
 
 #[test]
 fn test_selection_contract_rejects_adaptation_and_unknown() {
-    let reg = registry();
-    let entry = reg.get_model(NEMOTRON_ID).unwrap();
+    let entry = historical_multilingual_entry();
 
     // Auto is valid and resolves to no forced option.
     assert_eq!(entry.validate_language_selection(None), Ok(None));
@@ -182,8 +235,7 @@ fn test_selection_contract_rejects_adaptation_and_unknown() {
 
 #[test]
 fn test_supported_language_options_never_returns_adaptation() {
-    let reg = registry();
-    let entry = reg.get_model(NEMOTRON_ID).unwrap();
+    let entry = historical_multilingual_entry();
     let supported = entry.supported_language_options();
     assert_eq!(supported.len(), 32);
     assert!(supported.iter().all(|o| o.tier.is_selectable()));
@@ -219,8 +271,7 @@ fn test_x_asr_remains_default_and_simple() {
 
 #[test]
 fn test_manifest_propagates_language_options() {
-    let reg = registry();
-    let entry = reg.get_model(NEMOTRON_ID).unwrap();
+    let entry = historical_multilingual_entry();
     let manifest: ModelManifest = entry.to_manifest();
     assert_eq!(manifest.supported_language_options().len(), 32);
     assert_eq!(
@@ -243,8 +294,7 @@ fn test_legacy_normalizer_still_handles_base_languages() {
     // The Nemotron coarse base-language list is intentionally free of BCP-47
     // values, so the legacy normalizer cannot corrupt it on reparse.
     let opts = def_options();
-    let reg = registry();
-    let entry = reg.get_model(NEMOTRON_ID).unwrap();
+    let entry = historical_multilingual_entry();
     for lang in &entry.languages {
         assert!(
             !lang.contains('-'),
@@ -256,12 +306,39 @@ fn test_legacy_normalizer_still_handles_base_languages() {
     assert!(entry.languages.iter().any(|l| l == "zh"));
     assert!(entry.languages.iter().any(|l| l == "ja"));
     // Round-tripping the registry does not alter the typed options.
+    let reg = ModelRegistry {
+        schema_version: 2,
+        default_model_id: entry.id.clone(),
+        models: vec![entry],
+    };
     let serialized = reg.to_canonical_string().unwrap();
     let reparsed = ModelRegistry::from_str(&serialized).unwrap();
     assert_eq!(
         reparsed.get_model(NEMOTRON_ID).unwrap().language_options,
         Some(opts)
     );
+}
+
+#[test]
+fn test_english_models_have_no_language_options() {
+    let reg = registry();
+    let zipformer = reg
+        .get_model("echolet-zipformer-streaming-en-2023-06-26-r1")
+        .expect("Zipformer entry");
+    assert_eq!(zipformer.languages, vec!["en"]);
+    assert!(zipformer.language_options.is_none());
+    assert!(zipformer.supported_language_options().is_empty());
+    assert_eq!(zipformer.validate_language_selection(None), Ok(None));
+    assert!(zipformer.validate_language_selection(Some("en")).is_err());
+
+    let nemotron = reg
+        .get_model("echolet-nemotron-speech-streaming-en-0.6b-560ms-int8-2026-04-25-r1")
+        .expect("Nemotron English entry");
+    assert_eq!(nemotron.languages, vec!["en"]);
+    assert!(nemotron.language_options.is_none());
+    assert!(nemotron.supported_language_options().is_empty());
+    assert_eq!(nemotron.validate_language_selection(None), Ok(None));
+    assert!(nemotron.validate_language_selection(Some("en")).is_err());
 }
 
 #[test]

@@ -109,14 +109,13 @@ pub fn run_app() -> Result<(), Box<dyn std::error::Error>> {
 
     // 4. Spawn Core Worker Thread
     let core_tx = action_tx.clone();
-    let core_thread = thread::Builder::new()
-        .name("echolet-core".into())
-        .spawn(move || {
-            match App::new_with_tx(platform_runtime, core_tx, action_rx) {
+    let core_thread =
+        thread::Builder::new().name("echolet-core".into()).spawn(
+            move || match App::new_with_tx(platform_runtime, core_tx, action_rx) {
                 Ok(mut app) => app.run(),
                 Err(e) => eprintln!("[Core Error] Failed to initialize App: {}", e),
-            }
-        })?;
+            },
+        )?;
 
     // 5. Run AppKit Event Loop on Main Thread
     let mac_ui = ui::MacUi::new(action_tx, cmd_rx)?;

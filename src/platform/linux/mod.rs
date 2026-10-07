@@ -45,7 +45,9 @@ pub fn handle_subcommand(args: &[String]) -> Result<bool, Box<dyn std::error::Er
     Ok(false)
 }
 
-pub fn init(action_tx: Sender<AppAction>) -> Result<Option<PlatformRuntime>, Box<dyn std::error::Error>> {
+pub fn init(
+    action_tx: Sender<AppAction>,
+) -> Result<Option<PlatformRuntime>, Box<dyn std::error::Error>> {
     // 1. Start Unix socket control listener (Single Instance check)
     let control_handle = match control::start_control_listener(action_tx.clone())? {
         Some(handle) => handle,

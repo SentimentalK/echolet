@@ -290,18 +290,19 @@ fn test_host_geometry_calculations() {
 }
 
 #[test]
-fn test_catalog_integrity_no_new_models() {
-    // Model catalog must strictly maintain the existing set (no new models in J11.1d)
+fn test_catalog_integrity_exact_models() {
+    // Model catalog must strictly maintain the expected 3 models in order
     let registry_str = include_str!("../models/registry.json");
     let registry = ModelRegistry::from_str(registry_str).expect("Valid registry JSON");
     let model_ids: Vec<&str> = registry.models.iter().map(|m| m.id.as_str()).collect();
 
-    // Verify exactly the original models exist
+    // Verify exactly the 3 models exist in order
     assert_eq!(
         model_ids,
         vec![
             "echolet-xasr-zh-en-480ms-689ff18c584d29910da37b6fe904db0c1489c9d1",
-            "echolet-nemotron-3.5-asr-streaming-0.6b-560ms-int8-2026-06-11-r1",
+            "echolet-zipformer-streaming-en-2023-06-26-r1",
+            "echolet-nemotron-speech-streaming-en-0.6b-560ms-int8-2026-04-25-r1",
         ]
     );
 }

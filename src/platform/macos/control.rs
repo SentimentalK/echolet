@@ -103,8 +103,12 @@ pub fn start_control_listener(
 
 pub fn send_command(cmd: &str) -> Result<String, String> {
     let sock = socket_path();
-    let mut stream = UnixStream::connect(&sock)
-        .map_err(|e| format!("Echolet daemon is not running (cannot connect to {:?}): {}", sock, e))?;
+    let mut stream = UnixStream::connect(&sock).map_err(|e| {
+        format!(
+            "Echolet daemon is not running (cannot connect to {:?}): {}",
+            sock, e
+        )
+    })?;
 
     stream
         .set_read_timeout(Some(Duration::from_secs(2)))

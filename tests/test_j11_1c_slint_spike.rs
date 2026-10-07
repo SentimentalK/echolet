@@ -3,8 +3,8 @@
 #[cfg(feature = "slint-ui-spike")]
 mod slint_spike_tests {
     use echolet::ui::control_surface::{
-        ControlSurfaceState, DownloadPresentation, ModelGroupPresentation,
-        ModelPresentation, ModelPrimaryAction, RuntimeState, SurfaceAction,
+        ControlSurfaceState, DownloadPresentation, ModelGroupPresentation, ModelPresentation,
+        ModelPrimaryAction, RuntimeState, SurfaceAction,
     };
     use echolet::ui::desktop::{
         DesktopPanelViewModel, SlintControlSurfaceAdapter, PANEL_HEIGHT_PX, PANEL_WIDTH_PX,
@@ -312,7 +312,10 @@ mod slint_spike_tests {
                         if path.is_dir() {
                             check_no_slint(&path);
                         } else if path.extension().and_then(|e| e.to_str()) == Some("slint") {
-                            panic!("Accidental platform fork: found .slint file in platform dir: {:?}", path);
+                            panic!(
+                                "Accidental platform fork: found .slint file in platform dir: {:?}",
+                                path
+                            );
                         }
                     }
                 }
@@ -348,8 +351,7 @@ mod slint_spike_tests {
         ];
         expected.sort();
         assert_eq!(
-            slint_files,
-            expected,
+            slint_files, expected,
             "All .slint files must reside under ui/desktop/"
         );
     }

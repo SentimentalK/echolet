@@ -15,7 +15,9 @@ const UDEV_RULE_CONTENT: &str =
 pub fn handle_setup_uinput_subcommand() -> Result<(), Box<dyn std::error::Error>> {
     let euid = unsafe { libc::geteuid() };
     if euid != 0 {
-        return Err("[Setup] Permission denied: `setup-uinput` must be executed as root via pkexec.".into());
+        return Err(
+            "[Setup] Permission denied: `setup-uinput` must be executed as root via pkexec.".into(),
+        );
     }
 
     println!("[Setup] Installing Echolet uinput uaccess udev rule...");

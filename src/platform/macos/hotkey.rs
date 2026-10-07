@@ -111,7 +111,10 @@ pub fn register_global_f10(action_tx: Sender<AppAction>) -> Result<MacHotkeyHand
         );
 
         if status != 0 {
-            return Err(format!("Failed to install Carbon event handler: {}", status));
+            return Err(format!(
+                "Failed to install Carbon event handler: {}",
+                status
+            ));
         }
 
         let hotkey_id = EventHotKeyID {

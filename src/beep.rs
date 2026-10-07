@@ -36,7 +36,10 @@ fn play_tone(freq: f32, duration_ms: u64, volume: f32) {
     let config = match device.default_output_config() {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("[Beep] Failed to get output config for '{}': {}", device_name, e);
+            eprintln!(
+                "[Beep] Failed to get output config for '{}': {}",
+                device_name, e
+            );
             return;
         }
     };
@@ -45,7 +48,10 @@ fn play_tone(freq: f32, duration_ms: u64, volume: f32) {
     let channels = config.channels() as usize;
     let sample_format = config.sample_format();
     if channels == 0 || sample_rate == 0 {
-        eprintln!("[Beep] Invalid output config: rate={}, channels={}", sample_rate, channels);
+        eprintln!(
+            "[Beep] Invalid output config: rate={}, channels={}",
+            sample_rate, channels
+        );
         return;
     }
     println!(
@@ -139,6 +145,9 @@ fn play_tone(freq: f32, duration_ms: u64, volume: f32) {
             }
         }
     } else {
-        eprintln!("[Beep] Failed to build output stream on '{}' (fmt={:?}).", device_name, sample_format);
+        eprintln!(
+            "[Beep] Failed to build output stream on '{}' (fmt={:?}).",
+            device_name, sample_format
+        );
     }
 }
