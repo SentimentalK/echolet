@@ -222,13 +222,14 @@ pub fn spawn_linux_tray(action_tx: Sender<AppAction>) -> LinuxPlatformHandle {
     };
 
     let view = Arc::new(Mutex::new(initial_platform_view(&registry)));
-    let (panel_handle, panel_runtime) = DesktopPanelRuntime::new(action_tx.clone());
+    let (panel_handle, panel_init) = DesktopPanelRuntime::init(action_tx.clone());
 
     // Spawn dedicated Slint UI event loop thread (single-thread owner)
     let _ = std::thread::Builder::new()
         .name("echolet-slint-ui".into())
         .spawn(move || {
-            if let Err(e) = panel_runtime.run() {
+            let runtime = DesktopPanelRuntime::from_init(panel_init);
+            if let Err(e) = runtime.run() {
                 eprintln!("[Linux UI] Slint event loop error: {}", e);
             }
         });
@@ -362,7 +363,7 @@ mod tests {
 
     fn make_tray(view: PlatformView) -> (LinuxTray, crossbeam_channel::Receiver<AppAction>) {
         let (tx, rx) = crossbeam_channel::unbounded();
-        let (panel_handle, _runtime) = DesktopPanelRuntime::new(tx.clone());
+        let (panel_handle, _panel_init) = DesktopPanelRuntime::init(tx.clone());
         let tray = LinuxTray {
             is_listening: Arc::new(AtomicBool::new(false)),
             history_enabled: Arc::new(AtomicBool::new(false)),

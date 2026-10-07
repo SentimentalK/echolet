@@ -6,7 +6,7 @@ use crate::platform::{PlatformHandle, PlatformView};
 use crate::ui::control_surface::ControlSurfaceState;
 use crate::ui::desktop::adapter::{PANEL_HEIGHT_PX, PANEL_WIDTH_PX};
 use crate::ui::desktop::controller::{DesktopPanelHandle, DesktopPanelRuntime};
-use crate::ui::desktop::host::{calculate_windows_panel_position, Rect};
+use crate::ui::desktop::host::{calculate_windows_panel_position, Point, Rect};
 use crossbeam_channel::{Receiver, Sender};
 use std::mem::size_of;
 use std::path::{Path, PathBuf};
@@ -468,13 +468,14 @@ pub fn spawn_ui_thread(
                 eprintln!("[Platform] Failed to create custom tray icon(s).");
             }
 
-            let (panel_handle, panel_runtime) = DesktopPanelRuntime::new(action_tx.clone());
+            let (panel_handle, panel_init) = DesktopPanelRuntime::init(action_tx.clone());
 
             // Spawn dedicated Slint UI event loop thread (single-thread owner)
             let _ = thread::Builder::new()
                 .name("echolet-slint-ui".into())
                 .spawn(move || {
-                    if let Err(e) = panel_runtime.run() {
+                    let runtime = DesktopPanelRuntime::from_init(panel_init);
+                    if let Err(e) = runtime.run() {
                         eprintln!("[Windows UI] Slint event loop error: {}", e);
                     }
                 });

@@ -128,10 +128,39 @@ impl DesktopPanelHost for DesktopPanelHandle {
     }
 }
 
+/// Sendable initialization data used across thread boundaries to instantiate [`DesktopPanelRuntime`]
+/// on its designated owner thread.
+///
+/// Contains ONLY thread-safe primitives (`Send`), with no UI components, references, or `Rc` handles.
+pub struct DesktopPanelInit {
+    pub cmd_rx: Receiver<DesktopPanelCommand>,
+    pub action_tx: Sender<AppAction>,
+    pub is_open: Arc<AtomicBool>,
+    pub initial_state: Option<ControlSurfaceState>,
+}
+
+impl DesktopPanelInit {
+    /// Creates a linked (Handle, Init) pair.
+    pub fn new(action_tx: Sender<AppAction>) -> (DesktopPanelHandle, Self) {
+        DesktopPanelRuntime::init(action_tx)
+    }
+
+    /// Builds the runtime on the current owner thread.
+    pub fn build(self) -> DesktopPanelRuntime {
+        DesktopPanelRuntime::from_init(self)
+    }
+}
+
 /// UI-thread-bound runtime owner of the live [`EcholetPanel`].
 ///
 /// Intentionally `!Send` and `!Sync` via `PhantomData<*mut ()>`.
 /// Must only be instantiated, stored, and operated on the valid Slint event loop thread.
+///
+/// ```compile_fail
+/// use echolet::ui::desktop::controller::DesktopPanelRuntime;
+/// fn assert_send<T: Send>() {}
+/// assert_send::<DesktopPanelRuntime>();
+/// ```
 pub struct DesktopPanelRuntime {
     panel: Option<EcholetPanel>,
     action_tx: Sender<AppAction>,
@@ -142,20 +171,41 @@ pub struct DesktopPanelRuntime {
 }
 
 impl DesktopPanelRuntime {
-    /// Creates a linked (Handle, Runtime) pair.
+    /// Direct constructor for threads that are themselves the UI owner thread (e.g. macOS main thread).
     pub fn new(action_tx: Sender<AppAction>) -> (DesktopPanelHandle, Self) {
+        let (handle, init) = Self::init(action_tx);
+        let runtime = Self::from_init(init);
+        (handle, runtime)
+    }
+
+    /// Creates the sendable handle and sendable initialization payload without constructing `DesktopPanelRuntime`.
+    ///
+    /// The returned [`DesktopPanelInit`] can be safely sent across thread boundaries to the thread
+    /// that will host the Slint event loop and instantiate [`DesktopPanelRuntime`].
+    pub fn init(action_tx: Sender<AppAction>) -> (DesktopPanelHandle, DesktopPanelInit) {
         let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded();
         let is_open = Arc::new(AtomicBool::new(false));
         let handle = DesktopPanelHandle::new(cmd_tx, is_open.clone());
-        let runtime = Self {
-            panel: None,
-            action_tx,
+        let init = DesktopPanelInit {
             cmd_rx,
-            current_state: Rc::new(RefCell::new(ControlSurfaceState::default())),
+            action_tx,
             is_open,
-            _thread_bound: PhantomData,
+            initial_state: None,
         };
-        (handle, runtime)
+        (handle, init)
+    }
+
+    /// Constructs the thread-bound runtime from [`DesktopPanelInit`] on the designated owner thread.
+    pub fn from_init(init: DesktopPanelInit) -> Self {
+        let initial_state = init.initial_state.unwrap_or_default();
+        Self {
+            panel: None,
+            action_tx: init.action_tx,
+            cmd_rx: init.cmd_rx,
+            current_state: Rc::new(RefCell::new(initial_state)),
+            is_open: init.is_open,
+            _thread_bound: PhantomData,
+        }
     }
 
     /// Access the current control surface state snapshot.

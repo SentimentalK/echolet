@@ -369,34 +369,117 @@ fn test_single_source_slint_guard() {
 
 #[test]
 fn test_threading_architecture_handle_is_send_sync_and_runtime_is_thread_bound() {
-    use echolet::ui::desktop::controller::{DesktopPanelCommand, DesktopPanelHandle};
+    use echolet::ui::desktop::controller::{
+        DesktopPanelCommand, DesktopPanelHandle, DesktopPanelInit,
+    };
 
     fn assert_send<T: Send>() {}
     fn assert_sync<T: Sync>() {}
 
-    // DesktopPanelHandle is Send + Sync
+    // (A) DesktopPanelHandle is Send + Sync
     assert_send::<DesktopPanelHandle>();
     assert_sync::<DesktopPanelHandle>();
 
-    // DesktopPanelCommand is Send
+    // (B) DesktopPanelCommand is Send
     assert_send::<DesktopPanelCommand>();
 
-    // Verify source files contain no `unsafe impl Send` or `unsafe impl Sync` for DesktopPanelController or DesktopPanelRuntime
+    // (C) The runtime-init/factory object used across the spawn boundary is Send
+    assert_send::<DesktopPanelInit>();
+
+    // (D) DesktopPanelRuntime is intentionally NOT Send (architecture & type structure guards)
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let controller_src = fs::read_to_string(root.join("src/ui/desktop/controller.rs"))
         .expect("controller.rs must exist");
     assert!(
-        !controller_src.contains("unsafe impl Send for DesktopPanelController"),
-        "Unsound Send impl must be removed from DesktopPanelController"
+        controller_src.contains("_thread_bound: PhantomData<*mut ()>"),
+        "DesktopPanelRuntime must have an explicit thread-bound marker field"
     );
     assert!(
-        !controller_src.contains("unsafe impl Send for DesktopPanelRuntime"),
-        "Unsound Send impl must not be added to DesktopPanelRuntime"
+        controller_src.contains("compile_fail"),
+        "DesktopPanelRuntime must document a compile_fail assertion ensuring it is !Send"
+    );
+
+    // (E) Verify no source contains forbidden unsafe Send/Sync or Arc<Mutex<Runtime/Controller>>
+    fn scan_no_forbidden_patterns(dir: &Path) {
+        if let Ok(entries) = fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.is_dir() {
+                    scan_no_forbidden_patterns(&p);
+                } else if p.extension().and_then(|e| e.to_str()) == Some("rs") {
+                    let content = fs::read_to_string(&p).expect("read rs file");
+                    assert!(
+                        !content.contains("unsafe impl Send for DesktopPanelRuntime"),
+                        "Forbidden unsafe impl Send for DesktopPanelRuntime in {:?}",
+                        p
+                    );
+                    assert!(
+                        !content.contains("unsafe impl Sync for DesktopPanelRuntime"),
+                        "Forbidden unsafe impl Sync for DesktopPanelRuntime in {:?}",
+                        p
+                    );
+                    assert!(
+                        !content.contains("unsafe impl Send for DesktopPanelController"),
+                        "Forbidden unsafe impl Send for DesktopPanelController in {:?}",
+                        p
+                    );
+                    assert!(
+                        !content.contains("Arc<Mutex<DesktopPanelRuntime>>"),
+                        "Forbidden Arc<Mutex<DesktopPanelRuntime>> in {:?}",
+                        p
+                    );
+                    assert!(
+                        !content.contains("Arc<Mutex<DesktopPanelController>>"),
+                        "Forbidden Arc<Mutex<DesktopPanelController>> in {:?}",
+                        p
+                    );
+                }
+            }
+        }
+    }
+    scan_no_forbidden_patterns(&root.join("src"));
+
+    // (F) Linux and Windows spawn closures move only the SENDABLE init/factory, never DesktopPanelRuntime
+    let linux_src = fs::read_to_string(root.join("src/platform/linux/tray.rs"))
+        .expect("linux tray.rs must exist");
+    assert!(
+        linux_src.contains("DesktopPanelRuntime::init"),
+        "Linux must create DesktopPanelInit"
     );
     assert!(
-        !controller_src.contains("unsafe impl Sync"),
-        "Unsound Sync impl must not exist"
+        linux_src.contains("DesktopPanelRuntime::from_init(panel_init)"),
+        "Linux spawn closure must construct DesktopPanelRuntime from panel_init"
     );
+
+    let windows_src = fs::read_to_string(root.join("src/platform/windows/ui.rs"))
+        .expect("windows ui.rs must exist");
+    assert!(
+        windows_src.contains("DesktopPanelRuntime::init"),
+        "Windows must create DesktopPanelInit"
+    );
+    assert!(
+        windows_src.contains("DesktopPanelRuntime::from_init(panel_init)"),
+        "Windows spawn closure must construct DesktopPanelRuntime from panel_init"
+    );
+}
+
+#[test]
+fn test_sendable_init_used_across_spawn_boundary() {
+    use echolet::ui::desktop::controller::DesktopPanelRuntime;
+
+    let (tx, _rx) = crossbeam_channel::unbounded();
+    let (handle, init) = DesktopPanelRuntime::init(tx);
+
+    let handle_for_bg = handle.clone();
+    let bg_thread = std::thread::spawn(move || {
+        let mut runtime = DesktopPanelRuntime::from_init(init);
+        assert!(!runtime.is_visible());
+        runtime.drain_commands();
+        assert!(!runtime.is_visible());
+    });
+
+    handle_for_bg.hide_panel();
+    bg_thread.join().expect("Spawned thread completed");
 }
 
 #[test]
