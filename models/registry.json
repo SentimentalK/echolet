@@ -42,27 +42,28 @@
       "verification_status": "Echolet Verified"
     },
     {
-      "id": "echolet-zipformer-streaming-en-2023-06-26-r1",
-      "display_name": "Zipformer Streaming",
-      "version": "2023",
+      "id": "echolet-kroko-streaming-en-2025-08-06-r1",
+      "display_name": "Kroko",
+      "version": "2025",
       "languages": [
         "en"
       ],
       "family": "online-transducer",
       "source": {
         "bundled": false,
-        "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-en-2023-06-26.tar.bz2",
-        "sha256": "639e25b578e9e997131402199419c13a941f8e4e198e2da1ce57dbf5cf401282",
-        "repository": "https://huggingface.co/Zengwei/icefall-asr-librispeech-streaming-zipformer-2023-05-17",
-        "revision": "37cb5606808f3d5e55a3fc73554bdf757d82465a"
+        "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-en-kroko-2025-08-06.tar.bz2",
+        "sha256": "c8676e5ff9ac2a85296e53ee0fd4d5fb1db6770e7a7647166eeafe349ade6834",
+        "repository": "https://huggingface.co/csukuangfj/sherpa-onnx-streaming-zipformer-en-kroko-2025-08-06",
+        "revision": "572aaf4e2e0c603c3fc2a574d096e755a178faa1"
       },
       "files": {
-        "encoder": "encoder-epoch-99-avg-1-chunk-16-left-128.int8.onnx",
-        "decoder": "decoder-epoch-99-avg-1-chunk-16-left-128.onnx",
-        "joiner": "joiner-epoch-99-avg-1-chunk-16-left-128.int8.onnx",
+        "encoder": "encoder.onnx",
+        "decoder": "decoder.onnx",
+        "joiner": "joiner.onnx",
         "tokens": "tokens.txt"
       },
       "runtime": {
+        "model_type": "zipformer2",
         "sample_rate": 16000,
         "feature_dim": 80,
         "num_threads": 1,
@@ -70,13 +71,12 @@
         "decoding_method": "greedy_search",
         "max_active_paths": 4
       },
-      "download_size_bytes": 310414022,
-      "installed_size_bytes": 72466360,
-      "upstream_release_date": "2023-06-26",
+      "download_size_bytes": 57267600,
+      "installed_size_bytes": 71053214,
+      "upstream_release_date": "2025-08-06",
       "license": {
-        "spdx": "Apache-2.0",
-        "name": "Apache License 2.0",
-        "url": "https://www.apache.org/licenses/LICENSE-2.0"
+        "name": "Creative Commons Attribution-ShareAlike",
+        "url": "https://huggingface.co/Banafo/Kroko-ASR"
       },
       "verification_status": "Experimental"
     },
@@ -112,6 +112,44 @@
       "download_size_bytes": 463945051,
       "installed_size_bytes": 661919416,
       "upstream_release_date": "2026-04-25",
+      "license": {
+        "name": "NVIDIA Open Model License Agreement",
+        "url": "https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-open-model-license/"
+      },
+      "verification_status": "Experimental"
+    },
+    {
+      "id": "echolet-parakeet-unified-en-0.6b-560ms-int8-2026-05-12-r1",
+      "display_name": "Parakeet Unified 0.6B",
+      "version": "2026",
+      "languages": [
+        "en"
+      ],
+      "family": "online-transducer",
+      "source": {
+        "bundled": false,
+        "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-nemo-parakeet-unified-en-0.6b-int8-streaming-560ms.tar.bz2",
+        "sha256": "dd2c2698f102eafbf0ee54bdfd7cd842ec00fa6cf2475cbbb048887f794ff52e",
+        "repository": "https://huggingface.co/nvidia/parakeet-unified-en-0.6b",
+        "revision": "d4ac9928f3bf238223ff0779c06b8149bf8ac4e1"
+      },
+      "files": {
+        "encoder": "encoder.int8.onnx",
+        "decoder": "decoder.int8.onnx",
+        "joiner": "joiner.int8.onnx",
+        "tokens": "tokens.txt"
+      },
+      "runtime": {
+        "sample_rate": 16000,
+        "feature_dim": 128,
+        "num_threads": 1,
+        "provider": "cpu",
+        "decoding_method": "greedy_search",
+        "max_active_paths": 4
+      },
+      "download_size_bytes": 501360769,
+      "installed_size_bytes": 663048978,
+      "upstream_release_date": "2026-05-12",
       "license": {
         "name": "NVIDIA Open Model License Agreement",
         "url": "https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-open-model-license/"

@@ -322,14 +322,17 @@ fn test_legacy_normalizer_still_handles_base_languages() {
 #[test]
 fn test_english_models_have_no_language_options() {
     let reg = registry();
-    let zipformer = reg
-        .get_model("echolet-zipformer-streaming-en-2023-06-26-r1")
-        .expect("Zipformer entry");
-    assert_eq!(zipformer.languages, vec!["en"]);
-    assert!(zipformer.language_options.is_none());
-    assert!(zipformer.supported_language_options().is_empty());
-    assert_eq!(zipformer.validate_language_selection(None), Ok(None));
-    assert!(zipformer.validate_language_selection(Some("en")).is_err());
+    for id in [
+        "echolet-kroko-streaming-en-2025-08-06-r1",
+        "echolet-parakeet-unified-en-0.6b-560ms-int8-2026-05-12-r1",
+    ] {
+        let english = reg.get_model(id).expect("English entry");
+        assert_eq!(english.languages, vec!["en"]);
+        assert!(english.language_options.is_none());
+        assert!(english.supported_language_options().is_empty());
+        assert_eq!(english.validate_language_selection(None), Ok(None));
+        assert!(english.validate_language_selection(Some("en")).is_err());
+    }
 
     let nemotron = reg
         .get_model("echolet-nemotron-speech-streaming-en-0.6b-560ms-int8-2026-04-25-r1")

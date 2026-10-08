@@ -1,0 +1,22 @@
+NVIDIA Open Model License Agreement
+
+Pretrained model: Parakeet Unified 0.6B English (560 ms buffered streaming, int8)
+Upstream repository: https://huggingface.co/nvidia/parakeet-unified-en-0.6b
+Revision: d4ac9928f3bf238223ff0779c06b8149bf8ac4e1
+
+The NVIDIA model card lists a release date of 2026-04-07. This revision is the
+last upstream commit before the sherpa-onnx ONNX export on 2026-05-12.
+
+sherpa-onnx export: sherpa-onnx-nemo-parakeet-unified-en-0.6b-int8-streaming-560ms
+Official artifact:
+https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-nemo-parakeet-unified-en-0.6b-int8-streaming-560ms.tar.bz2
+
+The NVIDIA model card states that use of this model is governed by the
+NVIDIA Open Model License Agreement:
+https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-open-model-license/
+
+This is not an Apache-2.0 model. The sherpa-onnx export code being Apache-2.0
+does not relicense these weights.
+
+Echolet registry id: echolet-parakeet-unified-en-0.6b-560ms-int8-2026-05-12-r1
+Verification status: Experimental

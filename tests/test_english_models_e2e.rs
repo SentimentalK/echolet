@@ -8,8 +8,8 @@
 //!
 //! The harness uses the shipped registry and `ModelManager::install_registry_model`,
 //! which downloads each archive from its registry URL and verifies the SHA256
-//! before install. A shared English WAV from the official Zipformer archive is
-//! then decoded by both installed recognizers.
+//! before install. A shared English WAV from the official Kroko archive is
+//! then decoded by each installed English recognizer.
 
 use echolet::asr::OnlineRecognizer;
 use echolet::models::download::InstallPhase;
@@ -21,8 +21,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
-const ZIPFORMER_ID: &str = "echolet-zipformer-streaming-en-2023-06-26-r1";
+const KROKO_ID: &str = "echolet-kroko-streaming-en-2025-08-06-r1";
 const NEMOTRON_ID: &str = "echolet-nemotron-speech-streaming-en-0.6b-560ms-int8-2026-04-25-r1";
+const PARAKEET_ID: &str = "echolet-parakeet-unified-en-0.6b-560ms-int8-2026-05-12-r1";
 
 fn e2e_enabled() -> bool {
     matches!(
@@ -226,8 +227,9 @@ fn run_e2e() -> Result<(), String> {
     if ids
         != [
             "echolet-xasr-zh-en-480ms-689ff18c584d29910da37b6fe904db0c1489c9d1",
-            ZIPFORMER_ID,
+            KROKO_ID,
             NEMOTRON_ID,
+            PARAKEET_ID,
         ]
     {
         return Err(format!("unexpected registry order: {:?}", ids));
@@ -246,17 +248,17 @@ fn run_e2e() -> Result<(), String> {
     .map_err(|e| format!("write bundled registry: {}", e))?;
 
     let mut manager = ModelManager::new_with_paths(bundled, user, config)?;
-    install_model(&mut manager, ZIPFORMER_ID)?;
+    install_model(&mut manager, KROKO_ID)?;
 
     let wav_path = manager
-        .get_model(ZIPFORMER_ID)
-        .ok_or("zipformer install missing")?
+        .get_model(KROKO_ID)
+        .ok_or("kroko install missing")?
         .dir
         .join("test_wavs")
         .join("0.wav");
     if !wav_path.exists() {
         return Err(format!(
-            "official Zipformer archive did not install a reproducible English WAV at {}",
+            "official Kroko archive did not install a reproducible English WAV at {}",
             wav_path.display()
         ));
     }
@@ -272,8 +274,9 @@ fn run_e2e() -> Result<(), String> {
     );
 
     install_model(&mut manager, NEMOTRON_ID)?;
+    install_model(&mut manager, PARAKEET_ID)?;
 
-    for model_id in [ZIPFORMER_ID, NEMOTRON_ID] {
+    for model_id in [KROKO_ID, NEMOTRON_ID, PARAKEET_ID] {
         let installed = manager
             .get_model(model_id)
             .ok_or_else(|| format!("missing install {}", model_id))?

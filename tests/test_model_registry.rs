@@ -53,8 +53,8 @@ fn test_registry_parsing_and_invariants() {
     );
     assert_eq!(
         registry.models.len(),
-        3,
-        "Registry must contain exactly 3 models: X-ASR, Zipformer Streaming, and Nemotron Speech Streaming 0.6B"
+        4,
+        "Registry must contain exactly 4 models: X-ASR, Kroko, Nemotron Speech Streaming 0.6B, and Parakeet Unified 0.6B"
     );
 
     let model_ids: Vec<&str> = registry.models.iter().map(|m| m.id.as_str()).collect();
@@ -62,8 +62,9 @@ fn test_registry_parsing_and_invariants() {
         model_ids,
         vec![
             "echolet-xasr-zh-en-480ms-689ff18c584d29910da37b6fe904db0c1489c9d1",
-            "echolet-zipformer-streaming-en-2023-06-26-r1",
+            "echolet-kroko-streaming-en-2025-08-06-r1",
             "echolet-nemotron-speech-streaming-en-0.6b-560ms-int8-2026-04-25-r1",
+            "echolet-parakeet-unified-en-0.6b-560ms-int8-2026-05-12-r1",
         ]
     );
 
@@ -105,61 +106,50 @@ fn test_registry_parsing_and_invariants() {
     assert_eq!(xasr.files.tokens, "tokens.txt");
     assert_eq!(xasr.runtime.model_type, Some("zipformer2".into()));
 
-    // 2. Zipformer Streaming English Model
-    let zipformer = registry
-        .get_model("echolet-zipformer-streaming-en-2023-06-26-r1")
-        .expect("Missing Zipformer model");
-    assert_eq!(zipformer.display_name, "Zipformer Streaming");
-    assert_eq!(zipformer.version, "2023");
-    assert_eq!(zipformer.display_title(), "Zipformer Streaming — 2023");
-    assert!(!zipformer.display_title().contains("Small English"));
+    // 2. Kroko English streaming Zipformer
+    let kroko = registry
+        .get_model("echolet-kroko-streaming-en-2025-08-06-r1")
+        .expect("Missing Kroko model");
+    assert_eq!(kroko.display_name, "Kroko");
+    assert_eq!(kroko.version, "2025");
+    assert_eq!(kroko.display_title(), "Kroko — 2025");
+    assert_eq!(kroko.verification_status, VerificationStatus::Experimental);
+    assert_eq!(kroko.languages, vec!["en"]);
+    assert_eq!(kroko.language_key(), "en");
+    assert_eq!(kroko.language_label(), "English");
+    assert!(kroko.language_options.is_none());
+    assert!(kroko.supported_language_options().is_empty());
+    assert_eq!(kroko.files.encoder, "encoder.onnx");
+    assert_eq!(kroko.files.decoder, "decoder.onnx");
+    assert_eq!(kroko.files.joiner, "joiner.onnx");
+    assert_eq!(kroko.files.tokens, "tokens.txt");
+    assert_eq!(kroko.runtime.model_type, Some("zipformer2".into()));
     assert_eq!(
-        zipformer.verification_status,
-        VerificationStatus::Experimental
-    );
-    assert_eq!(zipformer.languages, vec!["en"]);
-    assert_eq!(zipformer.language_key(), "en");
-    assert_eq!(zipformer.language_label(), "English");
-    assert!(zipformer.language_options.is_none());
-    assert!(zipformer.supported_language_options().is_empty());
-    assert_eq!(
-        zipformer.files.encoder,
-        "encoder-epoch-99-avg-1-chunk-16-left-128.int8.onnx"
-    );
-    assert_eq!(
-        zipformer.files.decoder,
-        "decoder-epoch-99-avg-1-chunk-16-left-128.onnx"
+        kroko.source.url.as_deref(),
+        Some("https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-en-kroko-2025-08-06.tar.bz2")
     );
     assert_eq!(
-        zipformer.files.joiner,
-        "joiner-epoch-99-avg-1-chunk-16-left-128.int8.onnx"
-    );
-    assert_eq!(zipformer.files.tokens, "tokens.txt");
-    assert_eq!(zipformer.runtime.model_type, None);
-    assert_eq!(
-        zipformer.source.url.as_deref(),
-        Some("https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-en-2023-06-26.tar.bz2")
+        kroko.source.sha256.as_deref(),
+        Some("c8676e5ff9ac2a85296e53ee0fd4d5fb1db6770e7a7647166eeafe349ade6834")
     );
     assert_eq!(
-        zipformer.source.sha256.as_deref(),
-        Some("639e25b578e9e997131402199419c13a941f8e4e198e2da1ce57dbf5cf401282")
+        kroko.source.repository.as_deref(),
+        Some("https://huggingface.co/csukuangfj/sherpa-onnx-streaming-zipformer-en-kroko-2025-08-06")
     );
     assert_eq!(
-        zipformer.source.repository.as_deref(),
-        Some(
-            "https://huggingface.co/Zengwei/icefall-asr-librispeech-streaming-zipformer-2023-05-17"
-        )
+        kroko.source.revision.as_deref(),
+        Some("572aaf4e2e0c603c3fc2a574d096e755a178faa1")
     );
+    assert_eq!(kroko.download_size_bytes, Some(57267600));
+    assert_eq!(kroko.installed_size_bytes, Some(71053214));
     assert_eq!(
-        zipformer.source.revision.as_deref(),
-        Some("37cb5606808f3d5e55a3fc73554bdf757d82465a")
+        kroko
+            .license
+            .as_ref()
+            .map(|l| l.name.as_deref().unwrap_or("")),
+        Some("Creative Commons Attribution-ShareAlike")
     );
-    assert_eq!(zipformer.download_size_bytes, Some(310414022));
-    assert_eq!(zipformer.installed_size_bytes, Some(72466360));
-    assert_eq!(
-        zipformer.license.as_ref().and_then(|l| l.spdx.as_deref()),
-        Some("Apache-2.0")
-    );
+    assert_eq!(kroko.license.as_ref().and_then(|l| l.spdx.as_deref()), None);
 
     // 3. Nemotron Speech Streaming 0.6B English Model
     let nemotron = registry
@@ -213,6 +203,58 @@ fn test_registry_parsing_and_invariants() {
     );
     assert_eq!(
         nemotron.license.as_ref().and_then(|l| l.spdx.as_deref()),
+        None
+    );
+
+    // 4. Parakeet Unified 0.6B English Model
+    let parakeet = registry
+        .get_model("echolet-parakeet-unified-en-0.6b-560ms-int8-2026-05-12-r1")
+        .expect("Missing Parakeet model");
+    assert_eq!(parakeet.display_name, "Parakeet Unified 0.6B");
+    assert_eq!(parakeet.version, "2026");
+    assert_eq!(parakeet.display_title(), "Parakeet Unified 0.6B — 2026");
+    assert_eq!(
+        parakeet.verification_status,
+        VerificationStatus::Experimental
+    );
+    assert_eq!(parakeet.languages, vec!["en"]);
+    assert_eq!(parakeet.language_key(), "en");
+    assert_eq!(parakeet.language_label(), "English");
+    assert!(parakeet.language_options.is_none());
+    assert!(parakeet.supported_language_options().is_empty());
+    assert_eq!(parakeet.files.encoder, "encoder.int8.onnx");
+    assert_eq!(parakeet.files.decoder, "decoder.int8.onnx");
+    assert_eq!(parakeet.files.joiner, "joiner.int8.onnx");
+    assert_eq!(parakeet.files.tokens, "tokens.txt");
+    assert_eq!(parakeet.runtime.model_type, None);
+    assert_eq!(parakeet.runtime.feature_dim, 128);
+    assert_eq!(
+        parakeet.source.url.as_deref(),
+        Some("https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-nemo-parakeet-unified-en-0.6b-int8-streaming-560ms.tar.bz2")
+    );
+    assert_eq!(
+        parakeet.source.sha256.as_deref(),
+        Some("dd2c2698f102eafbf0ee54bdfd7cd842ec00fa6cf2475cbbb048887f794ff52e")
+    );
+    assert_eq!(
+        parakeet.source.repository.as_deref(),
+        Some("https://huggingface.co/nvidia/parakeet-unified-en-0.6b")
+    );
+    assert_eq!(
+        parakeet.source.revision.as_deref(),
+        Some("d4ac9928f3bf238223ff0779c06b8149bf8ac4e1")
+    );
+    assert_eq!(parakeet.download_size_bytes, Some(501360769));
+    assert_eq!(parakeet.installed_size_bytes, Some(663048978));
+    assert_eq!(
+        parakeet
+            .license
+            .as_ref()
+            .map(|l| l.name.as_deref().unwrap_or("")),
+        Some("NVIDIA Open Model License Agreement")
+    );
+    assert_eq!(
+        parakeet.license.as_ref().and_then(|l| l.spdx.as_deref()),
         None
     );
 }
@@ -720,8 +762,9 @@ fn test_project_041_control_surface_grouping_and_actions() {
         "echolet-xasr-zh-en-480ms-689ff18c584d29910da37b6fe904db0c1489c9d1"
     );
 
-    let zipformer_id = "echolet-zipformer-streaming-en-2023-06-26-r1";
+    let kroko_id = "echolet-kroko-streaming-en-2025-08-06-r1";
     let nemotron_id = "echolet-nemotron-speech-streaming-en-0.6b-560ms-int8-2026-04-25-r1";
+    let parakeet_id = "echolet-parakeet-unified-en-0.6b-560ms-int8-2026-05-12-r1";
     let xasr_id = "echolet-xasr-zh-en-480ms-689ff18c584d29910da37b6fe904db0c1489c9d1";
 
     // 1. Uninstalled state
@@ -745,9 +788,10 @@ fn test_project_041_control_surface_grouping_and_actions() {
 
     assert_eq!(state.model_groups[1].id, "en");
     assert_eq!(state.model_groups[1].label, "English");
-    assert_eq!(state.model_groups[1].models.len(), 2);
-    assert_eq!(state.model_groups[1].models[0].id, zipformer_id);
+    assert_eq!(state.model_groups[1].models.len(), 3);
+    assert_eq!(state.model_groups[1].models[0].id, kroko_id);
     assert_eq!(state.model_groups[1].models[1].id, nemotron_id);
+    assert_eq!(state.model_groups[1].models[2].id, parakeet_id);
 
     // No Multilingual group from current catalog
     assert!(state.model_groups.iter().all(|g| g.id != "multilingual"));
@@ -757,11 +801,15 @@ fn test_project_041_control_surface_grouping_and_actions() {
     assert_eq!(m_xasr.label, "X-ASR — 2026");
     assert!(m_xasr.is_verified);
 
-    let m_zip = state.find_model(zipformer_id).unwrap();
-    assert_eq!(m_zip.label, "Zipformer Streaming — 2023");
-    assert!(!m_zip.label.contains("Small English"));
-    assert!(!m_zip.is_verified);
-    assert!(m_zip.language.options.is_empty());
+    let m_kroko = state.find_model(kroko_id).unwrap();
+    assert_eq!(m_kroko.label, "Kroko — 2025");
+    assert!(!m_kroko.is_verified);
+    assert!(m_kroko.language.options.is_empty());
+
+    let m_parakeet = state.find_model(parakeet_id).unwrap();
+    assert_eq!(m_parakeet.label, "Parakeet Unified 0.6B — 2026");
+    assert!(!m_parakeet.is_verified);
+    assert!(m_parakeet.language.options.is_empty());
 
     let m_nemo = state.find_model(nemotron_id).unwrap();
     assert_eq!(m_nemo.label, "Nemotron Speech Streaming 0.6B — 2026");
@@ -770,11 +818,11 @@ fn test_project_041_control_surface_grouping_and_actions() {
     assert!(m_nemo.language.options.is_empty());
 
     // Action when uninstalled: Download
-    assert_eq!(m_zip.primary_action, ModelPrimaryAction::Download);
-    assert!(m_zip.enabled);
+    assert_eq!(m_kroko.primary_action, ModelPrimaryAction::Download);
+    assert!(m_kroko.enabled);
     assert_eq!(
-        m_zip.surface_action(),
-        Some(SurfaceAction::DownloadModel(zipformer_id.to_string()))
+        m_kroko.surface_action(),
+        Some(SurfaceAction::DownloadModel(kroko_id.to_string()))
     );
 
     assert_eq!(m_nemo.primary_action, ModelPrimaryAction::Download);
@@ -786,8 +834,9 @@ fn test_project_041_control_surface_grouping_and_actions() {
 
     // 2. Installed, non-selected state
     let mut installed = HashSet::new();
-    installed.insert(zipformer_id.to_string());
+    installed.insert(kroko_id.to_string());
     installed.insert(nemotron_id.to_string());
+    installed.insert(parakeet_id.to_string());
     installed.insert(xasr_id.to_string());
 
     let state_installed = build_control_surface_state(
@@ -801,12 +850,12 @@ fn test_project_041_control_surface_grouping_and_actions() {
         false,
     );
 
-    let m_zip_inst = state_installed.find_model(zipformer_id).unwrap();
-    assert_eq!(m_zip_inst.primary_action, ModelPrimaryAction::Select);
-    assert!(m_zip_inst.enabled);
+    let m_kroko_inst = state_installed.find_model(kroko_id).unwrap();
+    assert_eq!(m_kroko_inst.primary_action, ModelPrimaryAction::Select);
+    assert!(m_kroko_inst.enabled);
     assert_eq!(
-        m_zip_inst.surface_action(),
-        Some(SurfaceAction::SelectModel(zipformer_id.to_string()))
+        m_kroko_inst.surface_action(),
+        Some(SurfaceAction::SelectModel(kroko_id.to_string()))
     );
 
     let m_xasr_sel = state_installed.find_model(xasr_id).unwrap();
@@ -816,9 +865,9 @@ fn test_project_041_control_surface_grouping_and_actions() {
     assert!(state_installed.active_language().is_none());
 
     // 3. Selected English model exposes no language options / active language
-    let state_selected_zip = build_control_surface_state(
+    let state_selected_kroko = build_control_surface_state(
         &registry,
-        Some(zipformer_id),
+        Some(kroko_id),
         &installed,
         &HashSet::new(),
         &HashMap::new(),
@@ -826,7 +875,7 @@ fn test_project_041_control_surface_grouping_and_actions() {
         RuntimeState::Ready,
         false,
     );
-    assert!(state_selected_zip.active_language().is_none());
+    assert!(state_selected_kroko.active_language().is_none());
 
     let state_selected_nemo = build_control_surface_state(
         &registry,
@@ -851,8 +900,8 @@ fn test_project_041_control_surface_grouping_and_actions() {
         RuntimeState::Listening,
         false,
     );
-    let m_zip_listening = state_listening.find_model(zipformer_id).unwrap();
-    assert_eq!(m_zip_listening.primary_action, ModelPrimaryAction::Select);
-    assert!(!m_zip_listening.enabled);
-    assert_eq!(m_zip_listening.surface_action(), None);
+    let m_kroko_listening = state_listening.find_model(kroko_id).unwrap();
+    assert_eq!(m_kroko_listening.primary_action, ModelPrimaryAction::Select);
+    assert!(!m_kroko_listening.enabled);
+    assert_eq!(m_kroko_listening.surface_action(), None);
 }

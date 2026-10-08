@@ -1,0 +1,21 @@
+Creative Commons Attribution-ShareAlike
+
+Streaming English Zipformer ASR model from Kroko's community weights.
+sherpa-onnx export: sherpa-onnx-streaming-zipformer-en-kroko-2025-08-06
+Official artifact:
+https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-en-kroko-2025-08-06.tar.bz2
+
+Export repository:
+https://huggingface.co/csukuangfj/sherpa-onnx-streaming-zipformer-en-kroko-2025-08-06
+Revision: 572aaf4e2e0c603c3fc2a574d096e755a178faa1
+
+Upstream author: Banafo / Kroko ASR
+https://huggingface.co/Banafo/Kroko-ASR
+
+The Kroko project states that its community models are licensed under
+CC-BY-SA. The upstream README does not pin a Creative Commons version
+number. The Kroko engine itself is Apache-2.0; that license does not
+relicense these weights.
+
+Echolet registry id: echolet-kroko-streaming-en-2025-08-06-r1
+Verification status: Experimental
