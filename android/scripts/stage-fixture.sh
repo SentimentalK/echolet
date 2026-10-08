@@ -32,10 +32,29 @@ adb_bin="$sdk_root/platform-tools/adb"
 [ -x "$adb_bin" ] || fail "adb missing at $adb_bin (sdkmanager --install platform-tools)."
 
 # 0. Device gate: fail with EXACT adb evidence, never silently skip.
-devices=$("$adb_bin" devices | tail -n +2 | grep -c "device" || true)
+#
+# The gate proves (raw `adb devices -l` printed in full on every failure):
+#   * an emulated/physical device is listed, not blank;
+#   * the device is AUTHORIZED (`adb devices` status != unauthorized);
+#   * the device has the arm64-v8a ABI required by the Phase 0-A slice;
+#   * the diagnostic app com.mainstayx.echolet is REALLY installed
+#     (pm path checked; its external files directory may not exist until the
+#     app has been installed once — install the APK BEFORE staging).
+# Lack of a device/ABI/app is a validation blocker: the script FAILS instead
+# of faking verification; report `DEVICE INFERENCE UNVERIFIED`, never PASS.
+"$adb_bin" devices -l
+devices=$("$adb_bin" devices | tail -n +2 | grep -c 'device$' || true)
 if [ "$devices" -eq 0 ]; then
-  "$adb_bin" devices -l
-  fail "no physical arm64 device attached (see 'adb devices -l' above). REAL device inference stays UNVERIFIED; report the gate, do not claim PASS."
+  fail "no authorized device attached (raw 'adb devices -l' above shows the truth). REAL device inference stays UNVERIFIED; report the gate, do not claim PASS."
+fi
+serial=$("$adb_bin" devices | tail -n +2 | grep 'device$' | head -n 1 | cut -f1)
+abi_list=$("$adb_bin" -s "$serial" shell getprop ro.product.cpu.abilist | tr -d '\r')
+case "$abi_list" in
+  *arm64-v8a*) ;;
+  *) fail "device $serial lacks arm64-v8a ABI (ro.product.cpu.abilist=$abi_list); this slice only packages arm64-v8a." ;;
+esac
+if [ -z "$("$adb_bin" -s "$serial" shell pm path com.mainstayx.echolet | tr -d '\r')" ]; then
+  fail "com.mainstayx.echolet is NOT installed on $serial; install the verified APK first: adb install -r android/app/build/outputs/apk/debug/app-debug.apk (the app-specific external files dir only becomes usable after at least one install)."
 fi
 
 # 1. Host-side fixture from the locked model pack.
@@ -69,19 +88,26 @@ app_id="com.mainstayx.echolet"
 device_dir="/storage/emulated/0/Android/data/$app_id/files/models"
 device_fixture="$device_dir/bilingual-zh-en"
 
-"$adb_bin" shell "mkdir -p '$device_fixture/test_wavs'" || fail "adb mkdir failed (USB/disconnected device)."
+# Scoped storage: on Android 11+ the app-specific external files dir may
+# still refuse plain `adb shell mkdir` on some devices/builds. Try, and on
+# failure print the EXACT denial rather than blindly bypassing the system
+# protection (no `adb root`/write-external hacks).
+if ! "$adb_bin" -s "$serial" shell "mkdir -p '$device_fixture/test_wavs'"; then
+  "$adb_bin" -s "$serial" shell "ls -ld '$device_dir' 2>&1" || true
+  fail "adb mkdir under $device_dir was denied (scoped-storage/permission error shown above). Launch the app once on the device, confirm USB debugging is authorized, and re-run; do NOT work around the device's storage policy."
+fi
 
 for f in "${required[@]}"; do
   echo "--> staging $f"
-  "$adb_bin" push "$host_fixture/$f" "$device_fixture/$f" >/dev/null \
+  "$adb_bin" -s "$serial" push "$host_fixture/$f" "$device_fixture/$f" >/dev/null \
     || fail "adb push $f failed (USB denied/unauthorized/no space; check device screen for debug-USB prompt)."
 done
 
 # 3. Verify every named file landed nonempty.
 for f in "${required[@]}"; do
   remote="$device_fixture/$f"
-  size=$("$adb_bin" shell "stat -c %s '$remote' 2>/dev/null" | tr -d '\r' || echo "")
+  size=$("$adb_bin" -s "$serial" shell "stat -c %s '$remote' 2>/dev/null" | tr -d '\r' || echo "")
   [ -n "$size" ] && [ "$size" != "0" ] || fail "staged $f missing/empty on device at $remote."
 done
 
-echo "Fixture staged at $device_fixture on $("$adb_bin" get-serialno | tr -d '\r')."
+echo "Fixture staged at $device_fixture on $serial."

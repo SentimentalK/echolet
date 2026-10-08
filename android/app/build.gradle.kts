@@ -16,7 +16,7 @@ android {
 
         // Phase 0-A feasibility: the native slice is built and validated for
         // arm64-v8a only (libecholet_android.so, libsherpa-onnx-c-api.so,
-        // libonnxruntime.so under build/generated/jniLibs/arm64-v8a).
+        // libonnxruntime.so under .native-jniLibs/arm64-v8a, outside build/).
         ndk {
             abiFilters += listOf("arm64-v8a")
         }
@@ -28,12 +28,21 @@ android {
     }
 }
 
+// Pure-JVM projection tests (CodepointDiffBuffer), runnable without Android:
+//   (cd android && ./gradlew :app:testDebugUnitTest)
+dependencies {
+    testImplementation("junit:junit:4.13.2")
+}
+
 // Native .so binaries are staged by android/scripts/build-native-arm64.sh
-// (cargo-ndk + pinned sherpa-onnx C API); they are build outputs, never
-// committed sources. AGP 9 requires the Sources variant API for generated
-// source directories.
+// (cargo-ndk + pinned sherpa-onnx C API) into app/.native-jniLibs/<abi>/;
+// they are build outputs, never committed sources. The directory deliberately
+// lives OUTSIDE app/build so `./gradlew clean :app:assembleDebug` preserves
+// the staged set, and android/.gitignore ignores it. AGP 9 requires the
+// Sources variant API for additional static source directories; the path is
+// resolved relative to the app module root and contains ABI subdirectories.
 androidComponents {
     onVariants { variant ->
-        variant.sources.jniLibs?.addStaticSourceDirectory("build/generated/jniLibs")
+        variant.sources.jniLibs?.addStaticSourceDirectory(".native-jniLibs")
     }
 }

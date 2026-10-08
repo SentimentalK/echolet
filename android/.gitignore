@@ -9,6 +9,7 @@ captures/
 .cxx/
 *.hprof
 
-# Phase 0-A native slice
-app/build/generated/jniLibs/
+# Phase 0-A native slice. Staging lives OUTSIDE .gradle/app build dirs so a
+# `./gradlew clean` never removes the staged .so set.
+app/.native-jniLibs/
 native/target/

@@ -17,7 +17,10 @@
 #   5. ELF audit: llvm-readelf/llvm-nm on libsherpa-onnx-c-api.so
 #   6. cargo ndk -t arm64-v8a -o <staging> build --release
 #      --manifest-path android/native/Cargo.toml (ECHOLET_NATIVE_LIB_DIR = C API dir)
+#      where <staging> = android/app/.native-jniLibs (outside app/build)
 #   7. ELF audit of libecholet_android.so + staged set validation
+#
+# The APK gate after the Gradle build is android/scripts/verify-apk-arm64.sh.
 
 set -euo pipefail
 
@@ -33,7 +36,9 @@ script_dir="$(cd "$(dirname "$0")" && pwd)"
 repo_root="$(cd "$script_dir/../.." && pwd)"
 android_root="$repo_root/android"
 cache_root="$repo_root/.local-runtime/android-native"
-staging="$android_root/app/build/generated/jniLibs"
+# Canonical staging root: under `app/` but OUTSIDE `app/build`, so Gradle
+# `clean` cannot remove it. AGP reads it via addStaticSourceDirectory(".native-jniLibs").
+staging="$android_root/app/.native-jniLibs"
 
 fail() {
   printf 'Blocker: %s\n' "$*" >&2
@@ -215,7 +220,7 @@ cdylib="$staging/arm64-v8a/libecholet_android.so"
 [ -f "$cdylib" ] || fail "cargo ndk did not stage $cdylib."
 
 # --- 7. Minimal staged set audit ----------------------------------------------
-staged_lib="$android_root/app/build/generated/jniLibs/arm64-v8a"
+staged_lib="$android_root/app/.native-jniLibs/arm64-v8a"
 mkdir -p "$staged_lib"
 cp -f "$install_lib/libsherpa-onnx-c-api.so" "$install_lib/libonnxruntime.so" "$staged_lib/"
 
@@ -250,4 +255,4 @@ done
 echo
 echo "Staged arm64-v8a native set:"
 ls -lh "$staged_lib"
-echo "Native build complete. Next: cd android && ./gradlew :app:assembleDebug"
+echo "Native build complete. Next: (cd android && ./gradlew clean :app:assembleDebug) then android/scripts/verify-apk-arm64.sh"

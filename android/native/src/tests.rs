@@ -1,13 +1,23 @@
 //! Host-runnable focused tests of the JNI runtime semantics (Phase 0-A).
 //!
 //! They do NOT pretend to prove Android FFI: they exercise the exact
-//! platform-neutral logic (`AndroidRuntime`) that the JNI layer drives, using
-//! the real pinned X-ASR model fixture when it has been staged on the host at
-//! `.local-runtime/models/bilingual-zh-en` (via `scripts/acquire-base-model.sh`).
+//! platform-neutral logic (`AndroidRuntime`) that the JNI layer drives.
+//!
+//! REAL-FIXTURE POLICY (no fake ASR success):
+//! * Tests that need the pinned X-ASR model are `#[ignore =
+//!   "requires staged X-ASR model fixture"]` — `cargo test` reports them as
+//!   `ignored`, NEVER as passed.
+//! * When such a test is invoked EXPLICITLY (`cargo test -- ... --ignored`),
+//!   `require_fixture()` hard-fails with the exact expected fixture path and
+//!   the acquisition command instead of skipping.
+//! * Explicit run command of record (with fixture staged via
+//!   `scripts/acquire-base-model.sh`):
+//!   `cargo test --release --manifest-path android/native/Cargo.toml -- --ignored`
+//!
+//! Fixture-free negative tests (missing model → fail-closed) run in every
+//! plain `cargo test` run.
 
-use crate::runtime::{
-    AndroidRuntime, BridgeError, MAX_CHUNK_SAMPLES, REQUIRED_SAMPLE_RATE,
-};
+use crate::runtime::{AndroidRuntime, BridgeError, MAX_CHUNK_SAMPLES, REQUIRED_SAMPLE_RATE};
 use serde_json::Value;
 use std::path::PathBuf;
 
@@ -46,8 +56,8 @@ pub fn read_wav_mono_16k(path: &std::path::Path) -> Result<Vec<f32>, String> {
         return Err(format!("{:?} is not a RIFF/WAVE file", path));
     }
 
-    let fmt = read_chunk(&mut cursor, b"fmt ")
-        .ok_or_else(|| format!("{:?} has no fmt chunk", path))?;
+    let fmt =
+        read_chunk(&mut cursor, b"fmt ").ok_or_else(|| format!("{:?} has no fmt chunk", path))?;
     if fmt.len() < 16 {
         return Err(format!("{:?} has a truncated fmt chunk", path));
     }
@@ -65,8 +75,8 @@ pub fn read_wav_mono_16k(path: &std::path::Path) -> Result<Vec<f32>, String> {
         ));
     }
 
-    let data = read_chunk(&mut cursor, b"data")
-        .ok_or_else(|| format!("{:?} has no data chunk", path))?;
+    let data =
+        read_chunk(&mut cursor, b"data").ok_or_else(|| format!("{:?} has no data chunk", path))?;
     let floats: Vec<f32> = data
         .chunks_exact(2)
         .map(|p| i16::from_le_bytes([p[0], p[1]]) as f32 / 32768.0)
@@ -100,6 +110,24 @@ pub fn fixture_available() -> bool {
     fixture_dir().is_some()
 }
 
+/// Mandatory-fixture gate for `#[ignore]`-tagged tests that are invoked
+/// EXPLICITLY (`cargo test -- ... --ignored`). Unlike a skip-and-return, a
+/// missing fixture here is a HARD failure with the exact expected path and
+/// the staging command, so an ignored test can never report success without
+/// speech data.
+pub fn require_fixture() -> PathBuf {
+    match fixture_dir() {
+        Some(dir) => dir,
+        None => panic!(
+            "the pinned X-ASR model fixture is NOT staged; expected \
+             <repo>/.local-runtime/models/bilingual-zh-en (contain model.json, \
+             encoder/decoder/joiner-480ms.onnx, tokens.txt, test_wavs/0.wav). \
+             Stage it first: scripts/acquire-base-model.sh, \
+             then re-run: cargo test --release --manifest-path android/native/Cargo.toml -- --ignored"
+        ),
+    }
+}
+
 /// Feeds the whole fixture WAV in 3200-frame chunks, returning
 /// (visible, endpoint_texts) using the character-unit diff reconstruction
 /// exactly as the diagnostic Activity does.
@@ -107,7 +135,7 @@ pub fn run_fixture(
     runtime: &mut AndroidRuntime,
     chunk_len: usize,
 ) -> Result<(String, Vec<String>), BridgeError> {
-    let dir = fixture_dir().expect("fixture must be staged before calling run_fixture");
+    let dir = require_fixture();
     let pcms = read_wav_mono_16k(&dir.join("test_wavs").join("0.wav"))
         .map_err(|e| BridgeError::InvalidSamples { reason: e })?;
 
@@ -117,8 +145,8 @@ pub fn run_fixture(
 
     for chunk in pcms.chunks(chunk_len) {
         let response = runtime.feed(handle, chunk, REQUIRED_SAMPLE_RATE)?;
-        let events: Vec<serde_json::Value> = serde_json::from_str(&response)
-            .map_err(|e| BridgeError::InvalidSamples {
+        let events: Vec<serde_json::Value> =
+            serde_json::from_str(&response).map_err(|e| BridgeError::InvalidSamples {
                 reason: format!("bridge returned invalid JSON: {}", e),
             })?;
         for event in &events {
@@ -127,7 +155,8 @@ pub fn run_fixture(
                     let backspaces = event
                         .get("backspaces")
                         .and_then(Value::as_u64)
-                        .expect("partial carries backspaces u64") as usize;
+                        .expect("partial carries backspaces u64")
+                        as usize;
                     let suffix = event
                         .get("suffix")
                         .and_then(Value::as_str)
@@ -158,24 +187,17 @@ pub fn run_fixture(
 
 // ---------------------------------------------------------------------------
 // Focused JNI-runtime semantics: handle lifecycle, staleness, wire contract.
-// These run only when the pinned real fixture exists on the host.
+//
+// Every test below except `open_missing_model_directory_fails_closed` needs
+// the REAL pinned X-ASR fixture (a live open of the actual model). It is
+// therefore marked `#[ignore = "requires staged X-ASR model fixture"]`: plain
+// `cargo test` reports it as IGNORED (never a silent pass), and the explicit
+// run of record is
+//   cargo test --release --manifest-path android/native/Cargo.toml -- --ignored
+// which hard-fails via `require_fixture()` when the fixture is absent.
 // ---------------------------------------------------------------------------
 
-macro_rules! with_fixture {
-    ($runtime:ident, $body:block) => {{
-        match fixture_dir() {
-            Some(dir) => {
-                let mut $runtime = AndroidRuntime::new();
-                $body
-            }
-            None => {
-                eprintln!("SKIP: fixture not staged (run scripts/acquire-base-model.sh)");
-                return;
-            }
-        }
-    }};
-}
-
+/// The ONE fixture-free negative test: it must run in every `cargo test`.
 #[test]
 fn open_missing_model_directory_fails_closed() {
     let mut runtime = AndroidRuntime::new();
@@ -183,139 +205,153 @@ fn open_missing_model_directory_fails_closed() {
     let err = runtime.open(&missing).expect_err("missing dir rejected");
     assert!(matches!(err, BridgeError::Model(_)), "got {:?}", err);
     assert!(runtime.active_handle().is_none());
-
 }
 
 #[test]
+#[ignore = "requires staged X-ASR model fixture"]
 fn open_twice_is_rejected_and_state_is_untouched() {
-    with_fixture!(runtime, {
-        let h1 = runtime.open(&fixture_dir().unwrap()).expect("first open");
-        assert_eq!(runtime.active_handle(), Some(h1));
-        let second = runtime.open(&fixture_dir().unwrap()).expect_err("already active");
-        assert_eq!(second, BridgeError::AlreadyActive);
-        assert_eq!(runtime.active_handle(), Some(h1), "failed open keeps state");
-    });
+    let dir = require_fixture();
+    let mut runtime = AndroidRuntime::new();
+    let h1 = runtime.open(&dir).expect("first open");
+    assert_eq!(runtime.active_handle(), Some(h1));
+    let second = runtime.open(&dir).expect_err("already active");
+    assert_eq!(second, BridgeError::AlreadyActive);
+    assert_eq!(runtime.active_handle(), Some(h1), "failed open keeps state");
+    runtime.close(h1);
 }
 
 #[test]
+#[ignore = "requires staged X-ASR model fixture"]
 fn handles_strictly_increase_and_survive_round_trips() {
-    with_fixture!(runtime, {
-        let dir = fixture_dir().unwrap();
-        let mut last = 0u64;
-        for _turn in 0..3 {
-            let h = runtime.open(&dir).expect("open");
-            assert!(h > last, "handles strictly increase");
-            assert_ne!(h, 0, "handles are nonzero");
-            last = h;
-            runtime.close(h);
-            // Duplicate close is a harmless no-op.
-            runtime.close(h);
-        }
-    });
+    let dir = require_fixture();
+    let mut runtime = AndroidRuntime::new();
+    let mut last = 0u64;
+    for _turn in 0..3 {
+        let h = runtime.open(&dir).expect("open");
+        assert!(h > last, "handles strictly increase");
+        assert_ne!(h, 0, "handles are nonzero");
+        last = h;
+        runtime.close(h);
+        // Duplicate close is a harmless no-op.
+        runtime.close(h);
+    }
 }
 
 #[test]
+#[ignore = "requires staged X-ASR model fixture"]
 fn feed_after_close_is_rejected_with_no_output() {
-    with_fixture!(runtime, {
-        let h = runtime.open(&fixture_dir().unwrap()).expect("open");
-        runtime.close(h);
-        let err = runtime
-            .feed(h, &[0.0; 1600], REQUIRED_SAMPLE_RATE)
-            .expect_err("late feed after close");
-        assert_eq!(err, BridgeError::StaleHandle);
-        // A fresh open gets a new handle; the old one stays dead.
-        let h2 = runtime.open(&fixture_dir().unwrap()).expect("reopen");
-        assert_ne!(h2, h);
-        assert!(runtime.feed(h, &[0.0], REQUIRED_SAMPLE_RATE).is_err());
-        assert!(runtime.feed(h2, &[0.0], REQUIRED_SAMPLE_RATE).is_ok());
-        runtime.close(h2);
-    });
+    let dir = require_fixture();
+    let mut runtime = AndroidRuntime::new();
+    let h = runtime.open(&dir).expect("open");
+    runtime.close(h);
+    let err = runtime
+        .feed(h, &[0.0; 1600], REQUIRED_SAMPLE_RATE)
+        .expect_err("late feed after close");
+    assert_eq!(err, BridgeError::StaleHandle);
+    // A fresh open gets a new handle; the old one stays dead.
+    let h2 = runtime.open(&dir).expect("reopen");
+    assert_ne!(h2, h);
+    assert!(runtime.feed(h, &[0.0], REQUIRED_SAMPLE_RATE).is_err());
+    assert!(runtime.feed(h2, &[0.0], REQUIRED_SAMPLE_RATE).is_ok());
+    runtime.close(h2);
 }
 
 #[test]
+#[ignore = "requires staged X-ASR model fixture"]
 fn feed_rejects_bad_sample_rate_nan_and_oversize() {
-    with_fixture!(runtime, {
-        let h = runtime.open(&fixture_dir().unwrap()).expect("open");
-        let err = runtime
-            .feed(h, &[0.0], 44100)
-            .expect_err("wrong rate rejected");
-        assert!(
-            err.is_input_error(),
-            "sample rate is an input error: {:?}",
-            err
-        );
-        let err = runtime
-            .feed(h, &[f32::NAN, 0.0], REQUIRED_SAMPLE_RATE)
-            .expect_err("NaN rejected");
-        assert!(matches!(err, BridgeError::InvalidSamples { .. }), "got {:?}", err);
-        let big = vec![0.0f32; MAX_CHUNK_SAMPLES + 1];
-        let err = runtime
-            .feed(h, &big, REQUIRED_SAMPLE_RATE)
-            .expect_err("oversize chunk rejected");
-        assert!(matches!(err, BridgeError::InvalidSamples { .. }), "got {:?}", err);
-        // The rejected lever never poisons the session: valid feed still works.
-        assert!(runtime.feed(h, &[0.0], REQUIRED_SAMPLE_RATE).is_ok());
-        runtime.close(h);
-    });
+    let dir = require_fixture();
+    let mut runtime = AndroidRuntime::new();
+    let h = runtime.open(&dir).expect("open");
+    let err = runtime
+        .feed(h, &[0.0], 44100)
+        .expect_err("wrong rate rejected");
+    assert!(
+        err.is_input_error(),
+        "sample rate is an input error: {:?}",
+        err
+    );
+    let err = runtime
+        .feed(h, &[f32::NAN, 0.0], REQUIRED_SAMPLE_RATE)
+        .expect_err("NaN rejected");
+    assert!(
+        matches!(err, BridgeError::InvalidSamples { .. }),
+        "got {:?}",
+        err
+    );
+    let big = vec![0.0f32; MAX_CHUNK_SAMPLES + 1];
+    let err = runtime
+        .feed(h, &big, REQUIRED_SAMPLE_RATE)
+        .expect_err("oversize chunk rejected");
+    assert!(
+        matches!(err, BridgeError::InvalidSamples { .. }),
+        "got {:?}",
+        err
+    );
+    // The rejected lever never poisons the session: valid feed still works.
+    assert!(runtime.feed(h, &[0.0], REQUIRED_SAMPLE_RATE).is_ok());
+    runtime.close(h);
 }
 
 #[test]
+#[ignore = "requires staged X-ASR model fixture"]
 fn empty_feed_returns_empty_json_array() {
-    with_fixture!(runtime, {
-        let h = runtime.open(&fixture_dir().unwrap()).expect("open");
-        let response = runtime.feed(h, &[], REQUIRED_SAMPLE_RATE).expect("empty ok");
-        assert_eq!(response, "[]");
-        runtime.close(h);
-    });
+    let dir = require_fixture();
+    let mut runtime = AndroidRuntime::new();
+    let h = runtime.open(&dir).expect("open");
+    let response = runtime
+        .feed(h, &[], REQUIRED_SAMPLE_RATE)
+        .expect("empty ok");
+    assert_eq!(response, "[]");
+    runtime.close(h);
 }
 
 #[test]
+#[ignore = "requires staged X-ASR model fixture"]
 fn wire_event_contract_and_char_unit_reconstruction() {
-    with_fixture!(runtime, {
-        let (visible, endpoints) = run_fixture(&mut runtime, 3200).expect("whole run ok");
-        // Char-unit reconstruction of admitted partials plus committed
-        // endpoint text must round-trip to a valid, nonempty transcript.
-        assert!(!visible.trim().is_empty(), "partials must reconstruct");
-        let _ = endpoints; // asserted in the run_fixture tests
-    });
+    let mut runtime = AndroidRuntime::new();
+    let (visible, endpoints) = run_fixture(&mut runtime, 3200).expect("whole run ok");
+    // Char-unit reconstruction of admitted partials plus committed
+    // endpoint text must round-trip to a valid, nonempty transcript.
+    assert!(!visible.trim().is_empty(), "partials must reconstruct");
+    let _ = endpoints; // asserted in the run_fixture tests
 }
 
 /// The REAL end-to-end check on the pinned fixture: the visible reconstruction
 /// must be nonempty and match the fixture transcript admissible by the
 /// character-unit diff pipeline.
 #[test]
+#[ignore = "requires staged X-ASR model fixture"]
 fn real_xasr_fixture_recognizes_nonempty_transcript() {
-    with_fixture!(runtime, {
-        let (visible, endpoint_texts) = run_fixture(&mut runtime, 3200).expect("whole run ok");
+    let mut runtime = AndroidRuntime::new();
+    let (visible, endpoint_texts) = run_fixture(&mut runtime, 3200).expect("whole run ok");
+    assert!(
+        !visible.trim().is_empty(),
+        "the pinned fixture must produce a nonempty transcript; got {:?}",
+        visible
+    );
+    for text in &endpoint_texts {
         assert!(
-            !visible.trim().is_empty(),
-            "the pinned fixture must produce a nonempty transcript; got {:?}",
-            visible
+            !text.trim().is_empty(),
+            "endpoint events carry nonempty completed text"
         );
-        for text in &endpoint_texts {
-            assert!(
-                !text.trim().is_empty(),
-                "endpoint events carry nonempty completed text"
-            );
-        }
-        eprintln!(
-            "[fixture result] visible={:?} endpoints={:?}",
-            visible, endpoint_texts
-        );
-    });
+    }
+    eprintln!(
+        "[fixture result] visible={:?} endpoints={:?}",
+        visible, endpoint_texts
+    );
 }
 
 #[test]
+#[ignore = "requires staged X-ASR model fixture"]
 fn second_run_after_close_has_no_stale_events() {
-    with_fixture!(runtime, {
-        let first = run_fixture(&mut runtime, 3200).expect("run 1");
-        let second = run_fixture(&mut runtime, 3200).expect("run 2");
-        // Both runs must produce the SAME admitted endpoint text: no state was
-        // carried over from the closed session (fresh stream per open).
-        assert_eq!(
-            first.1, second.1,
-            "open/close/open must not leak endpoint events across sessions"
-        );
-        assert_eq!(first.0, second.0, "no stale partial state across sessions");
-    });
+    let mut runtime = AndroidRuntime::new();
+    let first = run_fixture(&mut runtime, 3200).expect("run 1");
+    let second = run_fixture(&mut runtime, 3200).expect("run 2");
+    // Both runs must produce the SAME admitted endpoint text: no state was
+    // carried over from the closed session (fresh stream per open).
+    assert_eq!(
+        first.1, second.1,
+        "open/close/open must not leak endpoint events across sessions"
+    );
+    assert_eq!(first.0, second.0, "no stale partial state across sessions");
 }

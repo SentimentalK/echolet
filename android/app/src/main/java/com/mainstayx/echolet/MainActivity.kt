@@ -116,7 +116,7 @@ class MainActivity : Activity() {
             val f = File(dir, name)
             if (!f.exists() || f.length() == 0L) {
                 throw IllegalStateException(
-                    "Model fixture incomplete: missing $name under " +
+                    "model missing: fixture file $name absent/empty under " +
                         dir.absolutePath +
                         ". Stage it with android/scripts/stage-fixture.sh (adb)."
                 )
@@ -124,11 +124,26 @@ class MainActivity : Activity() {
         }
 
         val samples = WavFixture.readMono16k(File(dir, "test_wavs/0.wav"))
+        if (samples.isEmpty()) {
+            throw IllegalArgumentException(
+                "${File(dir, "test_wavs/0.wav").path} contains zero PCM frames " +
+                    "(zero-length/invalid WAV); refusing to treat it as a valid fixture"
+            )
+        }
 
         val visible = StringBuilder()
         // One nativeOpen per run: "reuse resident model, fresh session" is the
         // bridge's behavior under the hood.
-        val handle = NativeBridge.nativeOpen(dir.absolutePath)
+        val handle =
+            try {
+                NativeBridge.nativeOpen(dir.absolutePath)
+            } catch (e: UnsatisfiedLinkError) {
+                throw IllegalStateException(
+                    "JNI library load failure: " + (e.message ?: e.javaClass.simpleName) +
+                        ". Run android/scripts/verify-apk-arm64.sh — the APK likely " +
+                        "misses libecholet_android.so or its dependencies."
+                )
+            }
         try {
             // 3200-frame chunks (200 ms at 16 kHz). Every nativeFeed returns
             // the already-ADMITTED event array; applying the char-unit diff
@@ -145,7 +160,15 @@ class MainActivity : Activity() {
                         "\n"
                 )
             }
-            return "OK. Recognized transcript:\n" + visible
+            val transcript = visible.toString()
+            if (transcript.isBlank()) {
+                throw IllegalStateException(
+                    "real decoding produced NO transcript: the visible buffer is " +
+                        "empty/blank after " + chunks.size + " chunks (never report OK " +
+                        "for an empty fixture run; check model dir + tokens.txt)"
+                )
+            }
+            return "OK. Recognized transcript:\n$transcript"
         } finally {
             NativeBridge.nativeClose(handle)
         }
@@ -189,12 +212,13 @@ object WavFixture {
             cursor = end
             if (len % 2 == 1) cursor += 1 // chunks are word-aligned
         }
-        // Only the exact fixture shape is accepted.
+        // Only the exact fixture shape is accepted; empty PCM data is invalid.
         if (format != 1 ||
                 channels != 1 ||
                 sampleRate != 16000 ||
                 bitsPerSample != 16 ||
-                data == null
+                data == null ||
+                data.isEmpty()
         ) {
             throw IllegalArgumentException(
                 "${file.name} is not mono 16-bit 16 kHz PCM WAV " +
@@ -226,17 +250,24 @@ object WireEvents {
             val event = events.getJSONObject(i)
             when (event.optString("kind")) {
                 "partial" -> {
-                    val backspaces = event.optInt("backspaces", 0)
-                    val suffix = event.optString("suffix", "")
-                    for (n in 0 until backspaces) {
-                        if (visible.isNotEmpty()) visible.setLength(visible.length - 1)
+                    if (!event.has("backspaces")) {
+                        throw IllegalArgumentException(
+                            "malformed wire event: partial without backspaces: $event"
+                        )
                     }
-                    visible.append(suffix)
+                    CodepointDiffBuffer.apply(
+                        visible,
+                        event.optInt("backspaces"),
+                        event.optString("suffix", ""),
+                    )
                 }
                 // "endpoint" events carry the completed admitted text of the
                 // utterance, which stays visible via the partial stream; the
-                // diagnostic sink simply records them.
-                else -> {}
+                // diagnostic sink simply records them (no-op here).
+                "endpoint" -> {}
+                else -> throw IllegalArgumentException(
+                    "malformed wire event: unknown event kind ${event.optString("kind")}"
+                )
             }
         }
         return visible.toString()

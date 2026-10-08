@@ -62,22 +62,81 @@ tar xzf .local-runtime/android-native/cmake.tar.gz -C .local-runtime/android-nat
 rm .local-runtime/android-native/cmake.tar.gz
 ```
 
-## Build + run the native slice
+## Build + verify the APK (host, no device needed)
+
+The canonical sequence of record MUST be run exactly like this — the staged
+native set lives OUTSIDE `app/build` precisely so the earlier `clean` cannot
+delete it, and the verification step is the gate that decides PASS:
 
 ```sh
-android/scripts/build-native-arm64.sh   # pinned source -> ELF-audited .so set + cargo ndk build
+android/scripts/build-native-arm64.sh                        # staged set + ELF audits
 export JAVA_HOME="<jdk 17 home from check-env.sh>"
 export ANDROID_HOME="<sdk path>"
-cd android && ./gradlew clean :app:assembleDebug && cd ..
-android/scripts/stage-fixture.sh        # stages model fixture to the device (needs adb device)
-$ANDROID_HOME/platform-tools/adb install -r android/app/build/outputs/apk/debug/app-debug.apk
-$ANDROID_HOME/platform-tools/adb shell am start -n com.mainstayx.echolet/.MainActivity
-# press "Run offline ASR fixture", then
-$ANDROID_HOME/platform-tools/adb logcat -d
+(cd android && ./gradlew clean :app:assembleDebug)           # clean MUST NOT remove the staged set
+android/scripts/verify-apk-arm64.sh                          # APK packaging gate (fail-closed)
 ```
 
-Then press **Run offline ASR fixture**. Recognized partial/final transcript is
-shown in the output area.
+Run the Gradle + verify pair TWICE to prove idempotence: `./gradlew clean`
+deletes `app/build` but `app/.native-jniLibs` (gitignored, never committed)
+survives, and the APK would fail to assemble if the source set were lost.
+
+`verify-apk-arm64.sh` confirms, with hard nonzero failures:
+
+* the APK packages `lib/arm64-v8a/libecholet_android.so`,
+  `libsherpa-onnx-c-api.so` and `libonnxruntime.so` (exact names, plus
+  `libc++_shared.so` only when the ELF dependency check requires it);
+* every packaged `.so` is ELF64 AArch64;
+* the packaged bytes are byte-identical (cmp/sha256) to the staged set — a
+  stale or wrong `.so` cannot pass, because the packaged bytes are re-validated
+  against the staging root;
+* the staged JNI lib exports the three
+  `Java_com_…_NativeBridge_native{Open,Feed,Close}` symbols and no packaged
+  `.so` carries an unplanned `DT_NEEDED`.
+
+`./gradlew :app:assembleDebug` alone is NEVER reported as proof of packaging.
+
+## Device run (real inference evidence)
+
+```sh
+$ANDROID_HOME/platform-tools/adb install -r android/app/build/outputs/apk/debug/app-debug.apk
+android/scripts/stage-fixture.sh                             # gates ON device presence/ABI/app installed
+$ANDROID_HOME/platform-tools/adb shell am start -n com.mainstayx.echolet/.MainActivity
+```
+
+The staging ORDER matters and is enforced by the scripts:
+
+1. `build-native-arm64.sh` (staged set),
+2. `./gradlew clean :app:assembleDebug`,
+3. `verify-apk-arm64.sh` (APK verified),
+4. **install** the APK with `adb install -r` — the app-specific external files
+   directory (`…/Android/data/com.mainstayx.echolet/files`) only becomes
+   usable after the app has been installed once,
+5. `stage-fixture.sh` — it verifies, with raw `adb devices -l` evidence, that
+   an authorized arm64-v8a device is attached AND `pm path com.mainstayx.echolet`
+   finds the installed app, then pushes the pinned fixture,
+6. launch MainActivity and press **Run offline ASR fixture**; the output must
+   show a NONEMPTY recognized transcript — an empty transcript FAILS loudly
+   (`FAILED: real decoding produced NO transcript…`), it is never reported OK,
+7. press the button again: the second run must repeat the transcript from a
+   fresh handle (no stale partials).
+
+No device? `stage-fixture.sh` prints the exact `adb devices -l` output and
+fails; the honest result is "APK verified, DEVICE INFERENCE UNVERIFIED" —
+never Phase 0-A complete without a real phone.
+
+## Native host tests (no fake ASR success)
+
+```sh
+cargo test --manifest-path android/native/Cargo.toml
+# -> the real-model tests report as "ignored; … 8 ignored", never silently PASS
+DYLD_LIBRARY_PATH="$PWD/.local-runtime/runtime/lib" \
+  cargo test --release --manifest-path android/native/Cargo.toml -- --ignored --nocapture
+# -> with the fixture staged via scripts/acquire-base-model.sh these run the
+#    REAL pinned X-ASR model end to end and print the recognized transcript
+```
+
+A missing fixture is a validation blocker (`require_fixture()` panics with
+the exact expected path and staging instructions), not a success.
 
 What `build-native-arm64.sh` does, exactly:
 
@@ -100,7 +159,7 @@ What `build-native-arm64.sh` does, exactly:
    `...GetOnlineStreamResult` and related symbols; unexpected DT_NEEDED
    dependencies fail the stage.
 6. Builds the shared Rust core + the `echolet_android` cdylib with
-   `cargo ndk -t arm64-v8a -o android/app/build/generated/jniLibs build --release --manifest-path android/native/Cargo.toml`
+   `cargo ndk -t arm64-v8a -o android/app/.native-jniLibs build --release --manifest-path android/native/Cargo.toml`
    and `ECHOLET_NATIVE_LIB_DIR` pointing at the C API build output.
 7. Audits `libecholet_android.so` for the three exported
    `Java_com_mainstayx_echolet_NativeBridge_*` symbols and re-verifies the
