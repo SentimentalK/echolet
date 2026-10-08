@@ -10,7 +10,7 @@ export component ProgressRow {
 
         Text {
             text: root.progress_text;
-            color: #60a5fa;
+            color: #52525b;
             font-size: 10px;
             overflow: elide;
             vertical-alignment: center;
@@ -20,7 +20,7 @@ export component ProgressRow {
             width: 70px;
             height: 4px;
             border-radius: 2px;
-            background: #27272a;
+            background: #f4f4f5;
             y: (parent.height - self.height) / 2;
 
             Rectangle {
@@ -29,7 +29,7 @@ export component ProgressRow {
                 width: parent.width * (root.progress_percent / 100.0);
                 height: parent.height;
                 border-radius: 2px;
-                background: #3b82f6;
+                background: #18181b;
             }
         }
     }

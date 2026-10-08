@@ -13,36 +13,25 @@ export component LanguageSelector {
     callback language_selected(string, string);
 
     VerticalLayout {
-        spacing: 4px;
-
-        HorizontalLayout {
-            height: 16px;
-            Text {
-                text: "Language";
-                color: #71717a;
-                font-size: 11px;
-                font-weight: 600;
-                vertical-alignment: center;
-            }
-        }
+        spacing: 6px;
 
         // Dropdown toggle bar
         Rectangle {
-            height: 28px;
-            border-radius: 6px;
-            background: #1f1f23;
+            height: 34px;
+            border-radius: 8px;
+            background: toggle_touch.has-hover ? #fafafa : #ffffff;
             border-width: 1px;
-            border-color: root.is_expanded ? #3b82f6 : #2e2e33;
+            border-color: root.is_expanded ? #18181b : #e4e4e7;
 
             HorizontalLayout {
-                padding-left: 10px;
-                padding-right: 10px;
+                padding-left: 12px;
+                padding-right: 12px;
                 alignment: space-between;
 
                 Text {
                     text: root.current_label;
-                    color: #f4f4f5;
-                    font-size: 11px;
+                    color: #09090b;
+                    font-size: 12px;
                     font-weight: 500;
                     vertical-alignment: center;
                     overflow: elide;
@@ -50,13 +39,14 @@ export component LanguageSelector {
 
                 Text {
                     text: root.is_expanded ? "▲" : "▼";
-                    color: #71717a;
+                    color: #a1a1aa;
                     font-size: 9px;
                     vertical-alignment: center;
                 }
             }
 
-            TouchArea {
+            toggle_touch := TouchArea {
+                mouse-cursor: pointer;
                 clicked => {
                     root.is_expanded = !root.is_expanded;
                 }
@@ -65,20 +55,23 @@ export component LanguageSelector {
 
         // Expanded list of language options
         if root.is_expanded: Rectangle {
-            border-radius: 6px;
-            background: #18181b;
+            border-radius: 8px;
+            background: #ffffff;
             border-width: 1px;
-            border-color: #3f3f46;
+            border-color: #e4e4e7;
+            drop-shadow-blur: 12px;
+            drop-shadow-offset-y: 4px;
+            drop-shadow-color: #0000000f;
             clip: true;
 
             VerticalLayout {
-                padding-top: 4px;
-                padding-bottom: 4px;
-                spacing: 2px;
+                padding: 4px;
+                spacing: 1px;
 
                 for option in root.options: Rectangle {
-                    height: 24px;
-                    background: option.is_selected ? #27272a : (opt_touch.has-hover ? #1f1f23 : transparent);
+                    height: 28px;
+                    border-radius: 6px;
+                    background: option.is_selected ? #f4f4f5 : (opt_touch.has-hover ? #fafafa : transparent);
 
                     HorizontalLayout {
                         padding-left: 10px;
@@ -87,8 +80,8 @@ export component LanguageSelector {
 
                         Text {
                             text: option.label;
-                            color: option.is_selected ? #3b82f6 : #d4d4d8;
-                            font-size: 11px;
+                            color: option.is_selected ? #09090b : #3f3f46;
+                            font-size: 12px;
                             font-weight: option.is_selected ? 600 : 400;
                             vertical-alignment: center;
                             overflow: elide;
@@ -96,13 +89,14 @@ export component LanguageSelector {
 
                         if option.is_selected: Text {
                             text: "✓";
-                            color: #3b82f6;
-                            font-size: 11px;
+                            color: #09090b;
+                            font-size: 12px;
                             vertical-alignment: center;
                         }
                     }
 
                     opt_touch := TouchArea {
+                        mouse-cursor: pointer;
                         clicked => {
                             root.is_expanded = false;
                             root.language_selected(root.model_id, option.locale);

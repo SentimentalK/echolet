@@ -1,31 +1,59 @@
+// Header brand + status pill. Light theme inspired by reliquary.sentimentalk.com.
 export component StatusHeader {
     in property <string> title: "Echolet";
     in property <string> status_text: "Status: Ready";
     in property <bool> is_listening: false;
 
-    height: 26px;
+    height: 28px;
 
     HorizontalLayout {
+        spacing: 10px;
         alignment: space-between;
 
-        Text {
-            text: root.title;
-            color: #f4f4f5;
-            font-size: 15px;
-            font-weight: 700;
-            vertical-alignment: center;
+        HorizontalLayout {
+            spacing: 9px;
+            alignment: start;
+
+            // Logo mark
+            Rectangle {
+                width: 26px;
+                height: 26px;
+                border-radius: 7px;
+                background: #18181b;
+                y: (parent.height - self.height) / 2;
+
+                Text {
+                    text: "E";
+                    color: #fafafa;
+                    font-size: 14px;
+                    font-weight: 900;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+
+            Text {
+                text: root.title;
+                color: #09090b;
+                font-size: 16px;
+                font-weight: 800;
+                letter-spacing: -0.3px;
+                vertical-alignment: center;
+            }
         }
 
+        // Status pill
         Rectangle {
-            height: 22px;
-            border-radius: 4px;
-            background: root.is_listening ? #450a0a : #27272a;
+            height: 24px;
+            border-radius: 12px;
+            background: root.is_listening ? #fef2f2 : #ffffff;
             border-width: 1px;
-            border-color: root.is_listening ? #dc2626 : #3f3f46;
+            border-color: root.is_listening ? #fecaca : #e4e4e7;
+            y: (parent.height - self.height) / 2;
 
             HorizontalLayout {
-                padding-left: 8px;
-                padding-right: 8px;
+                padding-left: 10px;
+                padding-right: 10px;
                 spacing: 6px;
                 alignment: center;
 
@@ -39,11 +67,12 @@ export component StatusHeader {
 
                 Text {
                     text: root.status_text;
-                    color: root.is_listening ? #fecaca : #a1a1aa;
+                    color: root.is_listening ? #b91c1c : #52525b;
                     font-size: 11px;
                     font-weight: 500;
                     vertical-alignment: center;
                     horizontal-alignment: center;
+                    overflow: elide;
                 }
             }
         }

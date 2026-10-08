@@ -17,16 +17,18 @@ export component ModelRow {
     in property <SlintModelRowData> model;
     callback action_clicked(string);
 
-    height: 40px;
+    height: 50px;
 
     Rectangle {
-        border-radius: 6px;
-        background: root.model.selected ? #27272a : #1f1f23;
+        border-radius: 10px;
+        background: root.model.selected ? #fafafa : (row_hover.has-hover ? #fcfcfd : #ffffff);
         border-width: 1px;
-        border-color: root.model.selected ? #3b82f6 : #2e2e33;
+        border-color: root.model.selected ? #18181b : (row_hover.has-hover ? #d4d4d8 : #e4e4e7);
+
+        row_hover := TouchArea { }
 
         HorizontalLayout {
-            padding-left: 10px;
+            padding-left: 12px;
             padding-right: 10px;
             spacing: 8px;
             alignment: space-between;
@@ -34,8 +36,8 @@ export component ModelRow {
             // Model label and status/progress
             VerticalLayout {
                 alignment: center;
-                spacing: 2px;
-                width: 240px;
+                spacing: 3px;
+                width: 222px;
 
                 HorizontalLayout {
                     spacing: 6px;
@@ -43,16 +45,16 @@ export component ModelRow {
 
                     Text {
                         text: root.model.label;
-                        color: #f4f4f5;
+                        color: #09090b;
                         font-size: 12px;
-                        font-weight: 500;
+                        font-weight: 600;
                         overflow: elide;
                         vertical-alignment: center;
                     }
 
                     if root.model.verification_label != "": Text {
                         text: "· " + root.model.verification_label;
-                        color: #71717a;
+                        color: #a1a1aa;
                         font-size: 10px;
                         overflow: elide;
                         vertical-alignment: center;
@@ -66,44 +68,45 @@ export component ModelRow {
 
                 if !root.model.is_in_progress: Text {
                     text: root.model.status_text;
-                    color: #a1a1aa;
+                    color: #71717a;
                     font-size: 10px;
                     overflow: elide;
                 }
             }
 
-            // Action / Selection indicator
+            // Selected badge
             if root.model.selected: Rectangle {
-                width: 72px;
-                height: 22px;
-                border-radius: 4px;
-                background: #1e3a8a;
-                border-width: 1px;
-                border-color: #3b82f6;
+                width: 76px;
+                height: 24px;
+                border-radius: 12px;
+                background: #18181b;
+                y: (parent.height - self.height) / 2;
 
                 Text {
-                    text: "Selected";
-                    color: #93c5fd;
-                    font-size: 11px;
-                    font-weight: 600;
+                    text: "✓ Selected";
+                    color: #fafafa;
+                    font-size: 10px;
+                    font-weight: 700;
                     vertical-alignment: center;
                     horizontal-alignment: center;
                 }
             }
 
+            // Outline action button
             if !root.model.selected && root.model.action_label != "": Rectangle {
-                width: 72px;
-                height: 22px;
-                border-radius: 4px;
-                background: !root.model.action_enabled ? #27272a : (action_touch.pressed ? #1d4ed8 : (action_touch.has-hover ? #2563eb : #1d4ed8));
+                width: 76px;
+                height: 26px;
+                border-radius: 8px;
+                background: !root.model.action_enabled ? #f4f4f5 : (action_touch.pressed ? #e4e4e7 : (action_touch.has-hover ? #f4f4f5 : #ffffff));
                 border-width: 1px;
-                border-color: !root.model.action_enabled ? #3f3f46 : #3b82f6;
+                border-color: !root.model.action_enabled ? #f4f4f5 : #e4e4e7;
+                y: (parent.height - self.height) / 2;
 
                 Text {
                     text: root.model.action_label;
-                    color: !root.model.action_enabled ? #71717a : #ffffff;
+                    color: !root.model.action_enabled ? #a1a1aa : #18181b;
                     font-size: 11px;
-                    font-weight: 500;
+                    font-weight: 600;
                     vertical-alignment: center;
                     horizontal-alignment: center;
                     overflow: elide;
@@ -111,6 +114,7 @@ export component ModelRow {
 
                 action_touch := TouchArea {
                     enabled: root.model.action_enabled;
+                    mouse-cursor: pointer;
                     clicked => {
                         root.action_clicked(root.model.id);
                     }

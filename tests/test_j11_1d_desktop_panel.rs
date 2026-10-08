@@ -141,7 +141,7 @@ fn test_hierarchical_model_groups_and_ordering() {
 
     // Dimensions check
     assert_eq!(vm.width, PANEL_WIDTH_PX);
-    assert_eq!(vm.width, 380);
+    assert_eq!(vm.width, 416);
     assert!(vm.height <= PANEL_MAX_HEIGHT_PX);
     assert_eq!(vm.height, PANEL_HEIGHT_PX);
 }

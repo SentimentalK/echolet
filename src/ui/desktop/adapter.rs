@@ -16,14 +16,15 @@ use crate::ui::control_surface::{
 pub use slint::ComponentHandle;
 use std::rc::Rc;
 
-/// Fixed logical panel width specified by design contract.
-pub const PANEL_WIDTH_PX: u32 = 380;
+/// Window size, including the transparent margin the shadow is drawn into.
+/// The visible card stays 380×780.
+pub const PANEL_WIDTH_PX: u32 = 416;
 
 /// Default logical panel height specified by design contract.
-pub const PANEL_HEIGHT_PX: u32 = 520;
+pub const PANEL_HEIGHT_PX: u32 = 816;
 
 /// Maximum allowable panel height before scrolling.
-pub const PANEL_MAX_HEIGHT_PX: u32 = 640;
+pub const PANEL_MAX_HEIGHT_PX: u32 = 816;
 
 /// Plain-Rust view model for a single model row in the desktop panel.
 #[derive(Debug, Clone, PartialEq, Eq)]

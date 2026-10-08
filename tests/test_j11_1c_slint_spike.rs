@@ -223,15 +223,15 @@ mod slint_spike_tests {
         let fixture_long = SlintControlSurfaceAdapter::create_spike_fixture_long_names();
         let vm_long = DesktopPanelViewModel::from_control_surface(&fixture_long);
 
-        assert_eq!(vm_normal.width, 380);
-        assert_eq!(vm_normal.height, 520);
-        assert_eq!(PANEL_WIDTH_PX, 380);
-        assert_eq!(PANEL_HEIGHT_PX, 520);
-        assert!(PANEL_HEIGHT_PX <= 640);
+        assert_eq!(vm_normal.width, 416);
+        assert_eq!(vm_normal.height, 816);
+        assert_eq!(PANEL_WIDTH_PX, 416);
+        assert_eq!(PANEL_HEIGHT_PX, 816);
+        assert!(PANEL_HEIGHT_PX <= 816);
 
         // Even with long name inputs, panel constants and view model dimensions remain invariant
-        assert_eq!(vm_long.width, 380);
-        assert_eq!(vm_long.height, 520);
+        assert_eq!(vm_long.width, 416);
+        assert_eq!(vm_long.height, 816);
         assert_eq!(vm_long.width, vm_normal.width);
         assert_eq!(vm_long.height, vm_normal.height);
     }
