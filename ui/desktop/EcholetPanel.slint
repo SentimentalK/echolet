@@ -36,6 +36,8 @@ export component EcholetPanel inherits Window {
     always-on-top: true;
     background: transparent;
     default-font-size: 13px;
+    // Core Text name for the macOS UI font. "System Font" is not a real face.
+    default-font-family: ".AppleSystemUIFont";
 
     in property <string> status_text: "Status: Ready";
     in property <bool> is_listening: false;
@@ -49,7 +51,7 @@ export component EcholetPanel inherits Window {
     in property <int> idle_unload_minutes: 10;
     in property <string> idle_unload_label: "10 minutes";
     in property <bool> history_enabled: false;
-    in property <string> footer_text: "Echolet · Slint 1.18.1 · 380px";
+    in property <string> footer_text: "Local dictation. Audio never leaves this device.";
 
     callback close_requested();
     callback toggle_listening();
@@ -77,21 +79,16 @@ export component EcholetPanel inherits Window {
             x: root.shadow_margin;
             y: root.shadow_margin;
             width: 380px;
-            height: content.preferred-height + 2px;
-            border-width: 1px;
-            border-color: #d4d4d8;
+            height: content.preferred-height;
             border-radius: 16px;
             background: #ffffff;
-            drop-shadow-blur: 28px;
-            drop-shadow-offset-y: 10px;
-            drop-shadow-color: #00000038;
+            border-width: 0px;
+            drop-shadow-blur: 22px;
+            drop-shadow-offset-y: 8px;
+            drop-shadow-color: #00000016;
 
             Rectangle {
-                x: 1px;
-                y: 1px;
-                width: parent.width - 2px;
-                height: parent.height - 2px;
-                border-radius: 15px;
+                border-radius: 16px;
                 clip: true;
                 background: #ffffff;
 
@@ -227,7 +224,7 @@ export component EcholetPanel inherits Window {
                 // scrolls only once the card would exceed `max_card_height`.
                 Rectangle {
                     background: #fafafa;
-                    height: min(body.preferred-height, root.max_card_height - 140px);
+                    height: min(body.preferred-height, root.max_card_height - 138px);
 
                     ScrollView {
                         body := VerticalLayout {

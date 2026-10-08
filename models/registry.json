@@ -4,7 +4,7 @@
   "models": [
     {
       "id": "echolet-xasr-zh-en-480ms-689ff18c584d29910da37b6fe904db0c1489c9d1",
-      "display_name": "X-ASR",
+      "display_name": "X-ASR 0.16B",
       "version": "2026",
       "languages": [
         "zh",
@@ -35,6 +35,7 @@
       },
       "download_size_bytes": 551847917,
       "installed_size_bytes": 614596718,
+      "upstream_release_date": "2026-05-18",
       "license": {
         "spdx": "Apache-2.0",
         "name": "Apache License 2.0"
@@ -43,7 +44,7 @@
     },
     {
       "id": "echolet-kroko-streaming-en-2025-08-06-r1",
-      "display_name": "Kroko",
+      "display_name": "Kroko English Streaming 0.066B",
       "version": "2025",
       "languages": [
         "en"

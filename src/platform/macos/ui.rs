@@ -191,6 +191,33 @@ extern "C" fn timer_callback(_timer: CFRunLoopTimerRef, _info: *mut c_void) {
             (*MAC_UI_PTR).drain_commands();
         }
     }
+    // Show can order the window front after we first clear the shadow, and AppKit
+    // turns it back on. Keep it off so the rounded edge stays the white card.
+    disable_native_panel_shadow();
+}
+
+/// Turns off the macOS window shadow on the panel. That shadow is a tight dark
+/// ring around the opaque rounded card, which reads as a black border.
+fn disable_native_panel_shadow() {
+    unsafe {
+        let app = NSApp();
+        let windows: id = msg_send![app, windows];
+        if windows == nil {
+            return;
+        }
+        let count: usize = msg_send![windows, count];
+        for i in 0..count {
+            let window: id = msg_send![windows, objectAtIndex: i];
+            if window == nil {
+                continue;
+            }
+            let frame: cocoa::foundation::NSRect = msg_send![window, frame];
+            if frame.size.width < 200.0 {
+                continue;
+            }
+            let _: () = msg_send![window, setHasShadow: false];
+        }
+    }
 }
 
 impl MacUi {
@@ -407,6 +434,9 @@ impl MacUi {
 
             self.runtime.set_position(pos);
             let _ = self.runtime.show_panel();
+            // AppKit's own window shadow hugs the rounded card and reads as a black ring.
+            // The soft shadow is the one drawn by the panel itself.
+            disable_native_panel_shadow();
 
             let _ = NSAutoreleasePool::drain(pool);
         }

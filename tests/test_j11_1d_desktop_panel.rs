@@ -36,6 +36,7 @@ fn test_hierarchical_model_groups_and_ordering() {
                         ),
                         primary_action: ModelPrimaryAction::None,
                         enabled: true,
+                        release_date: String::new(),
                         language: ModelLanguagePresentation {
                             selected_locale: None,
                             options: vec![
@@ -66,6 +67,7 @@ fn test_hierarchical_model_groups_and_ordering() {
                         ),
                         primary_action: ModelPrimaryAction::Select,
                         enabled: true,
+                        release_date: String::new(),
                         language: Default::default(),
                     },
                 ],
@@ -86,6 +88,7 @@ fn test_hierarchical_model_groups_and_ordering() {
                         ),
                         primary_action: ModelPrimaryAction::Download,
                         enabled: true,
+                        release_date: String::new(),
                         language: Default::default(),
                     },
                     ModelPresentation {
@@ -100,6 +103,7 @@ fn test_hierarchical_model_groups_and_ordering() {
                         ),
                         primary_action: ModelPrimaryAction::RetryDownload,
                         enabled: true,
+                        release_date: String::new(),
                         language: Default::default(),
                     },
                 ],
@@ -199,6 +203,7 @@ fn test_language_selection_filtering_and_auto() {
                 ),
                 primary_action: ModelPrimaryAction::None,
                 enabled: true,
+                release_date: String::new(),
                 language: ModelLanguagePresentation {
                     selected_locale: None,
                     options: vec![

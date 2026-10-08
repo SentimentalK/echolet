@@ -33,6 +33,7 @@ mod slint_spike_tests {
                             ),
                             primary_action: ModelPrimaryAction::None,
                             enabled: true,
+                            release_date: String::new(),
                             language: Default::default(),
                         },
                         ModelPresentation {
@@ -47,6 +48,7 @@ mod slint_spike_tests {
                             ),
                             primary_action: ModelPrimaryAction::Select,
                             enabled: true,
+                            release_date: String::new(),
                             language: Default::default(),
                         },
                     ],
@@ -66,6 +68,7 @@ mod slint_spike_tests {
                         ),
                         primary_action: ModelPrimaryAction::Download,
                         enabled: true,
+                        release_date: String::new(),
                         language: Default::default(),
                     }],
                 },
@@ -113,6 +116,7 @@ mod slint_spike_tests {
             ),
             primary_action: ModelPrimaryAction::Select,
             enabled: true,
+            release_date: String::new(),
             language: Default::default(),
         };
 
@@ -128,6 +132,7 @@ mod slint_spike_tests {
             ),
             primary_action: ModelPrimaryAction::Download,
             enabled: true,
+            release_date: String::new(),
             language: Default::default(),
         };
 
@@ -143,6 +148,7 @@ mod slint_spike_tests {
             ),
             primary_action: ModelPrimaryAction::RetryDownload,
             enabled: true,
+            release_date: String::new(),
             language: Default::default(),
         };
 
@@ -158,6 +164,7 @@ mod slint_spike_tests {
             ),
             primary_action: ModelPrimaryAction::None,
             enabled: true,
+            release_date: String::new(),
             language: Default::default(),
         };
 

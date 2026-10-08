@@ -103,36 +103,48 @@ impl DesktopPanelViewModel {
         for group in &state.model_groups {
             let mut models = Vec::new();
             for model in &group.models {
-                let status_text = if model.selected && state.runtime_state == RuntimeState::Loading
-                {
-                    "Loading…".to_string()
-                } else if model.selected {
-                    "Selected".to_string()
-                } else if let Some(dl_label) = &model.download.label {
-                    if model.download.phase != DownloadPhase::Completed {
-                        dl_label.clone()
-                    } else if model.installed {
-                        "Installed".to_string()
-                    } else {
-                        "Download".to_string()
-                    }
-                } else if model.installed {
-                    "Installed".to_string()
+                // Date under the name. Download / extract / progress live on the button.
+                let status_text = if !model.release_date.is_empty() {
+                    model.release_date.clone()
                 } else {
-                    "Download".to_string()
+                    model
+                        .label
+                        .split_once(" — ")
+                        .map(|(_, version)| version.to_string())
+                        .unwrap_or_default()
                 };
+                let label = model
+                    .label
+                    .split_once(" — ")
+                    .map(|(name, _)| name.to_string())
+                    .unwrap_or_else(|| model.label.clone());
 
-                let action_label = match model.primary_action {
-                    ModelPrimaryAction::None => {
-                        if model.selected {
-                            "Selected".to_string()
-                        } else {
-                            "".to_string()
-                        }
+                let action_label = if model.download.is_in_progress() {
+                    match model.download.phase {
+                        DownloadPhase::Starting => "Starting".to_string(),
+                        DownloadPhase::Downloading => model
+                            .download
+                            .progress_percent
+                            .map(|p| format!("{p}%"))
+                            .unwrap_or_else(|| "Downloading".to_string()),
+                        DownloadPhase::Verifying => "Verifying".to_string(),
+                        DownloadPhase::Extracting => "Extracting".to_string(),
+                        DownloadPhase::Installing => "Installing".to_string(),
+                        _ => String::new(),
                     }
-                    ModelPrimaryAction::Download => "Download".to_string(),
-                    ModelPrimaryAction::RetryDownload => "Retry".to_string(),
-                    ModelPrimaryAction::Select => "Select".to_string(),
+                } else {
+                    match model.primary_action {
+                        ModelPrimaryAction::None => {
+                            if model.selected {
+                                "Selected".to_string()
+                            } else {
+                                String::new()
+                            }
+                        }
+                        ModelPrimaryAction::Download => "Download".to_string(),
+                        ModelPrimaryAction::RetryDownload => "Retry".to_string(),
+                        ModelPrimaryAction::Select => "Select".to_string(),
+                    }
                 };
 
                 let action_enabled = model.enabled && !model.primary_action.is_none();
@@ -148,8 +160,12 @@ impl DesktopPanelViewModel {
                     id: model.id.clone(),
                     group_id: group.id.clone(),
                     group_label: group.label.clone(),
-                    label: model.label.clone(),
-                    verification_label: model.verification_label.clone(),
+                    label,
+                    verification_label: if model.is_verified {
+                        "Verified".to_string()
+                    } else {
+                        String::new()
+                    },
                     status_text,
                     action_label,
                     action_enabled,
@@ -236,7 +252,7 @@ impl DesktopPanelViewModel {
             idle_unload_minutes: state.idle_unload_minutes,
             idle_unload_label,
             history_enabled: state.history_enabled,
-            footer_text: "Echolet · Slint 1.18.1 · 380px".to_string(),
+            footer_text: "Local dictation. Audio never leaves this device.".to_string(),
             diagnostic_state: "Initial".to_string(),
             diagnostic_count: 0,
         }
@@ -367,6 +383,7 @@ impl SlintControlSurfaceAdapter {
                         ),
                         primary_action: ModelPrimaryAction::None,
                         enabled: true,
+                        release_date: String::new(),
                         language: Default::default(),
                     }],
                 },
@@ -385,6 +402,7 @@ impl SlintControlSurfaceAdapter {
                         ),
                         primary_action: ModelPrimaryAction::Download,
                         enabled: true,
+                        release_date: String::new(),
                         language: Default::default(),
                     }],
                 },
@@ -415,6 +433,7 @@ impl SlintControlSurfaceAdapter {
                         ),
                         primary_action: ModelPrimaryAction::None,
                         enabled: true,
+                        release_date: String::new(),
                         language: Default::default(),
                     }],
                 },
@@ -434,6 +453,7 @@ impl SlintControlSurfaceAdapter {
                             ),
                             primary_action: ModelPrimaryAction::Select,
                             enabled: true,
+                            release_date: String::new(),
                             language: Default::default(),
                         },
                         ModelPresentation {
@@ -448,6 +468,7 @@ impl SlintControlSurfaceAdapter {
                             ),
                             primary_action: ModelPrimaryAction::Download,
                             enabled: true,
+                            release_date: String::new(),
                             language: Default::default(),
                         },
                     ],
@@ -482,6 +503,7 @@ impl SlintControlSurfaceAdapter {
                     ),
                     primary_action: ModelPrimaryAction::None,
                     enabled: true,
+                    release_date: String::new(),
                     language: Default::default(),
                 }],
             }],

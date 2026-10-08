@@ -345,6 +345,8 @@ pub struct ModelPresentation {
     pub id: String,
     /// Short / display label from registry metadata.
     pub label: String,
+    /// Release date shown under the name. Full upstream date when known, otherwise the version year.
+    pub release_date: String,
     /// Verification status label, e.g. `Echolet Verified`.
     pub verification_label: String,
     pub is_verified: bool,
@@ -497,6 +499,28 @@ pub fn derive_capability_group(entry: &RegistryModelEntry) -> (String, String) {
     }
 }
 
+/// Day-level release date, plus the installed size when we know it.
+fn model_release_subtitle(entry: &RegistryModelEntry) -> String {
+    let date = entry
+        .upstream_release_date
+        .clone()
+        .filter(|d| !d.is_empty())
+        .unwrap_or_else(|| entry.version.clone());
+    match entry.installed_size_bytes {
+        Some(bytes) => format!("{date} · {}", format_installed_size(bytes)),
+        None => date,
+    }
+}
+
+fn format_installed_size(bytes: u64) -> String {
+    let mb = (bytes as f64) / (1024.0 * 1024.0);
+    if mb >= 10.0 {
+        format!("{:.0} MB", mb.round())
+    } else {
+        format!("{:.1} MB", mb)
+    }
+}
+
 /// Single shared builder path that projects domain state into [`ControlSurfaceState`].
 #[allow(clippy::too_many_arguments)]
 pub fn build_control_surface_state(
@@ -565,6 +589,7 @@ pub fn build_control_surface_state(
         let model = ModelPresentation {
             id: entry.id.clone(),
             label: entry.display_title(),
+            release_date: model_release_subtitle(entry),
             verification_label: entry.verification_status.label().to_string(),
             is_verified: entry.verification_status.is_verified(),
             selected: is_selected,

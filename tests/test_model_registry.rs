@@ -54,7 +54,7 @@ fn test_registry_parsing_and_invariants() {
     assert_eq!(
         registry.models.len(),
         4,
-        "Registry must contain exactly 4 models: X-ASR, Kroko, Nemotron Speech Streaming 0.6B, and Parakeet Unified 0.6B"
+        "Registry must contain exactly 4 models: X-ASR, Kroko English Streaming 0.066B, Nemotron Speech Streaming 0.6B, and Parakeet Unified 0.6B"
     );
 
     let model_ids: Vec<&str> = registry.models.iter().map(|m| m.id.as_str()).collect();
@@ -77,9 +77,10 @@ fn test_registry_parsing_and_invariants() {
     let xasr = registry
         .get_model("echolet-xasr-zh-en-480ms-689ff18c584d29910da37b6fe904db0c1489c9d1")
         .expect("Missing X-ASR model");
-    assert_eq!(xasr.display_name, "X-ASR");
+    assert_eq!(xasr.display_name, "X-ASR 0.16B");
     assert_eq!(xasr.version, "2026");
-    assert_eq!(xasr.display_title(), "X-ASR — 2026");
+    assert_eq!(xasr.display_title(), "X-ASR 0.16B — 2026");
+    assert_eq!(xasr.upstream_release_date.as_deref(), Some("2026-05-18"));
     assert_eq!(
         xasr.verification_status,
         VerificationStatus::EcholetVerified
@@ -110,9 +111,9 @@ fn test_registry_parsing_and_invariants() {
     let kroko = registry
         .get_model("echolet-kroko-streaming-en-2025-08-06-r1")
         .expect("Missing Kroko model");
-    assert_eq!(kroko.display_name, "Kroko");
+    assert_eq!(kroko.display_name, "Kroko English Streaming 0.066B");
     assert_eq!(kroko.version, "2025");
-    assert_eq!(kroko.display_title(), "Kroko — 2025");
+    assert_eq!(kroko.display_title(), "Kroko English Streaming 0.066B — 2025");
     assert_eq!(kroko.verification_status, VerificationStatus::Experimental);
     assert_eq!(kroko.languages, vec!["en"]);
     assert_eq!(kroko.language_key(), "en");
@@ -737,7 +738,7 @@ fn test_platform_projection_derives_language_label_from_normalized_schema() {
     let entry = registry.default_entry().expect("default entry");
     // The platform tray projection derives a display title; the language label
     // is derived from the normalized plural schema.
-    assert_eq!(entry.display_title(), "X-ASR — 2026");
+    assert_eq!(entry.display_title(), "X-ASR 0.16B — 2026");
     assert_eq!(entry.language_label(), "Chinese + English");
     assert_eq!(entry.language_key(), "zh-en");
     assert!(entry.matches_install_dir("bilingual-zh-en"));
@@ -798,11 +799,12 @@ fn test_project_041_control_surface_grouping_and_actions() {
 
     // Product names & clean labels
     let m_xasr = state.find_model(xasr_id).unwrap();
-    assert_eq!(m_xasr.label, "X-ASR — 2026");
+    assert_eq!(m_xasr.label, "X-ASR 0.16B — 2026");
+    assert_eq!(m_xasr.release_date, "2026-05-18 · 586 MB");
     assert!(m_xasr.is_verified);
 
     let m_kroko = state.find_model(kroko_id).unwrap();
-    assert_eq!(m_kroko.label, "Kroko — 2025");
+    assert_eq!(m_kroko.label, "Kroko English Streaming 0.066B — 2025");
     assert!(!m_kroko.is_verified);
     assert!(m_kroko.language.options.is_empty());
 
