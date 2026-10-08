@@ -11,6 +11,7 @@ use crate::models::{
 };
 use crate::paths;
 use crate::platform::{PlatformRuntime, PlatformView};
+use crate::session;
 use crate::state::AppState;
 use crate::ui::control_surface::{
     build_control_surface_state, project_runtime_state, ControlSurfaceState, RuntimeState,
@@ -57,10 +58,23 @@ pub struct App {
     stream: Option<OnlineStream>,
     _recognizer: Option<Arc<OnlineRecognizer>>,
     session: PartialSession,
+    /// Issues the identity of each voice-capture session. Capture start issues
+    /// a fresh token; stop/switch/unload invalidates every prior token. The
+    /// live token is the sole admission check for transcript output.
+    /// See the module docs in `crate::session`.
+    session_issuer: session::SessionIssuer,
+    /// Token of the session currently allowed to deliver transcript.
+    /// `None` while no session may write text (Standby, model switching).
+    active_session_token: Option<session::SessionGeneration>,
+    /// Queue end of the currently active capture session. `None` while no
+    /// session owns a queue (Standby, or before the first capture starts).
+    /// Dropped — not merely drained — on stop so late producer sends fail.
+    audio_rx: Option<Receiver<AudioChunk>>,
+    /// Live capture source; dropping it releases the underlying stream/mic.
     _audio_source: Option<Box<dyn AudioSource>>,
+    /// Producer factory; invoked on each capture start with a fresh
+    /// session queue sender.
     audio_starter: AudioStarter,
-    audio_tx: Sender<AudioChunk>,
-    audio_rx: Receiver<AudioChunk>,
     action_rx: Receiver<AppAction>,
     action_tx: Option<Sender<AppAction>>,
     platform: PlatformRuntime,
@@ -85,12 +99,9 @@ impl App {
         platform: PlatformRuntime,
         action_rx: Receiver<AppAction>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        let (audio_tx, audio_rx) = unbounded::<AudioChunk>();
         let starter = default_audio_starter();
         println!("[Audio] Microphone deferred until Listening starts.");
-        Self::new_internal(
-            platform, None, action_rx, audio_rx, audio_tx, starter, None, None,
-        )
+        Self::new_with_starter(platform, None, action_rx, None, starter, None)
     }
 
     pub fn new_with_config(
@@ -98,15 +109,13 @@ impl App {
         action_rx: Receiver<AppAction>,
         config: EcholetConfig,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        let (audio_tx, audio_rx) = unbounded::<AudioChunk>();
         let starter = default_audio_starter();
         println!("[Audio] Microphone deferred until Listening starts.");
-        Self::new_internal(
+        Self::new_with_starter_and_config(
             platform,
             None,
             action_rx,
-            audio_rx,
-            audio_tx,
+            None,
             starter,
             None,
             Some(config),
@@ -118,19 +127,9 @@ impl App {
         action_tx: Sender<AppAction>,
         action_rx: Receiver<AppAction>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        let (audio_tx, audio_rx) = unbounded::<AudioChunk>();
         let starter = default_audio_starter();
         println!("[Audio] Microphone deferred until Listening starts.");
-        Self::new_internal(
-            platform,
-            Some(action_tx),
-            action_rx,
-            audio_rx,
-            audio_tx,
-            starter,
-            None,
-            None,
-        )
+        Self::new_with_starter(platform, Some(action_tx), action_rx, None, starter, None)
     }
 
     pub fn new_with_audio(
@@ -139,19 +138,16 @@ impl App {
         audio_rx: Receiver<AudioChunk>,
         audio_input: Option<AudioInput>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        let (audio_tx, _) = unbounded::<AudioChunk>();
         let starter: AudioStarter = Box::new(|_tx| Ok(Box::new(()) as Box<dyn AudioSource>));
         let initial_source: Option<Box<dyn AudioSource>> =
             audio_input.map(|ai| Box::new(ai) as Box<dyn AudioSource>);
-        Self::new_internal(
+        Self::new_with_starter(
             platform,
             None,
             action_rx,
-            audio_rx,
-            audio_tx,
+            Some(audio_rx),
             starter,
             initial_source,
-            None,
         )
     }
 
@@ -159,8 +155,7 @@ impl App {
         platform: PlatformRuntime,
         action_tx: Option<Sender<AppAction>>,
         action_rx: Receiver<AppAction>,
-        audio_rx: Receiver<AudioChunk>,
-        audio_tx: Sender<AudioChunk>,
+        audio_rx: Option<Receiver<AudioChunk>>,
         starter: AudioStarter,
         initial_source: Option<Box<dyn AudioSource>>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
@@ -169,7 +164,6 @@ impl App {
             action_tx,
             action_rx,
             audio_rx,
-            audio_tx,
             starter,
             initial_source,
             None,
@@ -180,8 +174,7 @@ impl App {
         platform: PlatformRuntime,
         action_tx: Option<Sender<AppAction>>,
         action_rx: Receiver<AppAction>,
-        audio_rx: Receiver<AudioChunk>,
-        audio_tx: Sender<AudioChunk>,
+        audio_rx: Option<Receiver<AudioChunk>>,
         starter: AudioStarter,
         initial_source: Option<Box<dyn AudioSource>>,
         config: Option<EcholetConfig>,
@@ -191,7 +184,6 @@ impl App {
             action_tx,
             action_rx,
             audio_rx,
-            audio_tx,
             starter,
             initial_source,
             config,
@@ -202,8 +194,7 @@ impl App {
         platform: PlatformRuntime,
         action_tx: Option<Sender<AppAction>>,
         action_rx: Receiver<AppAction>,
-        audio_rx: Receiver<AudioChunk>,
-        audio_tx: Sender<AudioChunk>,
+        audio_rx: Option<Receiver<AudioChunk>>,
         audio_starter: AudioStarter,
         audio_source: Option<Box<dyn AudioSource>>,
         custom_config: Option<EcholetConfig>,
@@ -217,7 +208,6 @@ impl App {
             action_tx,
             action_rx,
             audio_rx,
-            audio_tx,
             audio_starter,
             audio_source,
             custom_config,
@@ -225,12 +215,12 @@ impl App {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn new_with_manager_and_config(
         platform: PlatformRuntime,
         action_tx: Option<Sender<AppAction>>,
         action_rx: Receiver<AppAction>,
-        audio_rx: Receiver<AudioChunk>,
-        audio_tx: Sender<AudioChunk>,
+        audio_rx: Option<Receiver<AudioChunk>>,
         audio_starter: AudioStarter,
         audio_source: Option<Box<dyn AudioSource>>,
         custom_config: Option<EcholetConfig>,
@@ -248,11 +238,12 @@ impl App {
             history_manager,
             stream: None,
             _recognizer: None,
+            session_issuer: session::SessionIssuer::new(),
+            active_session_token: None,
             session: PartialSession::new(),
+            audio_rx,
             _audio_source: audio_source,
             audio_starter,
-            audio_tx,
-            audio_rx,
             action_rx,
             action_tx,
             platform,
@@ -455,6 +446,10 @@ impl App {
 
         self.finalize_current_segment();
         self.session = PartialSession::new();
+        // An unloaded model can never resurrect a stopped session: any token
+        // captured against the old runtime is dead.
+        self.session_issuer.invalidate();
+        self.active_session_token = None;
 
         let had_runtime = self.stream.is_some() || self._recognizer.is_some();
         let t_unload = std::time::Instant::now();
@@ -484,6 +479,16 @@ impl App {
 
     pub fn is_audio_active(&self) -> bool {
         self._audio_source.is_some()
+    }
+
+    /// True when the token of the session now delivering transcript still
+    /// matches the live generation — i.e. no stop/switch/unload invalidated
+    /// it since capture began. Sole transcript admission check.
+    pub fn is_session_generatively_current(&self) -> bool {
+        match (self.active_session_token, self.session_issuer.live()) {
+            (Some(token), Some(live)) => token.matches(live),
+            _ => false,
+        }
     }
 
     /// Single authority for the projected runtime residency/activity state.
@@ -631,11 +636,36 @@ impl App {
         }
         let t_model_ready = t_start.elapsed();
 
-        // 2. Open microphone on demand
+        // 2. Begin a NEW session generation. From this point, every token a
+        // previous session captured is dead: no old callback may write a
+        // transcript or feed audio into this session. The old partial is
+        // finalized first so text already visible stays committed and the
+        // diff window resets; no new text is written here.
+        self.finalize_current_segment();
+        let token = self.session_issuer.begin();
+        self.active_session_token = Some(token);
+
+        // 3. Replace the online stream at the session boundary so no buffered
+        // waveform or endpoint state of the previous session can leak in.
+        if !self.renew_recognizer_stream() {
+            eprintln!(
+                "[ASR] Failed to create a fresh stream for the new session. Remaining in Standby."
+            );
+            self.session_issuer.invalidate();
+            self.active_session_token = None;
+            self.schedule_idle_unload();
+            return None;
+        }
+
+        // 4. Open microphone on demand with a BRAND-NEW audio queue. Any audio
+        // a producer from an older session sends either fails (its queue was
+        // disconnected at stop) or lands in the old queue's detached receiver.
         let t_mic_start = std::time::Instant::now();
-        match (self.audio_starter)(self.audio_tx.clone()) {
+        let (audio_tx, audio_rx) = session::new_session_audio_queue();
+        match (self.audio_starter)(audio_tx) {
             Ok(source) => {
                 self._audio_source = Some(source);
+                self.audio_rx = Some(audio_rx);
                 println!("[Audio] Microphone capture started.");
             }
             Err(err) => {
@@ -643,14 +673,15 @@ impl App {
                     "[Audio] Failed to open microphone: {}. Remaining in Standby.",
                     err
                 );
+                self.session_issuer.invalidate();
+                self.active_session_token = None;
                 self.schedule_idle_unload();
                 return None;
             }
         }
         let mic_duration = t_mic_start.elapsed();
 
-        // 3. Transition state
-        self.finalize_current_segment();
+        // 5. Transition state
         self.state.listening = true;
         beep_start();
         self.platform.handle.set_listening(true);
@@ -689,7 +720,15 @@ impl App {
             return;
         }
 
-        // 1. Flush any pending finalized text to history before resetting ASR
+        // 1. Invalidate the session generation BEFORE releasing capture. Any
+        // callback still in flight is from here on unable to source a
+        // transcript write, and Stop is idempotent: a second call sees
+        // listening == false and returns.
+        self.session_issuer.invalidate();
+        self.active_session_token = None;
+
+        // 2. Flush any pending finalized text to history before resetting ASR.
+        // Text already visible is NEVER deleted and no extra final is written.
         if !self.last_logged_text.is_empty() {
             let end_time = Local::now();
             let start_time = self.current_utterance_start.take().unwrap_or(end_time);
@@ -704,23 +743,28 @@ impl App {
         }
         self.history_manager.flush();
 
-        // 2. Finalize current segment
+        // 3. Finalize current segment: commits the visible partial (diff
+        // window resets) WITHOUT flushing an extra final on stop.
         self.finalize_current_segment();
 
-        // 3. Drop audio capture stream (releases cpal::Stream & hardware device)
+        // 4. Drop audio capture stream (releases cpal::Stream & hardware device)
         self._audio_source = None;
 
-        // 4. Drain residual audio chunks from channel
-        while self.audio_rx.try_recv().is_ok() {}
+        // 5. Take the session's queue and drop its receiver after draining:
+        // any chunk produced after this point (a late callback racing the
+        // capture release) fails to send instead of entering a future session.
+        if let Some(rx) = self.audio_rx.take() {
+            while rx.try_recv().is_ok() {}
+        }
         println!("[Audio] Microphone capture stopped and released.");
 
-        // 5. Transition state
+        // 6. Transition state
         self.state.listening = false;
         beep_stop();
         self.platform.handle.set_listening(false);
         println!("\n[Action] >>> Listening STOPPED (Standby) <<<\n");
 
-        // 6. Schedule unload according to policy
+        // 7. Schedule unload according to policy
         self.schedule_idle_unload();
         self.notify_models();
     }
@@ -731,6 +775,31 @@ impl App {
         } else {
             self.start_listening();
         }
+    }
+
+    /// Replaces the online stream with a factory-new one from the loaded
+    /// recognizer (language option re-applied), so no waveform, decode, or
+    /// endpoint state of a previous session can leak. Returns false when no
+    /// recognizer is resident or stream creation failed (stream left absent).
+    fn renew_recognizer_stream(&mut self) -> bool {
+        let Some(ref recognizer) = self._recognizer else {
+            return false;
+        };
+        let new_stream = match recognizer.create_stream() {
+            Ok(s) => s,
+            Err(err) => {
+                eprintln!("[ASR] Failed to create fresh session stream: {}", err);
+                return false;
+            }
+        };
+        if let Some(ref active_id) = self.model_manager.active_model_id.clone() {
+            if let Some(candidate) = self.model_manager.get_model(active_id).cloned() {
+                self.apply_language_to_stream(&candidate.id, &candidate.manifest, &new_stream);
+            }
+        }
+        drop(self.stream.take());
+        self.stream = Some(new_stream);
+        true
     }
 
     /// Finalizes the current partial utterance without altering the listening state.
@@ -782,7 +851,11 @@ impl App {
         let previous_id = self.model_manager.active_model_id.clone();
         let model_id_owned = candidate.id.clone();
 
-        if self.model_manager.set_active_model(&model_id_owned).is_err() {
+        if self
+            .model_manager
+            .set_active_model(&model_id_owned)
+            .is_err()
+        {
             return false;
         }
         self.config.selected_model = model_id_owned.clone();
@@ -872,14 +945,14 @@ impl App {
                 self.stream = Some(stream);
                 self.session.finalize();
                 self.session = PartialSession::new();
+                // The old runtime is released; no session may claim it again.
+                self.session_issuer.invalidate();
+                self.active_session_token = None;
                 self.last_logged_text.clear();
                 self.current_utterance_start = None;
                 self.schedule_idle_unload();
                 self.notify_models();
-                crate::log::log(
-                    "INFO",
-                    &format!("model switch ready: {}", payload.model_id),
-                );
+                crate::log::log("INFO", &format!("model switch ready: {}", payload.model_id));
                 println!("[Model] Active model switched to {}", payload.model_id);
             }
             Err(err) => {
@@ -964,6 +1037,9 @@ impl App {
             self.stream = Some(new_stream);
             self.session.finalize();
             self.session = PartialSession::new();
+            // The old runtime is released; no session may claim it again.
+            self.session_issuer.invalidate();
+            self.active_session_token = None;
             self.last_logged_text.clear();
             self.current_utterance_start = None;
 
@@ -1260,21 +1336,36 @@ impl App {
             }
         }
 
-        // 2. Process incoming audio chunks
+        // 2. Process incoming audio chunks. Chunks are consumed exclusively
+        // from this session's queue; only a generatively-current session may
+        // feed the recognizer.
         let mut got_audio = false;
-        while let Ok(chunk) = self.audio_rx.try_recv() {
-            if self.state.listening && !chunk.samples.is_empty() {
-                if let Some(ref stream) = self.stream {
-                    stream.accept_waveform(chunk.sample_rate as i32, &chunk.samples);
-                    got_audio = true;
-                } else {
-                    eprintln!("[ASR] Invariant violation: Listening is true but stream is absent.");
+        if let Some(ref audio_rx) = self.audio_rx {
+            while let Ok(chunk) = audio_rx.try_recv() {
+                if self.state.listening
+                    && self.is_session_generatively_current()
+                    && !chunk.samples.is_empty()
+                {
+                    if let Some(ref stream) = self.stream {
+                        stream.accept_waveform(chunk.sample_rate as i32, &chunk.samples);
+                        got_audio = true;
+                    } else {
+                        eprintln!(
+                            "[ASR] Invariant violation: Listening is true but stream is absent."
+                        );
+                    }
                 }
             }
         }
 
-        // 3. Decode ASR and inject diffs if listening
-        if self.state.listening && got_audio {
+        // 3. Decode ASR and inject diffs if a live, generatively-current session
+        // has audio. The revalidation below is the single admission choke
+        // point for transcript delivery: on the desktop tick thread a stop
+        // can only complete between ticks, but future adapters (mobile
+        // keyboards, threaded callbacks) share the same contract — see
+        // `crate::session` for the binding rules.
+        let session_valid = self.is_session_generatively_current();
+        if self.state.listening && session_valid && got_audio {
             if let Some(ref stream) = self.stream {
                 stream.decode_all_ready();
 

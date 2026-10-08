@@ -130,13 +130,12 @@ fn create_test_app_with_starter(
         _resources: Box::new(()),
     };
 
-    let (audio_tx, audio_rx) = unbounded::<AudioChunk>();
+    let (_audio_tx, audio_rx) = unbounded::<AudioChunk>();
     let app = App::new_with_starter(
         platform,
         Some(action_tx.clone()),
         action_rx,
-        audio_rx,
-        audio_tx,
+        Some(audio_rx),
         starter,
         None,
     )
@@ -180,14 +179,13 @@ fn create_test_app_with_config(
         _resources: Box::new(()),
     };
 
-    let (audio_tx, audio_rx) = unbounded::<AudioChunk>();
+    let (_audio_tx, audio_rx) = unbounded::<AudioChunk>();
     let starter: AudioStarter = Box::new(|_tx| Ok(Box::new(()) as Box<dyn AudioSource>));
     let app = App::new_with_starter_and_config(
         platform,
         Some(action_tx.clone()),
         action_rx,
-        audio_rx,
-        audio_tx,
+        Some(audio_rx),
         starter,
         None,
         Some(config),
@@ -566,8 +564,7 @@ fn test_tick_safe_when_unloaded_even_if_corrupted_listening_flag() {
         platform,
         Some(action_tx),
         action_rx,
-        audio_rx,
-        audio_tx.clone(),
+        Some(audio_rx),
         starter,
         None,
     )

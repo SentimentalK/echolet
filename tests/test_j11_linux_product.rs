@@ -218,7 +218,7 @@ fn build_harness(prefix: &str) -> Harness {
     std::env::set_var("ECHOLET_USER_HOME", &home);
 
     let (action_tx, action_rx) = unbounded::<AppAction>();
-    let (audio_tx, audio_rx) = unbounded::<AudioChunk>();
+    let (_audio_tx, audio_rx) = unbounded::<AudioChunk>();
     let starter: AudioStarter = Box::new(|_tx| Ok(Box::new(()) as Box<dyn AudioSource>));
 
     let views = Arc::new(Mutex::new(Vec::new()));
@@ -238,8 +238,7 @@ fn build_harness(prefix: &str) -> Harness {
         platform,
         Some(action_tx.clone()),
         action_rx,
-        audio_rx,
-        audio_tx,
+        Some(audio_rx),
         starter,
         None,
         Some(config),
@@ -395,7 +394,7 @@ fn runtime_state_distinguishes_no_model_unloaded_ready_listening() {
         let mm = ModelManager::new_with_paths(bundle, user, tmp.join("home/config.json"))
             .expect("manager");
         let (tx, rx) = unbounded::<AppAction>();
-        let (audio_tx, audio_rx) = unbounded::<AudioChunk>();
+        let (_audio_tx, audio_rx) = unbounded::<AudioChunk>();
         let starter: AudioStarter = Box::new(|_tx| Ok(Box::new(()) as Box<dyn AudioSource>));
         let platform = PlatformRuntime {
             injector: Box::new(FakeInjector),
@@ -406,8 +405,7 @@ fn runtime_state_distinguishes_no_model_unloaded_ready_listening() {
             platform,
             Some(tx),
             rx,
-            audio_rx,
-            audio_tx,
+            Some(audio_rx),
             starter,
             None,
             None,

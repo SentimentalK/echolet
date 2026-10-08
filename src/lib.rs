@@ -12,5 +12,6 @@ pub mod log;
 pub mod models;
 pub mod paths;
 pub mod platform;
+pub mod session;
 pub mod state;
 pub mod ui;

@@ -1,4 +1,4 @@
-use crate::asr::{OnlineRecognizer, OnlineStream};
+use crate::asr::OnlineRecognizer;
 use crate::diagnostics::memory::{get_current_rss, ProcessRss};
 use crate::models::ModelManager;
 use std::env;
@@ -202,6 +202,7 @@ fn measure_f10_latency() -> Result<F10LatencyResult, Box<dyn std::error::Error>>
 
     let (_, action_rx) = unbounded::<AppAction>();
     let (audio_tx, audio_rx) = unbounded::<AudioChunk>();
+    drop(audio_tx);
 
     // Hermetic benchmark config:
     // Only inherit selected_model if set in user config, but enforce preload=false, history=false, idle_unload=None
@@ -220,8 +221,7 @@ fn measure_f10_latency() -> Result<F10LatencyResult, Box<dyn std::error::Error>>
         platform,
         None,
         action_rx,
-        audio_rx,
-        audio_tx,
+        Some(audio_rx),
         starter,
         None,
         Some(config),

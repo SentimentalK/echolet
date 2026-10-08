@@ -120,7 +120,7 @@ fn test_app_startup_preload_false_with_zero_installed_succeeds_unloaded() {
     let mm = ModelManager::new_with_paths(bundled, user, cfg_path).unwrap();
 
     let (action_tx, action_rx) = unbounded::<AppAction>();
-    let (audio_tx, audio_rx) = unbounded::<AudioChunk>();
+    let (_audio_tx, audio_rx) = unbounded::<AudioChunk>();
     let starter: AudioStarter = Box::new(|_tx| Ok(Box::new(()) as Box<dyn AudioSource>));
 
     let listening_history = Arc::new(Mutex::new(Vec::new()));
@@ -144,8 +144,7 @@ fn test_app_startup_preload_false_with_zero_installed_succeeds_unloaded() {
         platform,
         Some(action_tx),
         action_rx,
-        audio_rx,
-        audio_tx,
+        Some(audio_rx),
         starter,
         None,
         Some(cfg),
@@ -188,7 +187,7 @@ fn test_app_startup_preload_true_with_zero_installed_stays_alive_and_unloaded() 
     let mm = ModelManager::new_with_paths(bundled, user, cfg_path).unwrap();
 
     let (action_tx, action_rx) = unbounded::<AppAction>();
-    let (audio_tx, audio_rx) = unbounded::<AudioChunk>();
+    let (_audio_tx, audio_rx) = unbounded::<AudioChunk>();
     let starter: AudioStarter = Box::new(|_tx| Ok(Box::new(()) as Box<dyn AudioSource>));
 
     let platform = PlatformRuntime {
@@ -209,8 +208,7 @@ fn test_app_startup_preload_true_with_zero_installed_stays_alive_and_unloaded() 
         platform,
         Some(action_tx),
         action_rx,
-        audio_rx,
-        audio_tx,
+        Some(audio_rx),
         starter,
         None,
         Some(cfg),
@@ -236,7 +234,7 @@ fn test_start_listening_with_zero_installed_leaves_standby_and_mic_unopened() {
     .unwrap();
 
     let (action_tx, action_rx) = unbounded::<AppAction>();
-    let (audio_tx, audio_rx) = unbounded::<AudioChunk>();
+    let (_audio_tx, audio_rx) = unbounded::<AudioChunk>();
 
     let mic_opened = Arc::new(AtomicBool::new(false));
     let mic_opened_clone = mic_opened.clone();
@@ -260,8 +258,7 @@ fn test_start_listening_with_zero_installed_leaves_standby_and_mic_unopened() {
         platform,
         Some(action_tx.clone()),
         action_rx,
-        audio_rx,
-        audio_tx,
+        Some(audio_rx),
         starter,
         None,
         None,
@@ -321,7 +318,7 @@ fn test_residency_helpers_tolerate_no_model_and_unloaded_runtime() {
     .unwrap();
 
     let (_, action_rx) = unbounded::<AppAction>();
-    let (audio_tx, audio_rx) = unbounded::<AudioChunk>();
+    let (_audio_tx, audio_rx) = unbounded::<AudioChunk>();
     let starter: AudioStarter = Box::new(|_tx| Ok(Box::new(()) as Box<dyn AudioSource>));
 
     let platform = PlatformRuntime {
@@ -335,7 +332,14 @@ fn test_residency_helpers_tolerate_no_model_and_unloaded_runtime() {
     };
 
     let mut app = App::new_with_manager_and_config(
-        platform, None, action_rx, audio_rx, audio_tx, starter, None, None, mm,
+        platform,
+        None,
+        action_rx,
+        Some(audio_rx),
+        starter,
+        None,
+        None,
+        mm,
     )
     .unwrap();
 
@@ -374,7 +378,7 @@ fn test_distinction_between_no_model_and_unloaded_semantics() {
     .unwrap();
 
     let (_, action_rx) = unbounded::<AppAction>();
-    let (audio_tx, audio_rx) = unbounded::<AudioChunk>();
+    let (_audio_tx, audio_rx) = unbounded::<AudioChunk>();
     let starter: AudioStarter = Box::new(|_tx| Ok(Box::new(()) as Box<dyn AudioSource>));
 
     let platform = PlatformRuntime {
@@ -388,7 +392,14 @@ fn test_distinction_between_no_model_and_unloaded_semantics() {
     };
 
     let app_no_model = App::new_with_manager_and_config(
-        platform, None, action_rx, audio_rx, audio_tx, starter, None, None, mm_empty,
+        platform,
+        None,
+        action_rx,
+        Some(audio_rx),
+        starter,
+        None,
+        None,
+        mm_empty,
     )
     .unwrap();
 
@@ -397,7 +408,7 @@ fn test_distinction_between_no_model_and_unloaded_semantics() {
 
     // 2. Installed baseline state with preload=false: UNLOADED (not NO_MODEL)
     let (_, action_rx2) = unbounded::<AppAction>();
-    let (audio_tx2, audio_rx2) = unbounded::<AudioChunk>();
+    let (_audio_tx2, audio_rx2) = unbounded::<AudioChunk>();
     let starter2: AudioStarter = Box::new(|_tx| Ok(Box::new(()) as Box<dyn AudioSource>));
     let platform2 = PlatformRuntime {
         injector: Box::new(FakeInjector),
@@ -414,8 +425,7 @@ fn test_distinction_between_no_model_and_unloaded_semantics() {
         platform2,
         None,
         action_rx2,
-        audio_rx2,
-        audio_tx2,
+        Some(audio_rx2),
         starter2,
         None,
         Some(cfg2),
@@ -564,7 +574,7 @@ fn test_env_var_isolated_path_hooks_model_manager_and_app() {
 
     // 2. App::new_internal() with env vars
     let (action_tx, action_rx) = unbounded::<AppAction>();
-    let (audio_tx, audio_rx) = unbounded::<AudioChunk>();
+    let (_audio_tx, audio_rx) = unbounded::<AudioChunk>();
     let starter: AudioStarter = Box::new(|_tx| Ok(Box::new(()) as Box<dyn AudioSource>));
 
     let platform = PlatformRuntime {
@@ -581,8 +591,7 @@ fn test_env_var_isolated_path_hooks_model_manager_and_app() {
         platform,
         Some(action_tx),
         action_rx,
-        audio_rx,
-        audio_tx,
+        Some(audio_rx),
         starter,
         None,
         None,
