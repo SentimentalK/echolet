@@ -215,10 +215,13 @@ struct ActiveSession {
     next_revision: u64,
     /// Watermark of the last contiguously admitted [`TranscriptDelta`].
     delivered_revision: u64,
-    /// Latest recognized partial text that has already become visible —
-    /// the snapshot for history persistence.
-    last_logged_text: String,
-    utterance_start: Option<DateTime<Local>>,
+    /// Latest recognized partial text that has been ADMITTED through
+    /// [`SessionEngine::accept_delivery`] — the history snapshot. Text of a
+    /// proposed-but-unadmitted delta never lands here.
+    delivered_text: String,
+    /// When the currently delivered nonempty text first became visible;
+    /// `None` while the delivered snapshot is empty.
+    delivered_utterance_start: Option<DateTime<Local>>,
 }
 
 /// The platform-neutral session engine.
@@ -272,8 +275,8 @@ impl SessionEngine {
             partial: PartialSession::new(),
             next_revision: FIRST_REVISION,
             delivered_revision: 0,
-            last_logged_text: String::new(),
-            utterance_start: None,
+            delivered_text: String::new(),
+            delivered_utterance_start: None,
         });
         Ok((token, audio_tx))
     }
@@ -306,10 +309,17 @@ impl SessionEngine {
 
     /// Feeds the newly recognized partial `text` through the diff window.
     ///
+    /// This is PROPOSAL ONLY: it may update the `PartialSession` diff window,
+    /// advance `next_revision` and construct a `TranscriptDelta`. It NEVER
+    /// touches the delivered history snapshot (`delivered_text` /
+    /// `delivered_utterance_start`) — that changes only on
+    /// [`SessionEngine::accept_delivery`].
+    ///
     /// Emits a `TranscriptDelta` ONLY for a real diff (unchanged text yields
     /// `None`) and increments the per-session revision exactly once per
-    /// event. The first nonempty partial stores the utterance start time.
-    /// A stale token is rejected with no side effects.
+    /// event. A stale token is rejected with no side effects. On revision
+    /// counter overflow at this boundary the engine fails closed (no delta,
+    /// no state change) instead of reusing a revision.
     pub fn update_partial(
         &mut self,
         token: SessionGeneration,
@@ -319,9 +329,7 @@ impl SessionEngine {
         if !active.token.matches(token) {
             return None;
         }
-        if !text.is_empty() && active.utterance_start.is_none() {
-            active.utterance_start = Some(Local::now());
-        }
+        let next = active.next_revision.checked_add(1)?;
         let diff = active.partial.update(text)?;
         let delta = TranscriptDelta {
             session: token,
@@ -329,10 +337,7 @@ impl SessionEngine {
             diff,
             recognized_text: text.to_string(),
         };
-        active.next_revision += 1;
-        if !text.is_empty() && text != active.last_logged_text {
-            active.last_logged_text = text.to_string();
-        }
+        active.next_revision = next;
         Some(delta)
     }
 
@@ -344,6 +349,18 @@ impl SessionEngine {
     /// are rejected with no state change (and no editor writes — the caller
     /// must never apply a rejected diff, because it depends on previous
     /// state).
+    ///
+    /// On acceptance the delivered history snapshot is set EXACTLY to the
+    /// delta's proposed full text — including the empty string, which
+    /// represents an erasure of the visible partial. A nonempty accepted
+    /// text stamps the utterance start the first time; an empty one resets
+    /// the timestamp.
+    ///
+    /// Boundary note: this admission happens immediately before the
+    /// composition root writes to the editor sink. The desktop
+    /// `TextInjector::apply_diff` is synchronous and returns void, so
+    /// admission is NOT proof of the OS-level editor state; it only gates
+    /// the write attempt and advances the delivered watermark.
     pub fn accept_delivery(&mut self, delta: &TranscriptDelta) -> bool {
         let Some(active) = self.active.as_mut() else {
             return false;
@@ -355,17 +372,28 @@ impl SessionEngine {
             return false;
         }
         active.delivered_revision = delta.revision;
+        active.delivered_text = delta.recognized_text.clone();
+        if delta.recognized_text.is_empty() {
+            active.delivered_utterance_start = None;
+        } else if active.delivered_utterance_start.is_none() {
+            active.delivered_utterance_start = Some(Local::now());
+        }
         true
     }
 
     /// Endpoint segmentation of the CURRENT session while it stays live
     /// (listening continues).
     ///
-    /// Resets only the active diff window, the visible-text snapshot and the
-    /// utterance start; it does NOT invalidate the session, disconnect the
+    /// Resets only the active diff window and the delivered-text snapshot
+    /// (including its utterance-start timestamp); it does NOT invalidate the
+    /// session, disconnect the
     /// queue or persist history. Returns the already-visible utterance for
     /// the caller's existing history logic when that window was nonempty;
     /// `None` otherwise. Stale tokens yield `None`.
+    ///
+    /// Only ADMITTED, already-visible text is consumed: a `TranscriptDelta`
+    /// that was generated but never accepted never reaches history — no
+    /// implicit acceptance at the endpoint.
     pub fn finish_segment(&mut self, token: SessionGeneration) -> Option<CompletedUtterance> {
         let Some(active) = self.active.as_mut() else {
             return None;
@@ -373,8 +401,8 @@ impl SessionEngine {
         if !active.token.matches(token) {
             return None;
         }
-        let last_text = std::mem::take(&mut active.last_logged_text);
-        let start = active.utterance_start.take();
+        let last_text = std::mem::take(&mut active.delivered_text);
+        let start = active.delivered_utterance_start.take();
         active.partial.finalize();
         if last_text.is_empty() {
             return None;
@@ -389,13 +417,16 @@ impl SessionEngine {
 
     /// Cancels the live session.
     ///
-    /// FIRST invalidates the session identity, then detaches and drops the
-    /// session's receiver — releasing all buffered audio with it, so late
-    /// producer sends fail and no future session can observe them. The
+    /// FIRST detaches and drops the session's receiver — releasing all
+    /// buffered audio with it, so late producer sends fail and no future
+    /// session can observe them — and THEN invalidates the session identity
+    /// so the receiver drop and stale-acceptance fencing cannot race. The
     /// partial window is reset WITHOUT calling any text injector (already
-    /// visible text stays untouched by design), and the last already-visible
-    /// utterance is returned for HISTORY ONLY (callers choose whether to
-    /// persist it). No final decode/append happens here.
+    /// visible text stays untouched by design), and the last ADMITTED,
+    /// already-visible utterance is returned for HISTORY ONLY (callers
+    /// choose whether to persist it). Proposed-but-unadmitted partial
+    /// inference is dropped, never flushed into History. No final
+    /// decode/append happens here.
     ///
     /// Idempotent: a second `cancel` on an inactive engine returns `None`
     /// and has no side effects.
@@ -403,13 +434,13 @@ impl SessionEngine {
         let mut active = self.active.take()?;
         self.issuer.invalidate();
         let end = Local::now();
-        let last_text = std::mem::take(&mut active.last_logged_text);
+        let last_text = std::mem::take(&mut active.delivered_text);
         if last_text.is_empty() {
             return None;
         }
         Some(CompletedUtterance {
             text: last_text,
-            start: active.utterance_start.unwrap_or(end),
+            start: active.delivered_utterance_start.unwrap_or(end),
             end,
         })
     }
@@ -684,7 +715,8 @@ mod tests {
     fn finish_segment_opens_a_new_partial_window_same_session() {
         let mut engine = SessionEngine::new();
         let (token, _tx) = engine.begin().unwrap();
-        engine.update_partial(token, "hello").unwrap();
+        let delta = engine.update_partial(token, "hello").unwrap();
+        assert!(engine.accept_delivery(&delta));
         let completed = engine.finish_segment(token).expect("nonempty window");
         assert_eq!(completed.text, "hello");
         assert!(completed.start <= completed.end);
@@ -702,6 +734,7 @@ mod tests {
 
         // Resetting clears the snapshot: a completed-out-of-order window
         // yields None, then the just-completed window is returned once.
+        assert!(engine.accept_delivery(&next));
         let completed2 = engine.finish_segment(token).expect("window nonempty");
         assert_eq!(completed2.text, "world");
         assert!(
@@ -714,11 +747,13 @@ mod tests {
     fn finish_segment_rejects_stale_tokens() {
         let mut engine = SessionEngine::new();
         let (token, _tx) = engine.begin().unwrap();
-        engine.update_partial(token, "text").unwrap();
+        let d1 = engine.update_partial(token, "text").unwrap();
+        assert!(engine.accept_delivery(&d1));
         assert!(engine.finish_segment(SessionGeneration(7)).is_none());
         assert!(engine.finish_segment(SessionGeneration::root()).is_none());
         // Session state is untouched by the stale requests.
-        assert!(engine.update_partial(token, "text more").is_some());
+        let d = engine.update_partial(token, "text more").unwrap();
+        assert!(engine.accept_delivery(&d));
 
         engine.cancel();
         let (token2, _tx2) = engine.begin().unwrap();
@@ -732,7 +767,8 @@ mod tests {
         assert_eq!(engine.cancel(), None, "cancel on idle engine is None");
 
         let (token, _tx) = engine.begin().unwrap();
-        engine.update_partial(token, "committed voice").unwrap();
+        let delta = engine.update_partial(token, "committed voice").unwrap();
+        assert!(engine.accept_delivery(&delta));
         let snapshot = engine.cancel().expect("visible utterance snapshot");
         assert_eq!(snapshot.text, "committed voice");
         assert!(snapshot.start <= snapshot.end);
@@ -745,6 +781,189 @@ mod tests {
             engine.update_partial(token, "late"),
             None,
             "no update after invalidation"
+        );
+    }
+
+    /// A delta that was generated but never accepted must never reach
+    /// history: cancel over a session with only unadmitted inference
+    /// records nothing.
+    #[test]
+    fn cancel_with_only_generated_deltas_records_nothing() {
+        let mut engine = SessionEngine::new();
+        let (token, _tx) = engine.begin().unwrap();
+        let _delta = engine.update_partial(token, "never delivered").unwrap();
+        assert_eq!(
+            engine.cancel(),
+            None,
+            "unadmitted inference must not enter history"
+        );
+        // The generated delta is now stale on every gate.
+        assert!(!engine.is_active());
+        assert!(engine.begin().is_ok());
+    }
+
+    /// Accepted 'hello' plus a still-unaccepted 'hello world' proposal:
+    /// stop must record exactly the delivered text.
+    #[test]
+    fn cancel_records_only_last_accepted_text_not_pending_proposals() {
+        let mut engine = SessionEngine::new();
+        let (token, _tx) = engine.begin().unwrap();
+        let d1 = engine.update_partial(token, "hello").unwrap();
+        assert!(engine.accept_delivery(&d1));
+        let _d2 = engine.update_partial(token, "hello world").unwrap();
+        let snapshot = engine.cancel().expect("accepted text is in history");
+        assert_eq!(snapshot.text, "hello");
+    }
+
+    /// Revision 2 proposed and delivered BEFORE revision 1: revision 2 is
+    /// rejected (gap), revision 1 is then admitted, and the snapshot shows
+    /// only revision 1's text with revision 2 still fenced out.
+    #[test]
+    fn out_of_order_revision_is_rejected_and_delivered_snapshot_stays_contiguous() {
+        let mut engine = SessionEngine::new();
+        let (token, _tx) = engine.begin().unwrap();
+        let d1 = engine.update_partial(token, "first").unwrap();
+        let d2 = engine.update_partial(token, "first second").unwrap();
+        assert!(
+            !engine.accept_delivery(&d2),
+            "revision 2 before revision 1 must be rejected"
+        );
+        assert!(engine.accept_delivery(&d1));
+        let snapshot = engine.cancel().expect("revision 1 was admitted");
+        assert_eq!(
+            snapshot.text, "first",
+            "rejecting revision 2 must not leave any text or timestamp of it behind"
+        );
+    }
+
+    /// Duplicates and stale-generation replays never mutate the delivered
+    /// snapshot, even when the duplicate carries different text.
+    #[test]
+    fn duplicate_and_stale_deltas_never_mutate_the_snapshot() {
+        let mut engine = SessionEngine::new();
+        let (token, _tx) = engine.begin().unwrap();
+        let d1 = engine.update_partial(token, "hello").unwrap();
+        assert!(engine.accept_delivery(&d1));
+        // A forged "duplicate" whose text differs from what was delivered:
+        // it shares the rejected revision, so it mutates nothing.
+        let mut forged = d1.clone();
+        forged.recognized_text = "tampered".to_string();
+        assert!(!engine.accept_delivery(&forged));
+        engine.cancel();
+        // A delivered delta of a dead session replayed against a fresh one:
+        assert_eq!(
+            engine.cancel(),
+            None,
+            "stale generation must not produce a new snapshot"
+        );
+        let (token2, _tx2) = engine.begin().unwrap();
+        let d = engine.update_partial(token2, "new text").unwrap();
+        assert!(!engine.accept_delivery(&d1), "old generation rejected");
+        assert!(engine.accept_delivery(&d));
+        let snapshot = engine.cancel().expect("fresh admitted text");
+        assert_eq!(snapshot.text, "new text", "snapshot matches fresh session");
+    }
+
+    /// An accepted EMPTY delta (the recognizer proposing an erasure of the
+    /// visible partial) must clear both the delivered text AND its
+    /// utterance-start timestamp, so no history entry is produced at Stop.
+    #[test]
+    fn accepted_empty_delta_clears_snapshot_and_utterance_start() {
+        let mut engine = SessionEngine::new();
+        let (token, _tx) = engine.begin().unwrap();
+        let d1 = engine.update_partial(token, "partial").unwrap();
+        assert!(engine.accept_delivery(&d1));
+        // The erasure proposal: PartialSession emits a pure-backspace diff.
+        let erase = engine.update_partial(token, "").unwrap();
+        assert!(
+            erase.diff.backspaces > 0 && erase.diff.new_suffix.is_empty(),
+            "the erasure diff must clear the visible partial"
+        );
+        assert!(engine.accept_delivery(&erase));
+        assert!(
+            engine.active.as_ref().unwrap().delivered_text.is_empty(),
+            "accepted empty text must overwrite the delivered snapshot exactly"
+        );
+        assert!(
+            engine
+                .active
+                .as_ref()
+                .unwrap()
+                .delivered_utterance_start
+                .is_none(),
+            "an empty delivered snapshot has no utterance start"
+        );
+        // Both endpoints see an empty snapshot: no history entry at all.
+        assert!(engine.finish_segment(token).is_none(), "endpoint no entry");
+        let snapshot = engine.cancel();
+        assert_eq!(snapshot, None, "stop records no entry for erased text");
+        assert!(
+            !engine.is_active(),
+            "cancel still invalidates the session even with an empty snapshot"
+        );
+    }
+
+    /// Stop must never implicitly accept a pending unaccepted draft: the
+    /// editor sink keeps the previously admitted text and the late event is
+    /// dropped on every gate.
+    #[test]
+    fn stop_preserves_visible_sink_and_drops_late_draft_events() {
+        let mut engine = SessionEngine::new();
+        let mut visible: Vec<char> = Vec::new();
+        let (token, _tx) = engine.begin().unwrap();
+        let d1 = engine.update_partial(token, "kept").unwrap();
+        assert!(engine.accept_delivery(&d1));
+        apply_to_sink(&mut visible, &d1);
+        let d2 = engine.update_partial(token, "kept draft tail").unwrap();
+        // Stop while the draft is still unaccepted:
+        let snapshot = engine.cancel().expect("visible text for history");
+        assert_eq!(snapshot.text, "kept");
+        assert_eq!(
+            sink_text(&visible),
+            "kept",
+            "Stop must not backspace or extend already visible editor text"
+        );
+        // Late drafts and their deliveries cannot resurrect anything.
+        assert_eq!(engine.update_partial(token, "late"), None);
+        assert!(!engine.accept_delivery(&d2), "dead session draft rejected");
+        assert_eq!(sink_text(&visible), "kept");
+        // A fresh session starts the sink from current editor state without
+        // retro-editing it.
+        let (token2, _tx2) = engine.begin().unwrap();
+        let fresh = engine.update_partial(token2, "next").unwrap();
+        assert!(engine.accept_delivery(&fresh));
+        apply_to_sink(&mut visible, &fresh);
+        assert_eq!(sink_text(&visible), "keptnext");
+    }
+
+    /// Accepted mid-utterance corrections apply to the sink like any other
+    /// contiguous delta, and finish_segment resets the diff window so the
+    /// next segment's first diff is a pure append.
+    #[test]
+    fn accepted_correction_and_following_segment_reset_work_together() {
+        let mut engine = SessionEngine::new();
+        let mut visible: Vec<char> = Vec::new();
+        let (token, _tx) = engine.begin().unwrap();
+        let d1 = engine.update_partial(token, "teh quick").unwrap();
+        assert!(engine.accept_delivery(&d1));
+        apply_to_sink(&mut visible, &d1);
+        assert_eq!(sink_text(&visible), "teh quick");
+        let d2 = engine.update_partial(token, "the quick").unwrap();
+        assert!(engine.accept_delivery(&d2));
+        apply_to_sink(&mut visible, &d2);
+        assert_eq!(sink_text(&visible), "the quick");
+        assert_eq!(
+            engine.finish_segment(token).expect("admitted segment").text,
+            "the quick"
+        );
+        // New segment: pure append, never a retro-edit.
+        let d3 = engine.update_partial(token, "brown fox").unwrap();
+        assert!(engine.accept_delivery(&d3));
+        apply_to_sink(&mut visible, &d3);
+        assert_eq!(sink_text(&visible), "the quickbrown fox");
+        assert_eq!(
+            d3.diff.backspaces, 0,
+            "segment boundary finalized the window"
         );
     }
 
