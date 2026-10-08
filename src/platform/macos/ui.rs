@@ -3,9 +3,11 @@
 use crate::actions::AppAction;
 use crate::paths;
 use crate::platform::macos::hotkey::register_global_f10;
-use crate::platform::macos::injector::execute_diff;
+use crate::platform::macos::injector::{
+    execute_diff, remember_frontmost_app, warn_if_accessibility_missing,
+};
 use crate::platform::{PlatformHandle, PlatformView};
-use crate::ui::control_surface::ControlSurfaceState;
+use crate::ui::control_surface::{ControlSurfaceState, RuntimeState};
 use crate::ui::desktop::host::{calculate_macos_panel_position, Rect};
 use crate::ui::desktop::{DesktopPanelRuntime, PANEL_HEIGHT_PX, PANEL_WIDTH_PX};
 use cocoa::appkit::{
@@ -173,6 +175,7 @@ pub struct MacUi {
     status_item: id,
     delegate: id,
     listening: bool,
+    model_loading: bool,
     history_enabled: bool,
     running: Arc<AtomicBool>,
     runtime: DesktopPanelRuntime,
@@ -182,6 +185,7 @@ pub struct MacUi {
 static mut MAC_UI_PTR: *mut MacUi = std::ptr::null_mut();
 
 extern "C" fn timer_callback(_timer: CFRunLoopTimerRef, _info: *mut c_void) {
+    remember_frontmost_app();
     unsafe {
         if !MAC_UI_PTR.is_null() {
             (*MAC_UI_PTR).drain_commands();
@@ -234,6 +238,7 @@ impl MacUi {
                 status_item,
                 delegate,
                 listening: false,
+                model_loading: false,
                 history_enabled: false,
                 running: Arc::new(AtomicBool::new(true)),
                 runtime,
@@ -246,10 +251,8 @@ impl MacUi {
     }
 
     pub fn handle_window_did_resign_key(&mut self, _notification: id) {
-        if self.runtime.is_visible() {
-            self.last_resigned_at = Some(std::time::Instant::now());
-            self.runtime.hide_panel();
-        }
+        // The panel stays visible after it loses key focus so it can float
+        // over the app being dictated into. Close, Escape, or the menu-bar icon hide it.
     }
 
     pub fn drain_commands(&mut self) {
@@ -268,6 +271,7 @@ impl MacUi {
             MacUiCommand::UpdateControlSurface(state) => {
                 self.history_enabled = state.history_enabled;
                 self.listening = state.runtime_state.is_listening();
+                self.model_loading = state.runtime_state == RuntimeState::Loading;
                 self.update_status_bar();
                 self.runtime.update_state(state);
             }
@@ -431,7 +435,7 @@ impl MacUi {
             let toggle_str = NSString::alloc(nil).init_str(toggle_label);
             let item: id = msg_send![menu, addItemWithTitle:toggle_str action:sel!(onToggleListening:) keyEquivalent:key_equiv];
             let _: () = msg_send![item, setTarget:self.delegate];
-            let _: () = msg_send![item, setEnabled:true];
+            let _: () = msg_send![item, setEnabled:!self.model_loading];
 
             let _: () = msg_send![menu, addItem:NSMenuItem::separatorItem(nil)];
 
@@ -460,6 +464,7 @@ impl MacUi {
             MAC_UI_PTR = &mut self as *mut MacUi;
 
             self.update_status_bar();
+            warn_if_accessibility_missing();
 
             // Register Carbon global F10
             let _hotkey_handle = register_global_f10(self.action_tx.clone());
@@ -486,8 +491,11 @@ impl MacUi {
             let run_loop = CFRunLoopGetCurrent();
             CFRunLoopAddTimer(run_loop, timer, kCFRunLoopCommonModes);
 
-            // Run Slint event loop on main thread (valid Slint owner)
-            let _ = self.runtime.run();
+            // Run Slint event loop on main thread (valid Slint owner).
+            // This returns only after quit_event_loop(), which Shutdown sends.
+            if let Err(e) = self.runtime.run() {
+                eprintln!("[macOS UI] Slint event loop error: {}", e);
+            }
 
             MAC_UI_PTR = std::ptr::null_mut();
         }

@@ -12,11 +12,13 @@ export component EcholetPanel inherits Window {
     height: 520px;
     title: "Echolet";
     no-frame: true;
+    always-on-top: true;
     background: #18181b;
     default-font-size: 13px;
 
     in property <string> status_text: "Status: Ready";
     in property <bool> is_listening: false;
+    in property <bool> listening_enabled: true;
     in property <[SlintModelGroupData]> model_groups: [];
     in property <bool> has_language_options: false;
     in property <string> language_model_id: "";
@@ -62,15 +64,49 @@ export component EcholetPanel inherits Window {
             VerticalLayout {
                 padding-left: 14px;
                 padding-right: 14px;
-                padding-top: 12px;
+                padding-top: 0px;
                 padding-bottom: 12px;
                 spacing: 8px;
 
-                // 1. Header
-                StatusHeader {
-                    title: "Echolet";
-                    status_text: root.status_text;
-                    is_listening: root.is_listening;
+                // 1. Header. Drag this strip to move the borderless window.
+                Rectangle {
+                    height: 40px;
+
+                    WindowMoveArea {
+                        HorizontalLayout {
+                            padding-top: 10px;
+                            spacing: 8px;
+                            alignment: space-between;
+
+                            StatusHeader {
+                                horizontal-stretch: 1;
+                                title: "Echolet";
+                                status_text: root.status_text;
+                                is_listening: root.is_listening;
+                            }
+
+                            Rectangle {
+                                width: 22px;
+                                height: 22px;
+                                border-radius: 4px;
+                                background: close_touch.has-hover ? #3f3f46 : transparent;
+
+                                Text {
+                                    text: "×";
+                                    color: close_touch.has-hover ? #f4f4f5 : #a1a1aa;
+                                    font-size: 16px;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+
+                                close_touch := TouchArea {
+                                    clicked => {
+                                        root.close_requested();
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
 
                 // Divider
@@ -189,9 +225,9 @@ export component EcholetPanel inherits Window {
                     Rectangle {
                         height: 32px;
                         border-radius: 6px;
-                        background: root.is_listening ? (mic_touch.pressed ? #991b1b : #dc2626) : (mic_touch.pressed ? #1d4ed8 : (mic_touch.has-hover ? #2563eb : #1d4ed8));
+                        background: !root.listening_enabled ? #27272a : root.is_listening ? (mic_touch.pressed ? #991b1b : #dc2626) : (mic_touch.pressed ? #1d4ed8 : (mic_touch.has-hover ? #2563eb : #1d4ed8));
                         border-width: 1px;
-                        border-color: root.is_listening ? #ef4444 : #3b82f6;
+                        border-color: !root.listening_enabled ? #3f3f46 : root.is_listening ? #ef4444 : #3b82f6;
 
                         HorizontalLayout {
                             alignment: center;
@@ -199,7 +235,7 @@ export component EcholetPanel inherits Window {
 
                             Text {
                                 text: root.is_listening ? "Stop Listening (F10)" : "Start Listening (F10)";
-                                color: #ffffff;
+                                color: !root.listening_enabled ? #71717a : #ffffff;
                                 font-size: 12px;
                                 font-weight: 600;
                                 vertical-alignment: center;
@@ -208,6 +244,7 @@ export component EcholetPanel inherits Window {
                         }
 
                         mic_touch := TouchArea {
+                            enabled: root.listening_enabled;
                             clicked => {
                                 root.toggle_listening();
                             }

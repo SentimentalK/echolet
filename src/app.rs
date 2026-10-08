@@ -32,6 +32,23 @@ pub struct StartListeningMetrics {
     pub mic_open_ms: f64,
 }
 
+struct ModelSwitchPayload {
+    generation: u64,
+    model_id: String,
+    previous_id: Option<String>,
+    built: Result<(Arc<OnlineRecognizer>, OnlineStream), String>,
+}
+
+fn release_recognizer_later(stream: OnlineStream, recognizer: Arc<OnlineRecognizer>) {
+    std::thread::Builder::new()
+        .name("echolet-model-drop".into())
+        .spawn(move || {
+            drop(stream);
+            drop(recognizer);
+        })
+        .ok();
+}
+
 pub struct App {
     pub state: AppState,
     pub config: EcholetConfig,
@@ -54,6 +71,11 @@ pub struct App {
     /// True while the active recognizer is being created, so the platform UI
     /// can publish LOADING before the expensive work begins.
     model_loading: bool,
+    /// Bumped on every background model switch. A finished load is applied
+    /// only when it still matches, so a newer click cannot be overwritten.
+    switch_generation: u64,
+    switch_tx: Sender<ModelSwitchPayload>,
+    switch_rx: Receiver<ModelSwitchPayload>,
     /// Last projected download status per model id.
     download_progress: HashMap<String, DownloadStatus>,
 }
@@ -218,6 +240,7 @@ impl App {
         let history_dir = paths::history_dir();
         let history_manager = HistoryManager::new(config.history_enabled, history_dir);
 
+        let (switch_tx, switch_rx) = unbounded();
         let mut app = Self {
             state: AppState::new(),
             config,
@@ -238,6 +261,9 @@ impl App {
             idle_unload_deadline: None,
             idle_unload_model_id: None,
             model_loading: false,
+            switch_generation: 0,
+            switch_tx,
+            switch_rx,
             download_progress: HashMap::new(),
         };
 
@@ -582,6 +608,13 @@ impl App {
             return None;
         }
 
+        if self.model_loading {
+            let msg = "Model is still loading. Try again in a moment.";
+            crate::log::log("WARN", msg);
+            eprintln!("[ASR] {}", msg);
+            return None;
+        }
+
         let t_start = std::time::Instant::now();
 
         // Cancel any pending idle unload before/while ensuring the runtime
@@ -708,6 +741,163 @@ impl App {
         }
         self.last_logged_text.clear();
         self.current_utterance_start = None;
+    }
+
+    /// Starts a model switch and returns immediately.
+    ///
+    /// The panel updates to the new selection and a loading status before the
+    /// recognizer is built. The ONNX load runs off the core thread so the
+    /// panel stays responsive. A newer switch supersedes an in-flight one.
+    fn begin_model_switch(&mut self, model_id: &str) -> bool {
+        if self.state.listening {
+            println!("[Model] Model switch requested while Listening; ignoring until Standby.");
+            return false;
+        }
+
+        if self.model_manager.active_model_id.as_deref() == Some(model_id) {
+            if self.model_loading {
+                return true;
+            }
+            if self.is_model_loaded() {
+                self.schedule_idle_unload();
+                return true;
+            }
+            return self.ensure_model_loaded().is_ok();
+        }
+
+        let Some(candidate) = self.model_manager.get_model(model_id).cloned() else {
+            if self.model_manager.registry.get_model(model_id).is_some() {
+                println!(
+                    "[Model] Model '{}' is not installed; use the Download action first.",
+                    model_id
+                );
+            } else {
+                eprintln!("[Model] Model ID '{}' not found in registry.", model_id);
+            }
+            return false;
+        };
+
+        self.switch_generation = self.switch_generation.wrapping_add(1);
+        let generation = self.switch_generation;
+        let previous_id = self.model_manager.active_model_id.clone();
+        let model_id_owned = candidate.id.clone();
+
+        if self.model_manager.set_active_model(&model_id_owned).is_err() {
+            return false;
+        }
+        self.config.selected_model = model_id_owned.clone();
+        let _ = self.config.save();
+        self.model_loading = true;
+        self.cancel_idle_unload();
+        self.notify_models();
+
+        crate::log::log(
+            "INFO",
+            &format!("switching model in background: {}", model_id_owned),
+        );
+        println!(
+            "[Model] Switching to installed model '{}' ({:?}) in the background...",
+            candidate.id, candidate.dir
+        );
+
+        let dir = candidate.dir.clone();
+        let manifest = candidate.manifest.clone();
+        let tx = self.switch_tx.clone();
+        let load_id = model_id_owned.clone();
+        let previous_for_thread = previous_id.clone();
+        let spawned = std::thread::Builder::new()
+            .name("echolet-model-load".into())
+            .spawn(move || {
+                let built = (|| {
+                    let recognizer = Arc::new(OnlineRecognizer::from_manifest(&dir, &manifest)?);
+                    let stream = recognizer.create_stream()?;
+                    Ok((recognizer, stream))
+                })();
+                let _ = tx.send(ModelSwitchPayload {
+                    generation,
+                    model_id: load_id,
+                    previous_id: previous_for_thread,
+                    built,
+                });
+            });
+        if spawned.is_err() {
+            self.model_loading = false;
+            self.revert_active_model(previous_id.as_deref());
+            self.notify_models();
+            return false;
+        }
+        true
+    }
+
+    fn revert_active_model(&mut self, previous_id: Option<&str>) {
+        match previous_id {
+            Some(prev) => {
+                let _ = self.model_manager.set_active_model(prev);
+                self.config.selected_model = prev.to_string();
+            }
+            None => {
+                self.model_manager.active_model_id = None;
+                self.config.selected_model.clear();
+            }
+        }
+        let _ = self.config.save();
+    }
+
+    fn drain_model_switches(&mut self) {
+        while let Ok(payload) = self.switch_rx.try_recv() {
+            self.apply_model_switch(payload);
+        }
+    }
+
+    fn apply_model_switch(&mut self, payload: ModelSwitchPayload) {
+        if payload.generation != self.switch_generation {
+            if let Ok((recognizer, stream)) = payload.built {
+                release_recognizer_later(stream, recognizer);
+            }
+            return;
+        }
+
+        self.model_loading = false;
+        match payload.built {
+            Ok((recognizer, stream)) => {
+                if let Some(candidate) = self.model_manager.get_model(&payload.model_id).cloned() {
+                    self.apply_language_to_stream(&candidate.id, &candidate.manifest, &stream);
+                }
+                if let (Some(old_stream), Some(old_recognizer)) =
+                    (self.stream.take(), self._recognizer.take())
+                {
+                    release_recognizer_later(old_stream, old_recognizer);
+                }
+                self._recognizer = Some(recognizer);
+                self.stream = Some(stream);
+                self.session.finalize();
+                self.session = PartialSession::new();
+                self.last_logged_text.clear();
+                self.current_utterance_start = None;
+                self.schedule_idle_unload();
+                self.notify_models();
+                crate::log::log(
+                    "INFO",
+                    &format!("model switch ready: {}", payload.model_id),
+                );
+                println!("[Model] Active model switched to {}", payload.model_id);
+            }
+            Err(err) => {
+                eprintln!(
+                    "[Model] Error: Failed to initialize candidate model '{}': {}. Retaining previous model.",
+                    payload.model_id, err
+                );
+                crate::log::log(
+                    "WARN",
+                    &format!("model switch failed for '{}': {}", payload.model_id, err),
+                );
+                if self.model_manager.active_model_id.as_deref() == Some(payload.model_id.as_str())
+                {
+                    self.revert_active_model(payload.previous_id.as_deref());
+                }
+                self.notify_models();
+            }
+        }
     }
 
     /// Transactionally switches active model to `model_id`.
@@ -976,7 +1166,7 @@ impl App {
                 self.start_download(&model_id);
             }
             AppAction::SelectModel(model_id) => {
-                self.select_model(&model_id);
+                self.begin_model_switch(&model_id);
             }
             AppAction::ModelDownloadProgress { model_id, status } => {
                 // Coalesce: only re-project when the projected status actually
@@ -1060,6 +1250,8 @@ impl App {
 
     /// Single tick of event draining and ASR stream decoding.
     pub fn tick(&mut self) {
+        self.drain_model_switches();
+
         // 1. Drain pending platform actions
         while let Ok(action) = self.action_rx.try_recv() {
             self.handle_action(action);

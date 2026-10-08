@@ -69,6 +69,7 @@ pub struct DesktopPanelViewModel {
     pub height: u32,
     pub status_text: String,
     pub is_listening: bool,
+    pub listening_enabled: bool,
     pub group_label: String,
     pub models: Vec<DesktopModelRowViewModel>,
     pub model_groups: Vec<DesktopModelGroupViewModel>,
@@ -94,13 +95,17 @@ impl DesktopPanelViewModel {
     pub fn from_control_surface(state: &ControlSurfaceState) -> Self {
         let status_text = state.runtime_state.status_label().to_string();
         let is_listening = state.runtime_state.is_listening();
+        let listening_enabled = state.runtime_state != RuntimeState::Loading;
 
         let mut model_groups = Vec::new();
 
         for group in &state.model_groups {
             let mut models = Vec::new();
             for model in &group.models {
-                let status_text = if model.selected {
+                let status_text = if model.selected && state.runtime_state == RuntimeState::Loading
+                {
+                    "Loading…".to_string()
+                } else if model.selected {
                     "Selected".to_string()
                 } else if let Some(dl_label) = &model.download.label {
                     if model.download.phase != DownloadPhase::Completed {
@@ -218,6 +223,7 @@ impl DesktopPanelViewModel {
             height: PANEL_HEIGHT_PX,
             status_text,
             is_listening,
+            listening_enabled,
             group_label,
             models: all_models,
             model_groups,
@@ -285,6 +291,7 @@ impl SlintControlSurfaceAdapter {
     pub fn apply_to_panel(panel: &EcholetPanel, vm: &DesktopPanelViewModel) {
         panel.set_status_text(vm.status_text.as_str().into());
         panel.set_is_listening(vm.is_listening);
+        panel.set_listening_enabled(vm.listening_enabled);
         panel.set_preload_on_startup(vm.preload_on_startup);
         panel.set_idle_unload_minutes(vm.idle_unload_minutes.map(|m| m as i32).unwrap_or(-1));
         panel.set_idle_unload_label(vm.idle_unload_label.as_str().into());

@@ -86,10 +86,10 @@ pub fn project_runtime_state(
         RuntimeState::Listening
     } else if !has_active_model {
         RuntimeState::NoModel
-    } else if is_loaded {
-        RuntimeState::Ready
     } else if is_loading {
         RuntimeState::Loading
+    } else if is_loaded {
+        RuntimeState::Ready
     } else {
         RuntimeState::Unloaded
     }
@@ -675,6 +675,10 @@ mod tests {
         assert_eq!(
             project_runtime_state(true, true, false, false),
             RuntimeState::Ready
+        );
+        assert_eq!(
+            project_runtime_state(true, true, true, false),
+            RuntimeState::Loading
         );
         assert_eq!(
             project_runtime_state(true, true, false, true),

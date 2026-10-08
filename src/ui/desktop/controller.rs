@@ -417,6 +417,10 @@ impl DesktopPanelRuntime {
 
     /// Runs the Slint event loop on this owner thread until `DesktopPanelCommand::Shutdown`
     /// or `slint::quit_event_loop()` is called.
+    ///
+    /// The platform tray (macOS status item, Windows tray, Linux tray) is not a Slint
+    /// window. `run_event_loop()` returns when the last Slint window is hidden, which
+    /// happens as soon as the panel closes and leaves the tray process wedged.
     pub fn run(mut self) -> Result<(), Box<dyn std::error::Error>> {
         self.ensure_panel()?;
 
@@ -435,7 +439,7 @@ impl DesktopPanelRuntime {
             },
         );
 
-        let res = slint::run_event_loop();
+        let res = slint::run_event_loop_until_quit();
 
         ACTIVE_RUNTIME.with(|cell| {
             *cell.borrow_mut() = None;
