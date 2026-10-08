@@ -1,17 +1,12 @@
+//! Desktop (cpal) audio capture adapter for the platform-neutral contract in
+//! [`crate::capture`]. The neutral types are re-exported here so existing
+//! desktop imports (`crate::audio::{AudioChunk, AudioSource, AudioStarter}`)
+//! keep compiling.
+
+pub use crate::capture::{AudioChunk, AudioSource, AudioStarter};
+
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use crossbeam_channel::Sender;
-
-pub struct AudioChunk {
-    pub samples: Vec<f32>,
-    pub sample_rate: u32,
-}
-
-pub trait AudioSource: 'static {
-    // Dropping this instance stops and releases the underlying audio capture stream
-}
-
-pub type AudioStarter =
-    Box<dyn Fn(Sender<AudioChunk>) -> Result<Box<dyn AudioSource>, String>>;
 
 pub struct AudioInput {
     _stream: cpal::Stream,
@@ -69,10 +64,7 @@ impl AudioInput {
                 .build_input_stream(
                     &default_config.into(),
                     move |data: &[i16], _: &_| {
-                        let f32_data: Vec<f32> = data
-                            .iter()
-                            .map(|&s| s as f32 / 32768.0)
-                            .collect();
+                        let f32_data: Vec<f32> = data.iter().map(|&s| s as f32 / 32768.0).collect();
                         let mono = extract_primary_channel(&f32_data, channels);
                         let _ = tx.send(AudioChunk {
                             samples: mono,

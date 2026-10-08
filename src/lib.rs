@@ -3,6 +3,7 @@ pub mod app;
 pub mod asr;
 pub mod audio;
 pub mod beep;
+pub mod capture;
 pub mod config;
 pub mod diagnostics;
 pub mod diff;

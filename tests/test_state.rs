@@ -576,12 +576,18 @@ fn test_tick_safe_when_unloaded_even_if_corrupted_listening_flag() {
     // Force an invariant violation where listening is true but runtime is unloaded
     app.state.listening = true;
 
-    // Send audio chunk
+    // Send audio chunk into the legacy standing queue. Constructors now
+    // discard that standing receiver (active capture always owns a freshly
+    // created session queue), so the send fails — while tick() must remain
+    // safe and must not dereference the absent recognizer stream.
     let chunk = AudioChunk {
         samples: vec![0.0; 160],
         sample_rate: 16000,
     };
-    audio_tx.send(chunk).unwrap();
+    assert!(
+        audio_tx.send(chunk).is_err(),
+        "the legacy standing queue must be disconnected at construction"
+    );
 
     // tick() must not panic or dereference absent stream
     app.tick();

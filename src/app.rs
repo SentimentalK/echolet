@@ -1,9 +1,9 @@
 use crate::actions::AppAction;
 use crate::asr::{OnlineRecognizer, OnlineStream};
-use crate::audio::{AudioChunk, AudioInput, AudioSource, AudioStarter};
+use crate::audio::AudioInput;
 use crate::beep::{beep_start, beep_stop};
+use crate::capture::{AudioChunk, AudioSource, AudioStarter};
 use crate::config::EcholetConfig;
-use crate::diff::PartialSession;
 use crate::history::HistoryManager;
 use crate::models::download::DownloadStatus;
 use crate::models::{
@@ -11,12 +11,11 @@ use crate::models::{
 };
 use crate::paths;
 use crate::platform::{PlatformRuntime, PlatformView};
-use crate::session;
+use crate::session::SessionEngine;
 use crate::state::AppState;
 use crate::ui::control_surface::{
     build_control_surface_state, project_runtime_state, ControlSurfaceState, RuntimeState,
 };
-use chrono::{DateTime, Local};
 use crossbeam_channel::{unbounded, Receiver, Sender};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -57,19 +56,11 @@ pub struct App {
     pub history_manager: HistoryManager,
     stream: Option<OnlineStream>,
     _recognizer: Option<Arc<OnlineRecognizer>>,
-    session: PartialSession,
-    /// Issues the identity of each voice-capture session. Capture start issues
-    /// a fresh token; stop/switch/unload invalidates every prior token. The
-    /// live token is the sole admission check for transcript output.
-    /// See the module docs in `crate::session`.
-    session_issuer: session::SessionIssuer,
-    /// Token of the session currently allowed to deliver transcript.
-    /// `None` while no session may write text (Standby, model switching).
-    active_session_token: Option<session::SessionGeneration>,
-    /// Queue end of the currently active capture session. `None` while no
-    /// session owns a queue (Standby, or before the first capture starts).
-    /// Dropped — not merely drained — on stop so late producer sends fail.
-    audio_rx: Option<Receiver<AudioChunk>>,
+    /// The platform-neutral session engine: single owner of the active
+    /// session identity, capture queue receiver, partial diff window,
+    /// per-session revisions, delivered watermark, visible-history snapshot
+    /// and utterance start. See `crate::session`.
+    sessions: SessionEngine,
     /// Live capture source; dropping it releases the underlying stream/mic.
     _audio_source: Option<Box<dyn AudioSource>>,
     /// Producer factory; invoked on each capture start with a fresh
@@ -78,8 +69,6 @@ pub struct App {
     action_rx: Receiver<AppAction>,
     action_tx: Option<Sender<AppAction>>,
     platform: PlatformRuntime,
-    last_logged_text: String,
-    current_utterance_start: Option<DateTime<Local>>,
     idle_unload_deadline: Option<std::time::Instant>,
     idle_unload_model_id: Option<String>,
     /// True while the active recognizer is being created, so the platform UI
@@ -231,6 +220,11 @@ impl App {
         let history_manager = HistoryManager::new(config.history_enabled, history_dir);
 
         let (switch_tx, switch_rx) = unbounded();
+        // Legacy constructor input: historical APIs allowed pre-creating a
+        // standing audio queue. Active capture always owns a FRESHLY created
+        // queue (see `SessionEngine::begin`), so this receiver is discarded
+        // at construction and never shared across starts.
+        let _ = audio_rx;
         let mut app = Self {
             state: AppState::new(),
             config,
@@ -238,17 +232,12 @@ impl App {
             history_manager,
             stream: None,
             _recognizer: None,
-            session_issuer: session::SessionIssuer::new(),
-            active_session_token: None,
-            session: PartialSession::new(),
-            audio_rx,
+            sessions: SessionEngine::new(),
             _audio_source: audio_source,
             audio_starter,
             action_rx,
             action_tx,
             platform,
-            last_logged_text: String::new(),
-            current_utterance_start: None,
             idle_unload_deadline: None,
             idle_unload_model_id: None,
             model_loading: false,
@@ -444,12 +433,11 @@ impl App {
 
         self.cancel_idle_unload();
 
+        // Invalidate + detach the session BEFORE the runtime is replaced.
+        // The snapshot (if any) is dropped: unload never writes history.
+        // An unloaded model can never resurrect a stopped session.
+        self.sessions.cancel();
         self.finalize_current_segment();
-        self.session = PartialSession::new();
-        // An unloaded model can never resurrect a stopped session: any token
-        // captured against the old runtime is dead.
-        self.session_issuer.invalidate();
-        self.active_session_token = None;
 
         let had_runtime = self.stream.is_some() || self._recognizer.is_some();
         let t_unload = std::time::Instant::now();
@@ -481,14 +469,11 @@ impl App {
         self._audio_source.is_some()
     }
 
-    /// True when the token of the session now delivering transcript still
-    /// matches the live generation — i.e. no stop/switch/unload invalidated
-    /// it since capture began. Sole transcript admission check.
+    /// True when a live engine session exists — i.e. no stop/switch/unload
+    /// invalidated the token capture began with. Sole transcript admission
+    /// check; delegated to the session engine.
     pub fn is_session_generatively_current(&self) -> bool {
-        match (self.active_session_token, self.session_issuer.live()) {
-            (Some(token), Some(live)) => token.matches(live),
-            _ => false,
-        }
+        self.sessions.current_generation().is_some()
     }
 
     /// Single authority for the projected runtime residency/activity state.
@@ -636,36 +621,41 @@ impl App {
         }
         let t_model_ready = t_start.elapsed();
 
-        // 2. Begin a NEW session generation. From this point, every token a
-        // previous session captured is dead: no old callback may write a
-        // transcript or feed audio into this session. The old partial is
-        // finalized first so text already visible stays committed and the
-        // diff window resets; no new text is written here.
-        self.finalize_current_segment();
-        let token = self.session_issuer.begin();
-        self.active_session_token = Some(token);
-
-        // 3. Replace the online stream at the session boundary so no buffered
-        // waveform or endpoint state of the previous session can leak in.
+        // 2. Create a BRAND-NEW OnlineStream BEFORE arming any audio capture:
+        // no buffered waveform or endpoint state of a previous session can
+        // leak in, and a stream-creation failure leaves NO live engine
+        // session and NO microphone open.
         if !self.renew_recognizer_stream() {
             eprintln!(
                 "[ASR] Failed to create a fresh stream for the new session. Remaining in Standby."
             );
-            self.session_issuer.invalidate();
-            self.active_session_token = None;
             self.schedule_idle_unload();
             return None;
         }
 
-        // 4. Open microphone on demand with a BRAND-NEW audio queue. Any audio
-        // a producer from an older session sends either fails (its queue was
-        // disconnected at stop) or lands in the old queue's detached receiver.
+        // 3. Open a NEW engine session: fresh token, fresh audio queue, empty
+        // diff window. From this point every identity a previous session
+        // captured is dead.
         let t_mic_start = std::time::Instant::now();
-        let (audio_tx, audio_rx) = session::new_session_audio_queue();
+        let (_token, audio_tx) = match self.sessions.begin() {
+            Ok(begun) => begun,
+            Err(err) => {
+                eprintln!(
+                    "[Session] Could not begin a voice session: {}. Remaining in Standby.",
+                    err
+                );
+                self.schedule_idle_unload();
+                return None;
+            }
+        };
+
+        // 4. Arm the microphone on demand with THAT session's queue sender.
+        // Any audio a producer from an older session sends either fails (its
+        // queue was disconnected at stop) or lands in the old queue's
+        // detached receiver.
         match (self.audio_starter)(audio_tx) {
             Ok(source) => {
                 self._audio_source = Some(source);
-                self.audio_rx = Some(audio_rx);
                 println!("[Audio] Microphone capture started.");
             }
             Err(err) => {
@@ -673,8 +663,7 @@ impl App {
                     "[Audio] Failed to open microphone: {}. Remaining in Standby.",
                     err
                 );
-                self.session_issuer.invalidate();
-                self.active_session_token = None;
+                self.sessions.cancel();
                 self.schedule_idle_unload();
                 return None;
             }
@@ -716,53 +705,51 @@ impl App {
     }
 
     pub fn stop_listening(&mut self) {
-        if !self.state.listening {
-            return;
+        if !self.state.listening && !self.sessions.is_active() {
+            return; // idempotent: nothing is live to stop
         }
 
-        // 1. Invalidate the session generation BEFORE releasing capture. Any
-        // callback still in flight is from here on unable to source a
-        // transcript write, and Stop is idempotent: a second call sees
-        // listening == false and returns.
-        self.session_issuer.invalidate();
-        self.active_session_token = None;
+        // 1. FIRST cancel the engine session: the generation is invalidated
+        // and the session queue receiver is DROPPED (late producer sends
+        // fail; buffered audio is released with it). The already-visible
+        // utterance — including the current partial — comes back as a
+        // snapshot for history. No final decode/append ever happens here,
+        // and visible text is NEVER deleted.
+        let utterance = self.sessions.cancel();
 
-        // 2. Flush any pending finalized text to history before resetting ASR.
-        // Text already visible is NEVER deleted and no extra final is written.
-        if !self.last_logged_text.is_empty() {
-            let end_time = Local::now();
-            let start_time = self.current_utterance_start.take().unwrap_or(end_time);
+        // 2. Project standby state...
+        self.state.listening = false;
+
+        // 3. ...release the microphone BEFORE any history I/O or ASR reset:
+        // dropping the source stops the cpal stream and hardware device.
+        self._audio_source = None;
+        println!("[Audio] Microphone capture stopped and released.");
+
+        // 4. Reset the resident stream (no final decode/result), keeping the
+        // loaded recognizer, prewarm and current model untouched.
+        if let Some(ref stream) = self.stream {
+            stream.reset();
+        }
+
+        // 5. Project the stopped status and beep.
+        beep_stop();
+        self.platform.handle.set_listening(false);
+        println!("\n[Action] >>> Listening STOPPED (Standby) <<<\n");
+
+        // 6. History I/O happens ONLY after mic release and state
+        // projection: first the already-visible utterance as completed
+        // (with the engine-captured timestamps), then the existing flush.
+        if let Some(completed) = utterance {
             if let Some(ref active_id) = self.model_manager.active_model_id {
                 self.history_manager.on_utterance(
-                    start_time,
-                    end_time,
-                    &self.last_logged_text,
+                    completed.start,
+                    completed.end,
+                    &completed.text,
                     active_id,
                 );
             }
         }
         self.history_manager.flush();
-
-        // 3. Finalize current segment: commits the visible partial (diff
-        // window resets) WITHOUT flushing an extra final on stop.
-        self.finalize_current_segment();
-
-        // 4. Drop audio capture stream (releases cpal::Stream & hardware device)
-        self._audio_source = None;
-
-        // 5. Take the session's queue and drop its receiver after draining:
-        // any chunk produced after this point (a late callback racing the
-        // capture release) fails to send instead of entering a future session.
-        if let Some(rx) = self.audio_rx.take() {
-            while rx.try_recv().is_ok() {}
-        }
-        println!("[Audio] Microphone capture stopped and released.");
-
-        // 6. Transition state
-        self.state.listening = false;
-        beep_stop();
-        self.platform.handle.set_listening(false);
-        println!("\n[Action] >>> Listening STOPPED (Standby) <<<\n");
 
         // 7. Schedule unload according to policy
         self.schedule_idle_unload();
@@ -802,14 +789,23 @@ impl App {
         true
     }
 
-    /// Finalizes the current partial utterance without altering the listening state.
+    /// Finalizes the current partial utterance without altering the listening
+    /// state. Delegates the diff-window reset to the session engine; the
+    /// completed snapshot (if any) is only returned to callers elsewhere:
+    /// this boundary itself never writes text or persists history. With no
+    /// active session it only resets the resident stream — it MUST NOT
+    /// produce any editor write.
     pub fn finalize_current_segment(&mut self) {
-        self.session.finalize();
+        if let Some(token) = self.sessions.current_generation() {
+            if self.sessions.finish_segment(token).is_some() {
+                crate::log::log("INFO", "current segment finalized");
+            } else {
+                crate::log::log("INFO", "current segment window reset (empty)");
+            }
+        }
         if let Some(ref stream) = self.stream {
             stream.reset();
         }
-        self.last_logged_text.clear();
-        self.current_utterance_start = None;
     }
 
     /// Starts a model switch and returns immediately.
@@ -943,13 +939,10 @@ impl App {
                 }
                 self._recognizer = Some(recognizer);
                 self.stream = Some(stream);
-                self.session.finalize();
-                self.session = PartialSession::new();
                 // The old runtime is released; no session may claim it again.
-                self.session_issuer.invalidate();
-                self.active_session_token = None;
-                self.last_logged_text.clear();
-                self.current_utterance_start = None;
+                // Cancel invalidates identity, drops the queue receiver and
+                // resets the diff window/visible snapshot in one step.
+                self.sessions.cancel();
                 self.schedule_idle_unload();
                 self.notify_models();
                 crate::log::log("INFO", &format!("model switch ready: {}", payload.model_id));
@@ -1035,13 +1028,10 @@ impl App {
 
             self._recognizer = Some(new_rec);
             self.stream = Some(new_stream);
-            self.session.finalize();
-            self.session = PartialSession::new();
             // The old runtime is released; no session may claim it again.
-            self.session_issuer.invalidate();
-            self.active_session_token = None;
-            self.last_logged_text.clear();
-            self.current_utterance_start = None;
+            // Cancel invalidates identity, drops the queue receiver and
+            // resets the diff window/visible snapshot in one step.
+            self.sessions.cancel();
 
             let _ = self.model_manager.set_active_model(model_id);
             self.config.selected_model = model_id.to_string();
@@ -1233,6 +1223,12 @@ impl App {
             }
             AppAction::StopListening => self.stop_listening(),
             AppAction::Quit => {
+                // Quitting while listening uses the same stop/cancel path so
+                // no late transcript can escape and history is committed
+                // before shutdown; normal Quit surface is unchanged.
+                if self.state.listening {
+                    self.stop_listening();
+                }
                 println!("\n[App] Quit action received. Exiting...");
                 self.history_manager.flush();
                 self.state.running = false;
@@ -1336,84 +1332,82 @@ impl App {
             }
         }
 
-        // 2. Process incoming audio chunks. Chunks are consumed exclusively
-        // from this session's queue; only a generatively-current session may
-        // feed the recognizer.
+        // 2. Process incoming audio chunks. Only the session engine's live
+        // generation is drained; a stale token has no side effects and
+        // feeds nothing to any recognizer.
         let mut got_audio = false;
-        if let Some(ref audio_rx) = self.audio_rx {
-            while let Ok(chunk) = audio_rx.try_recv() {
-                if self.state.listening
-                    && self.is_session_generatively_current()
-                    && !chunk.samples.is_empty()
-                {
-                    if let Some(ref stream) = self.stream {
-                        stream.accept_waveform(chunk.sample_rate as i32, &chunk.samples);
-                        got_audio = true;
-                    } else {
-                        eprintln!(
-                            "[ASR] Invariant violation: Listening is true but stream is absent."
-                        );
-                    }
-                }
+        if let Some(token) = self.sessions.current_generation() {
+            if let Some(stream) = self.stream.as_mut() {
+                // Disjoint field borrows: the session receiver drains into
+                // the resident recognizer stream.
+                got_audio = self.sessions.drain_audio(token, |chunk| {
+                    stream.accept_waveform(chunk.sample_rate as i32, &chunk.samples);
+                });
+            } else {
+                // Invariant guard: consume without feeding so a broken state
+                // can never accumulate poisoned waveform for future sessions.
+                eprintln!("[ASR] Invariant violation: live session but stream is absent.");
+                got_audio = false;
+                self.sessions.drain_audio(token, |_| {});
             }
         }
 
-        // 3. Decode ASR and inject diffs if a live, generatively-current session
-        // has audio. The revalidation below is the single admission choke
-        // point for transcript delivery: on the desktop tick thread a stop
-        // can only complete between ticks, but future adapters (mobile
-        // keyboards, threaded callbacks) share the same contract — see
-        // `crate::session` for the binding rules.
-        let session_valid = self.is_session_generatively_current();
-        if self.state.listening && session_valid && got_audio {
-            if let Some(ref stream) = self.stream {
-                stream.decode_all_ready();
+        // 3. Decode ASR and inject diffs if the live session accepted
+        // nonempty audio. Admission goes through the engine: transactional
+        // generation AND revision revalidation happens BEFORE any editor
+        // write (the same contract a future mobile callback must honor —
+        // see `crate::session`).
+        if let (Some(token), Some(ref stream), true) = (
+            self.sessions.current_generation(),
+            self.stream.as_ref(),
+            got_audio,
+        ) {
+            stream.decode_all_ready();
 
-                let current_text = stream.get_result();
-                let is_endpoint = stream.is_endpoint();
+            let current_text = stream.get_result();
+            let is_endpoint = stream.is_endpoint();
 
-                // Track utterance start timestamp when first non-empty text appears
-                if !current_text.is_empty() && self.current_utterance_start.is_none() {
-                    self.current_utterance_start = Some(Local::now());
+            if let Some(delta) = self.sessions.update_partial(token, &current_text) {
+                if !delta.recognized_text.is_empty() {
+                    println!(
+                        "[Typing] Partial: \"{}\" | Diff: (BS: {}, Suffix: \"{}\")",
+                        delta.recognized_text, delta.diff.backspaces, delta.diff.new_suffix
+                    );
                 }
 
-                if let Some(diff) = self.session.update(&current_text) {
-                    if !current_text.is_empty() && current_text != self.last_logged_text {
-                        println!(
-                            "[Typing] Partial: \"{}\" | Diff: (BS: {}, Suffix: \"{}\")",
-                            current_text, diff.backspaces, diff.new_suffix
-                        );
-                        self.last_logged_text = current_text.clone();
-                    }
-
+                // Admission gate first: a rejected (stale/out-of-order/dup)
+                // event is never allowed to reach the injector.
+                if self.sessions.accept_delivery(&delta) {
                     // Inject into active focused window via platform text injector
                     self.platform
                         .injector
-                        .apply_diff(diff.backspaces, &diff.new_suffix);
+                        .apply_diff(delta.diff.backspaces, &delta.diff.new_suffix);
+                } else {
+                    eprintln!(
+                        "[Session] Transcript delivery rejected (stale/out-of-order); diff dropped."
+                    );
                 }
+            }
 
-                // Endpoint commits current sentence segment while listening state remains active.
-                if is_endpoint {
-                    if !self.last_logged_text.is_empty() {
-                        println!(
-                            "[Endpoint] Finalized sentence: \"{}\" (Listening stays active)",
-                            self.last_logged_text
+            // Endpoint commits current sentence segment while listening remains active.
+            if is_endpoint {
+                if let Some(completed) = self.sessions.finish_segment(token) {
+                    println!(
+                        "[Endpoint] Finalized sentence: \"{}\" (Listening stays active)",
+                        completed.text
+                    );
+                    if let Some(ref active_id) = self.model_manager.active_model_id {
+                        self.history_manager.on_utterance(
+                            completed.start,
+                            completed.end,
+                            &completed.text,
+                            active_id,
                         );
-                        let end_time = Local::now();
-                        let start_time = self.current_utterance_start.take().unwrap_or(end_time);
-                        if let Some(ref active_id) = self.model_manager.active_model_id {
-                            self.history_manager.on_utterance(
-                                start_time,
-                                end_time,
-                                &self.last_logged_text,
-                                active_id,
-                            );
-                        }
                     }
-                    self.finalize_current_segment();
                 }
-            } else {
-                eprintln!("[ASR] Invariant violation: Listening is true but stream is absent during decode.");
+                if let Some(ref stream) = self.stream {
+                    stream.reset();
+                }
             }
         }
 
