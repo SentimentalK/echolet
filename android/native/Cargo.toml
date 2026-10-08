@@ -1,0 +1,22 @@
+[package]
+name = "echolet_android"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "echolet_android"
+# `cdylib` builds the APK-loaded libecholet_android.so; `rlib` exists only so
+# host-side `cargo test` can link the platform-neutral runtime logic for the
+# focused JNI-runtime unit tests. Only the cdylib artifact ships in the APK.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+echolet = { path = "../.." }
+serde_json = "1.0"
+crossbeam-channel = "0.5"
+
+# The JNI binding layer compiles only for the Android target; the runtime core
+# underneath stays platform-neutral so the same logic is unit-testable on the
+# host against the real pinned model fixtures.
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21"

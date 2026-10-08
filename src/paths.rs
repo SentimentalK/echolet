@@ -63,6 +63,21 @@ pub fn bundled_models_dir() -> PathBuf {
     resource_root().join("models")
 }
 
+/// Resolves the user home directory holding `~/.echolet`.
+///
+/// Android has no meaningful $HOME; the ECHOLET_* overrides remain authoritative
+/// and the `dirs` crate stays desktop-only.
+#[cfg(not(target_os = "android"))]
+fn home_dir() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from(env::var("HOME").unwrap_or_else(|_| ".".into())))
+}
+
+#[cfg(target_os = "android")]
+fn home_dir() -> PathBuf {
+    PathBuf::from(env::var("HOME").unwrap_or_else(|_| ".".into()))
+}
+
 /// Resolves the consolidated Echolet user data directory (~/.echolet).
 /// Override via ECHOLET_USER_HOME or ECHOLET_HOME for tests / isolated environments.
 pub fn echolet_home_dir() -> PathBuf {
@@ -72,9 +87,7 @@ pub fn echolet_home_dir() -> PathBuf {
     if let Ok(env_home) = env::var("ECHOLET_HOME") {
         return PathBuf::from(env_home);
     }
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from(env::var("HOME").unwrap_or_else(|_| ".".into())))
-        .join(".echolet")
+    home_dir().join(".echolet")
 }
 
 /// Consolidated user configuration path: ~/.echolet/config.json
@@ -93,6 +106,10 @@ pub fn history_dir() -> PathBuf {
 }
 
 /// Backward compatibility search paths for migrating legacy configurations.
+///
+/// Android has no legacy desktop configuration to migrate; the search list is
+/// empty because the `dirs` crate is desktop-only.
+#[cfg(not(target_os = "android"))]
 pub fn legacy_config_paths() -> Vec<PathBuf> {
     let mut paths = Vec::new();
     if let Some(cfg) = dirs::config_dir() {
@@ -102,6 +119,11 @@ pub fn legacy_config_paths() -> Vec<PathBuf> {
         paths.push(data.join("echolet/config.json"));
     }
     paths
+}
+
+#[cfg(target_os = "android")]
+pub fn legacy_config_paths() -> Vec<PathBuf> {
+    Vec::new()
 }
 
 pub fn default_model_dir() -> PathBuf {

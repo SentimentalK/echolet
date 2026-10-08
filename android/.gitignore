@@ -8,3 +8,7 @@ captures/
 .externalNativeBuild/
 .cxx/
 *.hprof
+
+# Phase 0-A native slice
+app/build/generated/jniLibs/
+native/target/
