@@ -122,6 +122,12 @@ object RealMicOsRecordFactory : MicOsRecordFactory {
  */
 class AndroidMicCapture(
     private val factory: MicOsRecordFactory = RealMicOsRecordFactory,
+    /**
+     * Bounded wait for a previous lease's teardown to settle before a new
+     * start fails closed. Production default is unchanged (5000 ms); tests
+     * may shrink it to keep regression suites fast.
+     */
+    private val closeSettleTimeoutMillis: Long = CLOSE_SETTLE_TIMEOUT_MILLIS,
 ) : MicCapture {
     private enum class Phase { FRESH, STARTING, ACTIVE, CLOSED }
 
@@ -141,8 +147,6 @@ class AndroidMicCapture(
 
         /** Bounded wait for an in-flight teardown to settle, then BLOCKED. */
         const val CLOSE_SETTLE_TIMEOUT_MILLIS = 5_000L
-        private const val CLOSE_SETTLE_TIMEOUT_NANOS =
-            CLOSE_SETTLE_TIMEOUT_MILLIS * 1_000_000
         private const val CLOSE_SETTLE_STEP_NANOS = 50_000_000L
     }
 
@@ -156,19 +160,43 @@ class AndroidMicCapture(
             // OS teardown hangs, the bounded wait expires and the caller
             // surfaces BLOCKED instead of starting over an unsettled or
             //possibly live recorder.
-            var remaining = CLOSE_SETTLE_TIMEOUT_NANOS
-            while (phase == Phase.CLOSED && remaining > 0) {
+            // The wait is bounded by a MONOTONIC deadline taken once at gate
+            // entry: System.nanoTime() is immune to wall-clock jumps, and
+            // spurious notifyAll wakeups re-read the remaining nanos instead
+            // of decrementing a counter, so the deadline never shrinks.
+            val remaining = closeSettleTimeoutMillis * 1_000_000
+            val deadline = System.nanoTime() + remaining
+            while (phase == Phase.CLOSED) {
                 val step = CLOSE_SETTLE_STEP_NANOS
-                try {
-                    (lock as java.lang.Object).wait(step, (step % 1_000_000).toInt())
-                } catch (_: InterruptedException) {
-                    Thread.currentThread().interrupt()
+                val remainingNanos = deadline - System.nanoTime()
+                if (remainingNanos <= 0) {
+                    break
                 }
-                remaining -= step
+                val stepNanos = minOf(remainingNanos, step)
+                try {
+                    // Object.wait's FIRST parameter is MILLISECONDS: split the
+                    // nanosecond wait into ms + remainder so the intended
+                    // 50 ms step cannot be read as 50,000,000 ms per wake.
+                    (lock as java.lang.Object).wait(
+                        stepNanos / 1_000_000,
+                        (stepNanos % 1_000_000).toInt(),
+                    )
+                } catch (_: InterruptedException) {
+                    // Interrupted while the previous teardown is unsettled:
+                    // preserve the interrupted status and FAIL CLOSED
+                    // immediately instead of re-looping, which would instantly
+                    // rethrow InterruptedException on every guarded wait.
+                    Thread.currentThread().interrupt()
+                    throw IllegalStateException(
+                        "mic capture start interrupted; previous teardown unsettled"
+                    )
+                }
             }
             if (phase == Phase.CLOSED) {
                 // Teardown did not settle in time: do NOT start a second
                 // recorder over a possibly still-live or half-released one.
+                // Neither force-release the uncertain previous one nor open a
+                // replacement; once settled, a later fresh start works.
                 throw IllegalStateException(
                     "mic capture still closing; previous teardown unsettled"
                 )

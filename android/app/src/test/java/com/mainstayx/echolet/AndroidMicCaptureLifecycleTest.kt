@@ -8,7 +8,9 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Plain-JVM tests of the REAL [AndroidMicCapture] lifecycle state machine
@@ -437,6 +439,214 @@ class AndroidMicCaptureLifecycleTest {
         capture.stopAndRelease()
         assertEquals(1, second.haltCount.get())
         assertEquals(1, second.freeCount.get())
+        assertNull(capture.readChunkShorts())
+    }
+
+    /**
+     * Design E(8) hung-teardown regression: with the PREVIOUS recorder's
+     * halt parked FOREVER (no notifier can fire), a fresh start must still
+     * fail closed at the BOUNDED settlement deadline — the actionable
+     * unsettled-close error around the deadline (monotonic, unit-correct
+     * Object.wait), never 13.9-hour nanoseconds-as-milliseconds-style hangs,
+     * never a second concurrent OS recorder, and once the parked halt is
+     * finally released the SAME instance recovers to a full clean cycle.
+     */
+    @Test
+    fun start_during_unsettled_close_times_out_fail_closed_without_second_mic() {
+        val factory = RecordingFactory()
+        val settleTimeoutMillis = 150L
+        val capture = AndroidMicCapture(factory, closeSettleTimeoutMillis = settleTimeoutMillis)
+        capture.start()
+        val port = awaitPort(factory, index = 0)
+        assertEquals(1, port.startCount.get())
+
+        // A is ACTIVE; park the OS teardown INSIDE halt, so after Stop A is
+        // CLOSED but NOT yet freed and nothing can notify a settling start.
+        port.haltGate = CountDownLatch(1)
+        val stopErrors = arrayOf<Throwable?>(null)
+        val stopper = Thread({
+            try {
+                capture.stopAndRelease()
+            } catch (t: Throwable) {
+                stopErrors[0] = t
+            }
+        }, "capture-stop-hung-teardown").apply {
+            isDaemon = true
+            start()
+        }
+        assertTrue(port.haltEntered.await(2, TimeUnit.SECONDS)) // halt IS parked
+
+        val startErrors = arrayOf<Throwable?>(null)
+        val startElapsed = AtomicLong(-1)
+        val starter = Thread({
+            val began = System.nanoTime()
+            try {
+                capture.start()
+            } catch (t: Throwable) {
+                startErrors[0] = t
+            } finally {
+                startElapsed.set((System.nanoTime() - began) / 1_000_000)
+            }
+        }, "capture-start-vs-hung-teardown").apply {
+            isDaemon = true
+            start()
+        }
+
+        try {
+            // Deterministic parking proof: the deferred start sits inside
+            // the settlement wait and NEVER builds a concurrent recorder.
+            val parkedMark = System.currentTimeMillis() + 2000
+            while (!((starter.state == Thread.State.TIMED_WAITING ||
+                    starter.state == Thread.State.WAITING) &&
+                    synchronized(factory) { factory.built.size == 1 })
+            ) {
+                if (System.currentTimeMillis() > parkedMark) {
+                    throw AssertionError(
+                        "deferred start did not park in the settlement wait: " +
+                            "state=${starter.state} built=${factory.built.size}"
+                    )
+                }
+                assertNull(startErrors[0]) // not prematurely failed while parked
+                Thread.sleep(5)
+            }
+
+            starter.join(2000) // prints baseline hang instead of sleeping 13.9 h
+            assertTrue("start thread still hung past bounded join", !starter.isAlive)
+            val unsettled = startErrors[0]
+            assertTrue(
+                "expected the unsettled-close failure, got $unsettled",
+                unsettled is IllegalStateException
+            )
+            assertTrue(
+                "unsettled-close failure must stay actionable: $unsettled",
+                unsettled?.message?.contains("still closing") == true
+            )
+            // KEY bounded-deadline assertion: measured MONOTONIC elapsed time
+            // must be AT the deadline (not early, not unbounded).
+            val elapsedMillis = startElapsed.get()
+            assertTrue(
+                "start released BEFORE the bounded deadline: $elapsedMillis ms",
+                elapsedMillis >= 100
+            )
+            assertTrue(
+                "start ignored the bounded deadline: $elapsedMillis ms",
+                elapsedMillis <= 2000
+            )
+        } finally {
+            port.haltGate?.countDown() // ALWAYS unblock the parked halt
+        }
+
+        stopper.join(2000)
+        assertTrue(!stopper.isAlive)
+        assertNull(stopErrors[0])
+        assertEquals(1, factory.built.size) // B built NO concurrent recorder
+        assertEquals(1, port.startCount.get()) // B never started
+        awaitFreeCount(port, 1) // A freed EXACTLY once after its halt unblocked
+
+        // Post-settle recovery: a LATER fresh start succeeds on the SAME
+        // instance at the exact expected port index.
+        capture.start()
+        val next = awaitPort(factory, index = 1)
+        assertEquals(2, factory.built.size)
+        assertEquals(1, next.startCount.get())
+        capture.stopAndRelease()
+        assertEquals(1, next.haltCount.get())
+        assertEquals(1, next.freeCount.get())
+        assertNull(capture.readChunkShorts())
+    }
+
+    /**
+     * Design E(9) optional belt: an interrupt arriving during the CLOSED
+     * settlement wait (BEFORE any deadline) must fail closed PROMPTLY
+     * through the actionable unsettled-close exception (not a busy
+     * InterruptedException loop), PRESERVE the interrupted status, build no
+     * second recorder, and leave the instance recoverable once the hovered
+     * teardown settles.
+     */
+    @Test
+    fun interrupted_during_unsettled_close_wait_fails_closed_without_second_mic() {
+        val factory = RecordingFactory()
+        val capture = AndroidMicCapture(factory) // production 5 s deadline
+        capture.start()
+        val port = awaitPort(factory, index = 0)
+        assertEquals(1, port.startCount.get())
+
+        port.haltGate = CountDownLatch(1) // teardown parks INSIDE halt
+        val stopErrors = arrayOf<Throwable?>(null)
+        val stopper = Thread({
+            try {
+                capture.stopAndRelease()
+            } catch (t: Throwable) {
+                stopErrors[0] = t
+            }
+        }, "capture-stop-interrupted-wait").apply {
+            isDaemon = true
+            start()
+        }
+        assertTrue(port.haltEntered.await(2, TimeUnit.SECONDS)) // halt IS parked
+
+        val startErrors = arrayOf<Throwable?>(null)
+        val interruptedOnExit = AtomicBoolean(false)
+        val starter = Thread({
+            try {
+                capture.start()
+            } catch (t: Throwable) {
+                startErrors[0] = t
+            } finally {
+                interruptedOnExit.set(Thread.currentThread().isInterrupted)
+            }
+        }, "capture-start-interrupted-wait").apply {
+            isDaemon = true
+            start()
+        }
+
+        try {
+            val parkedMark = System.currentTimeMillis() + 2000
+            while (!((starter.state == Thread.State.TIMED_WAITING ||
+                    starter.state == Thread.State.WAITING) &&
+                    synchronized(factory) { factory.built.size == 1 })
+            ) {
+                if (System.currentTimeMillis() > parkedMark) {
+                    throw AssertionError(
+                        "deferred start did not park in the settlement wait: " +
+                            "state=${starter.state} built=${factory.built.size}"
+                    )
+                }
+                assertNull(startErrors[0])
+                Thread.sleep(5)
+            }
+
+            starter.interrupt() // arrives BEFORE the 5 s deadline
+            starter.join(1000) // must fail closed PROMPTLY, not at 5 s
+            assertTrue("interrupted start thread still hung", !starter.isAlive)
+            val unsettled = startErrors[0]
+            assertTrue(
+                "expected a fail-closed exception, got $unsettled",
+                unsettled is IllegalStateException
+            )
+            assertTrue(
+                "interrupt status must be preserved on exit",
+                interruptedOnExit.get()
+            )
+            // No concurrent recorder was built by the interrupted start.
+            assertEquals(1, synchronized(factory) { factory.built.size })
+        } finally {
+            port.haltGate?.countDown() // ALWAYS unblock the parked halt
+        }
+
+        stopper.join(2000)
+        assertTrue(!stopper.isAlive)
+        assertNull(stopErrors[0])
+        awaitFreeCount(port, 1)
+
+        // Recovery: after the settle the SAME instance restarts completely.
+        capture.start()
+        val next = awaitPort(factory, index = 1)
+        assertEquals(2, factory.built.size)
+        assertEquals(1, next.startCount.get())
+        capture.stopAndRelease()
+        assertEquals(1, next.haltCount.get())
+        assertEquals(1, next.freeCount.get())
         assertNull(capture.readChunkShorts())
     }
 
