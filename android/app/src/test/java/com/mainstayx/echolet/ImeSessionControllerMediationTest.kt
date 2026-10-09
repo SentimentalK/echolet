@@ -1261,6 +1261,7 @@ class ImeSessionControllerMediationTest {
             listOf("open:$handleA", "close:$handleA", "open:$handleB"),
             native.events,
         )
+        assertEquals(2, harness.mic.startCount()) // A once + B once; no extras
 
         harness.controller.stop("teardown")
         parkB.countDown()
@@ -1269,6 +1270,11 @@ class ImeSessionControllerMediationTest {
         drainLane(harness)
         assertTrue(harness.mic.allReleasedExactlyOnce())
         assertTrue(native.closedHandles.containsAll(native.openedHandles))
+        // Exactly-once closes across normal(teardown) stop + hidden-based auto path.
+        assertEquals(
+            listOf("open:$handleA", "close:$handleA", "open:$handleB", "close:$handleB"),
+            native.events,
+        )
     }
 
     private fun editsVisible(
@@ -1318,5 +1324,168 @@ class ImeSessionControllerMediationTest {
 
         endLane(harness)
         assertTrue(laneDied(laneThread))
+    }
+
+    /**
+     * Unified close contract / Design 3(1)+(5): an explicit user Stop whose
+     * queued native close THROWS on the serial lane must block the next
+     * generation BEFORE native.open and BEFORE mic.start (BLOCKED, text of A
+     * preserved and finalized exactly once, partial never duplicated, no
+     * blind retry of the same handle) — and repeated Stop/hide cycles must
+     * NEVER erase the sticky fault nor repeat A's close.
+     */
+    @Test
+    fun stop_close_throw_blocks_next_generation_and_repeated_stop_keeps_fault() {
+        val harness = sequencedHarness()
+        val tokenA = EditorToken("A")
+        val native = harness.native
+
+        native.planOpen(listOf(partial(1L, "甲文")))
+        val park = harness.mic.planReadsThenPark(1)
+        val laneThread = drainLaneInThread(harness)
+        startVisibility(harness, tokenA)
+        awaitCondition("A reader parked") { harness.mic.parkedInRead }
+        val handleA = native.openedHandles.single()
+        val editorA = editors.getValue(tokenA)
+        assertEquals("甲文", editorA.visible())
+        val leaseA = harness.controller.currentLease()
+        assertNotNull(leaseA)
+
+        // Explicit user Stop: the queued stop close will THROW exactly once.
+        native.throwOnClose = true
+        harness.controller.stop("user stop")
+        park.countDown()
+        endLane(harness)
+        assertTrue(laneDied(laneThread))
+        drainLane(harness) // close runs ON the lane (side thread or here), throws
+
+        assertEquals(listOf("open:$handleA", "close:$handleA"), native.events)
+        assertEquals(1, native.closeAttempts.count { it == handleA }) // thrown once
+        assertFalse(native.closedHandles.contains(handleA)) // not silently freed
+        assertEquals(ImeSessionModel.ImeState.PAUSED, harness.model.currentState)
+        assertEquals("甲文", editorA.visible()) // committed exactly once
+        assertEquals(1, editorA.finishCount)
+        assertEquals(1, editorA.setCount)
+        assertEquals(1, harness.mic.startCount()) // only A ever started
+        assertTrue(harness.mic.allReleasedExactlyOnce())
+
+        // User presses Start for generation B: open MUST be refused.
+        // Re-arm the closed lane so B's queued generation task can execute.
+        harness.sequencedLane?.openForSession()
+        val epochBefore = harness.model.currentEpoch()
+        harness.controller.onControlTap(ready = true, blockedReason = null, ic = tokenA)
+        drainLane(harness)
+        assertTrue(harness.model.currentEpoch() > epochBefore)
+        assertEquals(1, native.openedHandles.size) // NO open:B
+        assertEquals(1, native.closeAttempts.size) // NO blind retry/close:B
+        assertEquals(1, harness.mic.startCount()) // B mic NEVER started
+        assertEquals("甲文", editors.getValue(tokenA).visible()) // still exact
+
+        // (5) Repeated Stop cannot clear the sticky fault or re-close A.
+        harness.controller.stop("repeat stop")
+        drainLane(harness)
+        harness.controller.stop("repeat stop again")
+        drainLane(harness)
+        assertEquals(1, native.closeAttempts.size) // never re-close handleA
+        assertEquals(1, native.openedHandles.size)
+
+        // (5) Hide/reopen auto-start also stays blocked with zero new opens.
+        harness.controller.onWindowHidden()
+        harness.controller.onWindowShown()
+        val tokenC = EditorToken("C")
+        harness.controller.onInputStarted(info(), restarting = false, viewVisible = true)
+        activeEditorToken = tokenC
+        harness.controller.onInputViewStarted(info(), tokenC, ready = true, blockedReason = null)
+        drainLane(harness)
+        assertEquals(ImeSessionModel.ImeState.BLOCKED, harness.model.currentState)
+        assertEquals(1, native.openedHandles.size) // C NEVER opened
+        assertEquals(1, native.closeAttempts.size) // still exactly one attempt
+        assertEquals("甲文", editors.getValue(tokenA).visible())
+        assertEquals("", editsVisible(harness, tokenC)) // no text for blocked C
+
+        // Old A's delayed failure callback cannot affect anything now.
+        assertTrue(harness.model.generationFailed(leaseA!!, "late A callback").noSideEffects)
+    }
+
+    /**
+     * Unified close contract / Design 3(3): a handle returned by native.open
+     * whose publication is REFUSED (competing owner) is an UNOWNED stale
+     * handle; when closing it throws, the sticky fault must block the next
+     * Start before native.open rather than reopening against a possible
+     * orphan — and the foreign owner's handle is never touched.
+     */
+    @Test
+    fun publication_refused_unowned_close_throw_blocks_later_start() {
+        val harness = sequencedHarness()
+        val tokenA = EditorToken("A")
+        val tokenB = EditorToken("B")
+        val native = harness.native
+
+        native.throwOnClose = true // the refused handle's close throws once
+        native.planOpen(emptyList())
+        // A competing owner occupies the registry so A's handle is refused.
+        val foreignLease = ImeSessionModel.EditorLease(-1, "foreign", 1, 1, 99)
+        harness.controller.plantNativeOwnerForTest(foreignLease, 777L)
+        assertFalse(harness.controller.clearedNativeOwnerForTest())
+
+        startVisibility(harness, tokenA)
+        val leaseA = harness.controller.currentLease()
+        assertNotNull(leaseA)
+        drainLane(harness) // generation task: open → publish refused → close THROWS
+
+        val handleA = native.openedHandles.single()
+        assertEquals(listOf("open:$handleA", "close:$handleA"), native.events)
+        assertEquals(listOf(handleA), native.closeAttempts.toList())
+        assertFalse(native.closedHandles.contains(handleA))
+        assertEquals(0, harness.mic.startCount()) // refused before mic.start
+        assertTrue(harness.model.isLeaseCurrent(leaseA)) // refusal only
+        assertEquals(0, native.closeAttempts.count { it == 777L }) // foreign untouched
+        assertFalse(native.closedHandles.contains(777L))
+
+        // Fence A, then Start B: B must be BLOCKED before native.open.
+        harness.controller.stop("fence refused A")
+        drainLane(harness)
+        val epochBefore = harness.model.currentEpoch()
+        harness.controller.onControlTap(ready = true, blockedReason = null, ic = tokenB)
+        drainLane(harness)
+        assertEquals(ImeSessionModel.ImeState.BLOCKED, harness.model.currentState)
+        assertTrue(harness.model.currentEpoch() > epochBefore)
+        assertEquals(1, native.openedHandles.size) // B NEVER opens (no orphan)
+        assertEquals(1, native.closeAttempts.size) // exactly the thrown close
+        assertEquals(0, harness.mic.startCount())
+        assertEquals(0, native.closeAttempts.count { it == 777L })
+        assertTrue(harness.mic.allReleasedExactlyOnce())
+        assertEquals("", editsVisible(harness, tokenA)) // never projected
+        assertEquals("", editsVisible(harness, tokenB))
+    }
+
+    /**
+     * Design 2 destruction: the destroy sweep's close follows the SAME
+     * unified contract — a throwing sweep close records the sticky fault and
+     * NEVER crashes the service teardown nor pretends the handle was freed.
+     */
+    @Test
+    fun destroy_sweep_close_throw_records_fault_without_crash() {
+        val harness = sequencedHarness()
+        val token = EditorToken("A")
+        val native = harness.native
+        native.planOpen(listOf(partial(1L, "将毁")))
+        val park = harness.mic.planReadsThenPark(1)
+        val laneThread = drainLaneInThread(harness)
+        startVisibility(harness, token)
+        awaitCondition("reader parked") { harness.mic.parkedInRead }
+        val handleA = native.openedHandles.single()
+
+        native.throwOnClose = true
+        harness.controller.onDestroyed() // sweep close → throws → fault, no crash
+        park.countDown()
+        endLane(harness)
+        assertTrue(laneDied(laneThread))
+        drainLane(harness) // settle the queued sweep close if not yet run
+
+        assertEquals(1, native.closeAttempts.count { it == handleA }) // once, thrown
+        assertFalse(native.closedHandles.contains(handleA)) // NOT claimed released
+        assertTrue(harness.mic.allReleasedExactlyOnce())
+        assertEquals(listOf("open:$handleA", "close:$handleA"), native.events)
     }
 }

@@ -131,8 +131,10 @@ class ImeSessionController internal constructor(
     private var nativeOwner: NativeOwner? = null
 
     /**
-     * Sticky fault when a native close threw (Design A): a Rust session may
-     * still be alive, so every later generation fails BEFORE native.open.
+     * Sticky fault when a native close threw (Design A + unified close
+     * contract): a Rust session may still be alive, so every later
+     * generation fails BEFORE native.open. Recorded for EVERY close exit
+     * path, never erased while the controller lives.
      */
     @Volatile private var nativeCloseFault: String? = null
 
@@ -252,7 +254,15 @@ class ImeSessionController internal constructor(
             nativeOwner = null
             currentOwner
         }
-        executeOnLane { closeHandleQuietly(owner.handle) }
+        val delivered = executeOnLane {
+            closeNativeChecked(owner.handle, "destruction sweep close")
+        }
+        if (!delivered) {
+            // Lane already shut down: NEVER claim the resource was released.
+            nativeCloseFault =
+                "native session close unsettled: destruction sweep not delivered to lane"
+            Log.w(TAG, "destruction sweep close not delivered; state unresolved")
+        }
     }
 
     /**
@@ -360,7 +370,9 @@ class ImeSessionController internal constructor(
     /**
      * Marks the CURRENT native owner as the one to close for the stopping
      * lease, queues nativeClose ONCE on the serial lane behind running
-     * open/feed. Never closes a handle owned by a NEWER generation.
+     * open/feed. Never closes a handle owned by a NEWER generation. A close
+     * that throws records the SAME sticky fault as every other exit path
+     * (unified [closeNativeChecked] contract), blocking later openings.
      */
     private fun closeNativeForStop(stoppedLease: ImeSessionModel.EditorLease?) {
         // STRICT lease scope: a null/unknown lease must NEVER behave as "close
@@ -375,7 +387,7 @@ class ImeSessionController internal constructor(
             nativeOwner = null
             currentOwner
         }
-        executeOnLane { closeHandleQuietly(owner.handle) }
+        executeOnLane { closeNativeChecked(owner.handle, "stop close") }
     }
 
     /** On-lane cleanup fallback for a task releasing its own handle. */
@@ -391,14 +403,29 @@ class ImeSessionController internal constructor(
                 currentOwner
             } else null
         }
-        if (owner != null) closeHandleQuietly(owner.handle)
+        if (owner != null) closeNativeChecked(owner.handle, "fence release close")
     }
 
-    private fun closeHandleQuietly(handle: Long) {
-        try {
+    /**
+     * THE one close-failure contract for every exit path (Design 1): calls
+     * native.close on the CURRENT lane (normal Stop, unowned stale handle,
+     * publish-refused handle, destroy sweep) and catches Throwable. On
+     * failure it records the sticky [nativeCloseFault] so no later
+     * generationTask can native.open against a possibly still-live Rust
+     * session. Returns true when the close either SUCCEEDED or was
+     * attempted-and-failed (a test seam survives this path); false only when
+     * the close was never claimed. Never retried: an unknown close result
+     * may have partially completed.
+     */
+    private fun closeNativeChecked(handle: Long, cause: String): Boolean {
+        return try {
             native.close(handle)
+            true
         } catch (t: Throwable) {
-            Log.w(TAG, "nativeClose failed", t)
+            Log.w(TAG, "nativeClose failed ($cause); native opens disabled", t)
+            nativeCloseFault =
+                "native session close unsettled ($cause): ${t.message ?: t.javaClass.simpleName}"
+            false
         }
     }
 
@@ -419,25 +446,21 @@ class ImeSessionController internal constructor(
             nativeOwner = null
             taken
         }
-        try {
-            native.close(owner.handle)
-            return true
-        } catch (t: Throwable) {
-            // A close that failed leaves a MAYBE-LIVE Rust session: newer
-            // generations MUST NOT open until ownership is reconciled, so a
-            // sticky fault blocks every subsequent generation's native.open.
-            Log.w(TAG, "own nativeClose failed; native opens disabled", t)
-            nativeCloseFault =
-                "native session close unsettled: ${t.message ?: t.javaClass.simpleName}"
-            return true
+        if (!closeNativeChecked(owner.handle, "failure-path own close")) {
+            Log.w(TAG, "own nativeClose failed; native opens disabled")
         }
+        return true
     }
 
-    private fun executeOnLane(action: () -> Unit) {
-        try {
+    /** Returns false when the lane REJECTED the action (never executed). */
+    private fun executeOnLane(action: () -> Unit): Boolean {
+        return try {
             lane.execute(action)
+            true
         } catch (_: RejectedExecutionException) {
-            // Service destroyed and lane already down: queued cleanup is moot.
+            // Service destroyed and lane already down: the queued task will
+            // NOT run, so callers must not claim its close was performed.
+            false
         }
     }
 
@@ -457,9 +480,10 @@ class ImeSessionController internal constructor(
     private fun generationTask(lease: ImeSessionModel.EditorLease, modelDir: String) {
         // Head-of-lane stale rejection: tasks queued before a stop are cheap.
         if (!model.isLeaseCurrent(lease)) return
-        // Design A barrier: an earlier native close that THREW leaves a
-        // possibly live Rust session; opening a new one here could raise
-        // AlreadyActive and silently double-own the engine. Fail closed.
+        // Design A barrier: an earlier native close that THREW — on ANY exit
+        // path, not just the failure path — leaves a possibly live Rust
+        // session; opening a new one here could raise AlreadyActive and
+        // silently double-own the engine. Fail closed with a BLOCKED status.
         nativeCloseFault?.let { fault ->
             fail(lease, fault)
             return
@@ -472,8 +496,10 @@ class ImeSessionController internal constructor(
         }
         // Stop raced the delayed open: close WITHOUT opening a microphone and
         // WITHOUT posting Listening/UI results; the handle was never owned.
+        // An unowned-handle close THROW still records the sticky fault: a
+        // later Start must not reopen against a possible orphan session.
         if (!model.isLeaseCurrent(lease)) {
-            closeHandleQuietly(handle)
+            closeNativeChecked(handle, "stale unowned close")
             return
         }
         // Design 1 barrier: tests hold Stop exactly here (precheck passed,
@@ -495,8 +521,9 @@ class ImeSessionController internal constructor(
         if (!published) {
             // Stop raced the precheck, or a conflicting owner is registered:
             // fail closed for THIS handle only. No mic, no UI, no newer-owner
-            // mutation; the newer generation's own lifecycle continues.
-            closeHandleQuietly(handle)
+            // mutation; the newer generation's own lifecycle continues. A
+            // thrown unowned close STILL records the fault (same contract).
+            closeNativeChecked(handle, "publication-refused close")
             return
         }
         try {
