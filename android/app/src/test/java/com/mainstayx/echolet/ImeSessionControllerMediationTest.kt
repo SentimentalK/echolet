@@ -51,19 +51,66 @@ class ImeSessionControllerMediationTest {
         }
     }
 
-    /** Deterministic FIFO lane drained by the test thread. */
+    /**
+     * Deterministic FIFO lane drained by the test thread. Thread-safe: a side
+     * thread may [runSession] while the test thread queues more tasks; the
+     * session waits (bounded) when the queue is momentarily empty and exits
+     * only on [closeForTests].
+     */
     private class SequencedLane : Executor {
         private val q = ArrayDeque<Runnable>()
+        @Volatile private var sessionClosed = false
+
         override fun execute(command: Runnable) {
-            q.addLast(command)
+            synchronized(this) {
+                if (!sessionClosed) q.addLast(command)
+                (this as java.lang.Object).notifyAll()
+            }
         }
 
+        /** Direct non-blocking drain of everything currently queued. */
         fun runAll() {
             while (true) {
-                val task = q.removeFirstOrNull() ?: return
+                val task = synchronized(this) { q.removeFirstOrNull() } ?: return
                 task.run()
             }
         }
+
+        /** Side-thread session: drains and waits until [closeForTests]. */
+        fun runSession() {
+            while (true) {
+                var task: Runnable? = null
+                synchronized(this) {
+                    task = q.removeFirstOrNull()
+                    if (task == null) {
+                        if (sessionClosed) return
+                        try {
+                            (this as java.lang.Object).wait(10)
+                        } catch (_: InterruptedException) {
+                            Thread.currentThread().interrupt()
+                        }
+                    }
+                }
+                task?.run()
+            }
+        }
+
+        fun closeForTests() {
+            synchronized(this) {
+                sessionClosed = true
+                (this as java.lang.Object).notifyAll()
+            }
+        }
+
+        /** Re-arms the lane BEFORE a fresh session thread is started. */
+        fun openForSession() {
+            synchronized(this) {
+                sessionClosed = false
+                (this as java.lang.Object).notifyAll()
+            }
+        }
+
+        fun pending(): Int = synchronized(this) { q.size }
     }
 
     private fun awaitCondition(reason: String, millis: Long = 2000, done: () -> Boolean) {
@@ -107,6 +154,8 @@ class ImeSessionControllerMediationTest {
     private class FakeNativeApi : NativeApi {
         val openedHandles = mutableListOf<Long>()
         val closedHandles = mutableListOf<Long>()
+        /** EVERY close attempt, even for unowned/duplicate handles. */
+        val closeAttempts = mutableListOf<Long>()
 
         /** Parked INSIDE open() to emulate "generation still preparing". */
         @Volatile var openGate: CountDownLatch? = null
@@ -146,6 +195,7 @@ class ImeSessionControllerMediationTest {
         }
 
         override fun close(handle: Long) {
+            synchronized(lock) { closeAttempts.add(handle) }
             synchronized(lock) {
                 if (!openedHandles.contains(handle)) return
                 if (byHandle.remove(handle) == null) return // duplicate: no-op
@@ -160,23 +210,40 @@ class ImeSessionControllerMediationTest {
         @Volatile var startGate: CountDownLatch? = null
         val startEntered = CountDownLatch(1)
 
-        /**
-         * The producer emits this many finite reads, then returns null from
-         * read (exactly the stopped-device semantics that terminate a
-         * producer loop quietly).
-         */
-        @Volatile var plannedReads: Long = Long.MAX_VALUE
-
         private val lock = Any()
         private var live = emptySet<Int>()
         private val released = mutableSetOf<Int>()
         private var nextId = 1
+        private var readsDone = 0L
+        /**
+         * The reader parks (OUTSIDE the lock, stream still live) before
+         * yielding the (parkAtReads + 1)-th result, so tests can race a stop
+         * or observe LISTENING deterministically instead of guessing sleeps.
+         */
+        private var parkAtReads = Long.MAX_VALUE
+        @Volatile private var parkedGate: CountDownLatch? = null
+        @Volatile var parkedInRead = false
 
-        fun limitPlannedReads(n: Long) {
-            plannedReads = n
+        /**
+         * The reader performs `n` REAL reads, then parks until the returned
+         * gate is released; afterwards reads return null (de-planned), which
+         * the controller must treat as an EOF only when the lease is fenced.
+         */
+        fun planReadsThenPark(n: Long): CountDownLatch {
+            val gate = CountDownLatch(1)
+            synchronized(lock) {
+                parkAtReads = readsDone + n
+                parkedGate = gate
+            }
+            return gate
+        }
+
+        fun releaseReadPark() {
+            parkedGate?.countDown()
         }
 
         fun startCount(): Int = synchronized(lock) { nextId - 1 }
+        fun readsDoneDebug(): Long = synchronized(lock) { readsDone }
         fun liveCount(): Int = synchronized(lock) { live.size }
 
         fun allReleasedExactlyOnce(): Boolean = synchronized(lock) {
@@ -187,16 +254,34 @@ class ImeSessionControllerMediationTest {
             startEntered.countDown()
             startGate?.await()
             synchronized(lock) {
+                // A CONSUMED park (already nursed once) must not poison a new
+                // generation: the fresh lease streams again until re-planned.
+                if (parkAtReads == Long.MIN_VALUE) {
+                    parkAtReads = Long.MAX_VALUE
+                    parkedGate = null
+                }
                 val id = nextId++
                 live = live + id
             }
         }
 
-        override fun readChunkShorts(): ShortArray? = synchronized(lock) {
-            if (live.isEmpty()) return null
-            if (plannedReads <= 0L) return null
-            plannedReads -= 1
-            ShortArray(AndroidMicCapture.CHUNK_SHORTS)
+        override fun readChunkShorts(): ShortArray? {
+            if (synchronized(lock) { readsDone >= parkAtReads }) {
+                synchronized(lock) { parkedInRead = true }
+                parkedGate?.await()
+                synchronized(lock) {
+                    parkedInRead = false
+                    parkAtReads = Long.MIN_VALUE // park only once: de-plan
+                }
+            }
+            return synchronized(lock) {
+                if (live.isEmpty()) null
+                else if (parkAtReads == Long.MIN_VALUE || readsDone >= parkAtReads) null
+                else {
+                    readsDone += 1
+                    ShortArray(AndroidMicCapture.CHUNK_SHORTS)
+                }
+            }
         }
 
         override fun stopAndRelease() {
@@ -357,6 +442,30 @@ class ImeSessionControllerMediationTest {
         harness.sequencedLane?.runAll()
     }
 
+    /**
+     * Runs the sequenced lane on a SIDE daemon thread so the test thread can
+     * deterministically race a stop/failure against a reader parked inside
+     * [FakeMic.parkedInRead] (a barrier, never a sleep).
+     */
+    private fun drainLaneInThread(harness: Harness): Thread {
+        harness.sequencedLane?.openForSession() // BEFORE the thread runs
+        return Thread({ harness.sequencedLane?.runSession() }, "test-side-lane").apply {
+            isDaemon = true
+            start()
+        }
+    }
+
+    /** Ends the side-lane session after the test's work is done. */
+    private fun endLane(harness: Harness) {
+        harness.sequencedLane?.closeForTests()
+    }
+
+    /** Joins the side lane (bounded) and asserts it finished. */
+    private fun laneDied(thread: Thread): Boolean {
+        thread.join(2000)
+        return !thread.isAlive
+    }
+
     // ----------------------------------------------------------------- tests
 
     /** Designs 1+4: two partial batches replace once; genuine LISTENING. */
@@ -365,9 +474,10 @@ class ImeSessionControllerMediationTest {
         val harness = sequencedHarness()
         val token = EditorToken("A")
         harness.native.planOpen(listOf(partial(1L, "你好"), partial(2L, "你们好")))
-        harness.mic.limitPlannedReads(2)
+        val park = harness.mic.planReadsThenPark(2)
+        val laneThread = drainLaneInThread(harness)
         startVisibility(harness, token)
-        drainLane(harness)
+        awaitCondition("reader parked after 2 reads") { harness.mic.parkedInRead }
 
         val editor = editors.getValue(token)
         assertEquals("你们好", editor.visible()) // ONCE; never "你好你们好"
@@ -379,6 +489,14 @@ class ImeSessionControllerMediationTest {
         assertEquals("Listening…", harness.controller.lastStatusText)
         assertEquals(1, harness.native.openedHandles.size)
         assertEquals(0, harness.native.closedHandles.size)
+
+        harness.controller.stop("teardown")
+        park.countDown()
+        endLane(harness)
+            assertTrue(laneDied(laneThread))
+        drainLane(harness)
+        assertTrue(harness.native.closedHandles.containsAll(harness.native.openedHandles))
+        assertTrue(harness.mic.allReleasedExactlyOnce())
     }
 
     @Test
@@ -386,13 +504,22 @@ class ImeSessionControllerMediationTest {
         val harness = sequencedHarness()
         val token = EditorToken("A")
         harness.native.planOpen(listOf(partial(1L, "你好"), partial(2L, "")))
-        harness.mic.limitPlannedReads(2)
+        val park = harness.mic.planReadsThenPark(2)
+        val laneThread = drainLaneInThread(harness)
         startVisibility(harness, token)
-        drainLane(harness)
+        awaitCondition("reader parked after 2 reads") { harness.mic.parkedInRead }
 
         val editor = editors.getValue(token)
         assertEquals("", editor.visible()) // owned span cleared
         assertEquals("", editor.committed)
+
+        harness.controller.stop("teardown")
+        park.countDown()
+        endLane(harness)
+            assertTrue(laneDied(laneThread))
+        drainLane(harness)
+        assertTrue(harness.native.closedHandles.containsAll(harness.native.openedHandles))
+        assertEquals("", editor.visible()) // stop appends NOTHING
     }
 
     @Test
@@ -402,14 +529,22 @@ class ImeSessionControllerMediationTest {
         harness.native.planOpen(
             listOf(partial(1L, "第一"), endpoint("第一"), partial(2L, "第二"), endpoint("第二"))
         )
-        harness.mic.limitPlannedReads(4)
+        val park = harness.mic.planReadsThenPark(4)
+        val laneThread = drainLaneInThread(harness)
         startVisibility(harness, token)
-        drainLane(harness)
+        awaitCondition("reader parked after 4 reads") { harness.mic.parkedInRead }
 
         val editor = editors.getValue(token)
         assertEquals("第一第二", editor.visible())
         assertEquals(2, editor.finishCount) // exact-once per owned span
         assertTrue(harness.model.isLeaseCurrent(harness.controller.currentLease()))
+
+        harness.controller.stop("teardown")
+        park.countDown()
+        endLane(harness)
+            assertTrue(laneDied(laneThread))
+        drainLane(harness)
+        assertEquals("第一第二", editor.visible()) // stop appends nothing
     }
 
     @Test
@@ -417,22 +552,34 @@ class ImeSessionControllerMediationTest {
         val harness = sequencedHarness()
         val token = EditorToken("A")
         harness.native.planOpen(listOf(partial(1L, "说到一半")))
-        harness.mic.limitPlannedReads(1)
+        val park = harness.mic.planReadsThenPark(1)
+        val laneThread = drainLaneInThread(harness)
         startVisibility(harness, token)
-        drainLane(harness)
+        awaitCondition("reader parked after 1 read") { harness.mic.parkedInRead }
         val editor = editors.getValue(token)
         assertEquals("说到一半", editor.visible())
         assertTrue(harness.controller.ownsComposingRightNow())
         val preStopEpoch = harness.model.currentEpoch()
 
+        // Design 5(4): the reader is parked mid-stream when the user Stops —
+        // its follow-up null read must stay QUIET (fenced lease), not be
+        // reclassified as an unexpected-audio error.
         harness.controller.stop("user stop mid partial")
+        park.countDown()
+        endLane(harness)
+            assertTrue(laneDied(laneThread))
         drainLane(harness) // drain the queued native close
 
         assertEquals("说到一半", editor.visible()) // exact partial preserved
         assertEquals(1, editor.finishCount) // commit-once on the SAME editor
         assertFalse(harness.controller.ownsComposingRightNow())
         assertTrue(harness.model.currentEpoch() > preStopEpoch)
-        assertTrue(harness.native.closedHandles.containsAll(harness.native.openedHandles))
+        assertEquals(ImeSessionModel.ImeState.PAUSED, harness.model.currentState) // NOT BLOCKED
+        assertEquals(
+            1,
+            harness.native.closeAttempts.count { it == harness.native.openedHandles[0] },
+        ) // handle closed EXACTLY once
+        assertTrue(harness.mic.allReleasedExactlyOnce())
     }
 
     @Test
@@ -441,10 +588,14 @@ class ImeSessionControllerMediationTest {
         val tokenA = EditorToken("A")
         val tokenB = EditorToken("B")
         harness.native.planOpen(listOf(partial(1L, "半句")))
-        harness.mic.limitPlannedReads(1)
+        val parkA = harness.mic.planReadsThenPark(1)
+        val laneThreadA = drainLaneInThread(harness)
         startVisibility(harness, tokenA)
-        drainLane(harness)
+        awaitCondition("reader A parked") { harness.mic.parkedInRead }
         harness.controller.stop("first stop")
+        parkA.countDown()
+        endLane(harness)
+            assertTrue(laneDied(laneThreadA))
         drainLane(harness)
         harness.controller.stop("second stop (idempotent)")
         drainLane(harness)
@@ -455,9 +606,12 @@ class ImeSessionControllerMediationTest {
         harness.controller.onWindowHidden()
         harness.controller.onWindowShown()
         harness.native.planOpen(listOf(partial(1L, "")))
-        harness.mic.limitPlannedReads(1)
+        val parkB = harness.mic.planReadsThenPark(1)
+        val laneThreadB = drainLaneInThread(harness)
         startVisibility(harness, tokenB)
-        drainLane(harness)
+        awaitCondition("reader B parked") { harness.mic.parkedInRead.also { p ->
+            if (!p) System.err.println("DBG B: state=${harness.model.currentState} lease=${harness.controller.currentLease()} live=${harness.mic.liveCount()} starts=${harness.mic.startCount()} opened=${harness.native.openedHandles.size} closed=${harness.native.closedHandles.size} reads=${harness.mic.readsDoneDebug()} parked=${harness.mic.parkedInRead}")
+        } }
         val leaseB = harness.controller.currentLease()
 
         assertNotNull(leaseB)
@@ -465,6 +619,14 @@ class ImeSessionControllerMediationTest {
         assertEquals("", editors.getValue(tokenB).visible()) // no cross-editor text
         assertEquals(2, harness.native.openedHandles.size)
         assertEquals(1, harness.native.closedHandles.size) // A only; B alive
+
+        harness.controller.stop("teardown")
+        parkB.countDown()
+        endLane(harness)
+            assertTrue(laneDied(laneThreadB))
+        drainLane(harness)
+        assertTrue(harness.native.closedHandles.containsAll(harness.native.openedHandles))
+        assertTrue(harness.mic.allReleasedExactlyOnce())
     }
 
     @Test
@@ -472,12 +634,16 @@ class ImeSessionControllerMediationTest {
         val harness = sequencedHarness()
         val token = EditorToken("A")
         harness.native.planOpen(listOf(partial(1L, "第一")))
-        harness.mic.limitPlannedReads(1)
+        val parkA = harness.mic.planReadsThenPark(1)
+        val laneThreadA = drainLaneInThread(harness)
         startVisibility(harness, token)
-        drainLane(harness)
+        awaitCondition("reader A parked") { harness.mic.parkedInRead }
         assertEquals(ImeSessionModel.ImeState.LISTENING, harness.model.currentState)
 
         harness.controller.onControlTap(ready = true, blockedReason = null, ic = token)
+        parkA.countDown()
+        endLane(harness)
+            assertTrue(laneDied(laneThreadA))
         drainLane(harness)
         assertEquals(ImeSessionModel.ImeState.PAUSED, harness.model.currentState)
         assertNull(harness.controller.currentLease())
@@ -497,12 +663,21 @@ class ImeSessionControllerMediationTest {
         harness.controller.onWindowHidden()
         harness.controller.onWindowShown()
         harness.native.planOpen(listOf(partial(1L, "重新开始")))
-        harness.mic.limitPlannedReads(1)
+        val parkB = harness.mic.planReadsThenPark(1)
+        val laneThreadB = drainLaneInThread(harness)
         startVisibility(harness, token)
-        drainLane(harness)
+        awaitCondition("reader B parked") { harness.mic.parkedInRead }
         assertEquals(ImeSessionModel.ImeState.LISTENING, harness.model.currentState)
         assertNotNull(harness.controller.currentLease())
         assertEquals(opensAfterPause + 1, harness.native.openedHandles.size)
+
+        harness.controller.stop("teardown")
+        parkB.countDown()
+        endLane(harness)
+            assertTrue(laneDied(laneThreadB))
+        drainLane(harness)
+        assertTrue(harness.native.closedHandles.containsAll(harness.native.openedHandles))
+        assertTrue(harness.mic.allReleasedExactlyOnce())
     }
 
     /** Designs 3+7: B live; late old-A events touch nothing of B's. */
@@ -516,8 +691,7 @@ class ImeSessionControllerMediationTest {
 
         native.planOpen(listOf(partial(1L, "A1")))
         native.planOpen(listOf(partial(1L, "B1")))
-        harness.mic.limitPlannedReads(Long.MAX_VALUE)
-        native.openGate = CountDownLatch(1)
+                native.openGate = CountDownLatch(1)
 
         // Begin A (real lane); its nativeOpen parks inside the gate.
         startVisibility(harness, tokenA)
@@ -594,8 +768,7 @@ class ImeSessionControllerMediationTest {
 
         native.planOpen(listOf(partial(1L, "A1")))
         native.planOpen(listOf(partial(1L, "B1")))
-        harness.mic.limitPlannedReads(Long.MAX_VALUE)
-        native.openGate = CountDownLatch(1)
+                native.openGate = CountDownLatch(1)
 
         val sameInfo = info()
         harness.controller.onWindowShown()
@@ -641,8 +814,7 @@ class ImeSessionControllerMediationTest {
         val throwingEditor = FakeEditor(token.toString()).apply { throwNext = true }
         editors[token] = throwingEditor
         harness.native.planOpen(listOf(partial(1L, "one-shot")))
-        harness.mic.limitPlannedReads(1)
-        val epochBefore = harness.model.currentEpoch()
+                val epochBefore = harness.model.currentEpoch()
 
         startVisibility(harness, token)
         drainLane(harness) // no exception ever escapes the controller
@@ -667,7 +839,6 @@ class ImeSessionControllerMediationTest {
 
         harness.native.planOpen(listOf(partial(1L, "never projected")))
         harness.native.planOpen(listOf(partial(1L, "real B")))
-        mic.limitPlannedReads(Long.MAX_VALUE)
         mic.startGate = CountDownLatch(1)
 
         // Begin A; mic.start parks inside the gate.
@@ -703,25 +874,262 @@ class ImeSessionControllerMediationTest {
         }
     }
 
-    /** Design 8 (12): start/stop + editor-switch cycles stay leak-free. */
+    /**
+     * Design 5(1): Stop lands EXACTLY between the lease precheck and the
+     * nativeLock publish decision (injected barrier, no sleep): the freshly
+     * opened handle is refused publication and closed exactly ONCE, the mic
+     * is NEVER started, no LISTENING is exposed, and lease B opens normally
+     * afterwards.
+     */
+    @Test
+    fun stop_in_publish_window_closes_new_handle_once_and_never_starts_mic() {
+        val harness = threadedHarness()
+        val main = harness.queuedMain!!
+        val native = harness.native
+        val tokenA = EditorToken("A")
+        val tokenB = EditorToken("B")
+
+        val gateEntered = CountDownLatch(1)
+        val releaseGate = CountDownLatch(1)
+        harness.controller.nativePublishGate = {
+            gateEntered.countDown()
+            releaseGate.await()
+        }
+        native.planOpen(emptyList())
+
+        startVisibility(harness, tokenA)
+        assertTrue(gateEntered.await(2, TimeUnit.SECONDS))
+        val leaseA = harness.controller.currentLease()
+        assertNotNull(leaseA)
+
+        harness.controller.stop("stop in publish window")
+        main.drainMain()
+        assertFalse(harness.model.isLeaseCurrent(leaseA))
+
+        releaseGate.countDown()
+        awaitCondition("A handle closed") { native.closeAttempts.isNotEmpty() }
+        val handleA = native.openedHandles[0]
+        assertEquals(1, native.openedHandles.size)
+        assertEquals(1, native.closeAttempts.size)
+        assertEquals(listOf(handleA), native.closedHandles.toList()) // closed EXACTLY once
+        assertEquals(0, harness.mic.startCount()) // mic.start NEVER called for A
+        assertEquals(ImeSessionModel.ImeState.PAUSED, harness.model.currentState) // no LISTENING
+        assertTrue(harness.mic.allReleasedExactlyOnce())
+
+        // Lease B later opens normally on the same live view.
+        harness.controller.onInputStarted(info(), restarting = false, viewVisible = true)
+        activeEditorToken = tokenB
+        harness.controller.onInputViewStarted(info(), tokenB, ready = true, blockedReason = null)
+        main.drainMain()
+        val leaseB = harness.controller.currentLease()
+        assertNotNull(leaseB)
+        awaitApplied(main, "B listening") {
+            harness.model.currentState == ImeSessionModel.ImeState.LISTENING &&
+                harness.mic.liveCount() == 1
+        }
+        assertTrue(harness.model.isLeaseCurrent(leaseB))
+        assertEquals(2, native.openedHandles.size)
+        assertEquals(1, native.closedHandles.size) // B still alive
+
+        harness.controller.stop("teardown")
+        awaitCondition("teardown mic drain") { harness.mic.allReleasedExactlyOnce() }
+        awaitCondition("teardown handles closed") {
+            native.closedHandles.containsAll(native.openedHandles)
+        }
+    }
+
+    /**
+     * Design 5(2): a publication REFUSAL against a conflicting registered
+     * owner closes the newly opened local handle exactly once, leaves the
+     * original owner and its handle untouched, and never starts the mic.
+     */
+    @Test
+    fun publish_refused_with_competing_owner_closes_new_local_handle_only() {
+        val harness = threadedHarness()
+        val main = harness.queuedMain!!
+        val native = harness.native
+        val token = EditorToken("A")
+
+        native.openGate = CountDownLatch(1)
+        native.planOpen(emptyList())
+        startVisibility(harness, token)
+        assertTrue(native.openEntered.await(2, TimeUnit.SECONDS))
+        val leaseA = harness.controller.currentLease()
+        assertNotNull(leaseA)
+        assertTrue(harness.controller.clearedNativeOwnerForTest()) // registry empty pre-refusal
+        // A competing owner (different lease) occupies the registry slot.
+        val foreignLease = ImeSessionModel.EditorLease(-1, "foreign", 1, 1, 99)
+        harness.controller.plantNativeOwnerForTest(foreignLease, 777L)
+
+        native.openGate?.countDown()
+        native.openGate = null
+        awaitCondition("refused handle closed") { native.closeAttempts.isNotEmpty() }
+        val handleA = native.openedHandles[0]
+        assertEquals(1, native.openedHandles.size)
+        assertEquals(1, native.closeAttempts.size)
+        assertEquals(listOf(handleA), native.closedHandles.toList()) // once, new handle only
+        assertEquals(0, harness.mic.startCount()) // NO mic start for the refused generation
+        assertFalse(harness.controller.clearedNativeOwnerForTest()) // original owner untouched
+        assertTrue(harness.model.isLeaseCurrent(leaseA)) // A lease lives on
+        assertEquals(0, native.closeAttempts.count { it == 777L }) // foreign handle NEVER closed
+
+        harness.controller.stop("teardown")
+        main.drainMain()
+        awaitCondition("own handle closed exactly once") {
+            native.closeAttempts.count { it == handleA } == 1
+        }
+        assertEquals(0, native.closeAttempts.count { it == 777L })
+        assertTrue(harness.mic.allReleasedExactlyOnce())
+    }
+
+    /**
+     * Design 5(3): readChunkShorts returns null while the lease is STILL
+     * current and NO user Stop occurred: this generation fails closed —
+     * not LISTENING, mic stopped, native handle closed exactly once, the
+     * already-visible owned partial preserved and finalized exactly once,
+     * and NO fabricated endpoint or further editor writes.
+     */
+    @Test
+    fun unexpected_mic_eof_while_live_fails_this_generation_closed() {
+        val harness = sequencedHarness()
+        val token = EditorToken("A")
+        harness.native.planOpen(listOf(partial(1L, "危言")))
+        val park = harness.mic.planReadsThenPark(1)
+        val laneThread = drainLaneInThread(harness)
+        startVisibility(harness, token)
+        awaitCondition("reader parked with visible partial") { harness.mic.parkedInRead }
+        val editor = editors.getValue(token)
+        assertEquals("危言", editor.visible())
+        val preFailEpoch = harness.model.currentEpoch()
+
+        // No user stop: release the park so the read yields null while the
+        // lease is still current — the producer must NOT exit silently.
+        park.countDown()
+        awaitCondition("generation fenced by the EOF failure") {
+            harness.controller.currentLease() == null
+        }
+        drainLane(harness)
+        endLane(harness)
+        assertTrue(laneDied(laneThread))
+
+        assertEquals(ImeSessionModel.ImeState.BLOCKED, harness.model.currentState) // NOT LISTENING
+        assertTrue(harness.model.currentEpoch() > preFailEpoch)
+        assertNull(harness.controller.currentLease())
+        assertFalse(harness.controller.ownsComposingRightNow())
+        assertEquals("危言", editor.visible()) // exact visible partial preserved
+        assertEquals(1, editor.finishCount) // finalized ONCE on the still-valid editor
+        assertEquals(1, editor.setCount) // no further writes after the partial
+        assertTrue(harness.mic.allReleasedExactlyOnce())
+        val handle = harness.native.openedHandles[0]
+        assertEquals(1, harness.native.closeAttempts.count { it == handle })
+        assertEquals(1, harness.native.closedHandles.size)
+    }
+
+    /**
+     * Design 5(5): generation A is torn down first (lane-serialized, the
+     * exact production order), B becomes live, and then a LATE generation-A
+     * failure outcome arrives: A's stale failure is a strict no-op and B's
+     * mic, native handle and editor are untouched.
+     */
+    @Test
+    fun stale_a_teardown_results_after_b_starts_never_touch_b() {
+        val harness = threadedHarness()
+        val main = harness.queuedMain!!
+        val native = harness.native
+        val tokenA = EditorToken("A")
+        val tokenB = EditorToken("B")
+
+        native.planOpen(listOf(partial(1L, "A1")))
+        native.planOpen(listOf(partial(1L, "B1")))
+        val parkA = harness.mic.planReadsThenPark(1)
+
+        startVisibility(harness, tokenA)
+        // Drain main deterministically until A is listening AND its reader
+        // is parked (the first partial's projection ACK flows through main).
+        val deadline = System.currentTimeMillis() + 2000
+        while (!(harness.mic.parkedInRead &&
+                harness.model.currentState == ImeSessionModel.ImeState.LISTENING)
+        ) {
+            main.drainMain()
+            if (System.currentTimeMillis() > deadline) {
+                throw AssertionError("A never reached listening+parked")
+            }
+            Thread.sleep(5)
+        }
+        val leaseA = harness.controller.currentLease()
+        val handleA = native.openedHandles[0]
+        assertEquals("A1", editors.getValue(tokenA).visible())
+
+        harness.controller.stop("stop A")
+        main.drainMain()
+        parkA.countDown()
+        // Production serialization: A's lane task fully settles before B.
+        awaitCondition("A fully torn down") {
+            harness.mic.allReleasedExactlyOnce() && native.closedHandles.contains(handleA)
+        }
+
+        harness.controller.onInputStarted(info(), restarting = false, viewVisible = true)
+        activeEditorToken = tokenB
+        harness.controller.onInputViewStarted(info(), tokenB, ready = true, blockedReason = null)
+        main.drainMain()
+        val leaseB = harness.controller.currentLease()
+        assertNotNull(leaseB)
+        awaitApplied(main, "B listening + B1 projected") {
+            harness.model.currentState == ImeSessionModel.ImeState.LISTENING &&
+                editors.getOrPut(tokenB) { FakeEditor(tokenB.name) }.visible() == "B1" &&
+                harness.mic.liveCount() == 1
+        }
+
+        // LATE A EOF/error: strict no-op; B keeps listening untouched.
+        assertTrue(harness.model.generationFailed(leaseA, "late A unexpected EOF").noSideEffects)
+        val stale = ImeSessionModel.Outcome(
+            state = ImeSessionModel.ImeState.BLOCKED,
+            status = "late A crashed",
+            requestStop = true,
+            closeNative = true,
+            atEpoch = harness.model.currentEpoch() - 1,
+        )
+        harness.controller.applyDecision(stale)
+        assertTrue(harness.model.isLeaseCurrent(leaseB))
+        assertEquals(ImeSessionModel.ImeState.LISTENING, harness.model.currentState)
+        assertEquals(1, harness.mic.liveCount()) // B's record still live
+        assertEquals("A1", editors.getValue(tokenA).visible()) // no cross-editor write
+        assertEquals("B1", editors.getValue(tokenB).visible())
+        assertEquals(1, native.closeAttempts.count { it == handleA }) // A closed once only
+
+        harness.controller.stop("teardown")
+        awaitCondition("teardown mic drain") { harness.mic.allReleasedExactlyOnce() }
+        awaitCondition("all handles closed") {
+            native.closedHandles.containsAll(native.openedHandles)
+        }
+    }
+
+    /**
+     * Design 5(7): rapid Start/Stop with editor switches executes the REAL
+     * controller transitions (parked-reader barrier per cycle, no sleeps);
+     * handles and mic teardown stay exactly-once with no poisoned state.
+     */
     @Test
     fun ten_start_stop_and_editor_switch_cycles_have_no_duplicate_sessions() {
         val harness = sequencedHarness()
-        var micStartsSeen = 0
         repeat(10) { cycle ->
             val token = EditorToken("cycle$cycle")
             harness.native.planOpen(listOf(partial(1L, "cycle $cycle")))
-            harness.mic.limitPlannedReads(1)
+            val park = harness.mic.planReadsThenPark(1)
+            val laneThread = drainLaneInThread(harness)
             startVisibility(harness, token)
-            drainLane(harness)
-            micStartsSeen = harness.mic.startCount()
+            awaitCondition("cycle $cycle reader parked") { harness.mic.parkedInRead }
             assertEquals(ImeSessionModel.ImeState.LISTENING, harness.model.currentState)
+            assertEquals(cycle + 1, harness.mic.startCount())
             assertEquals("cycle $cycle", editors.getValue(token).visible())
             harness.controller.stop("cycle end $cycle")
+            park.countDown()
+            endLane(harness)
+            assertTrue(laneDied(laneThread))
             drainLane(harness)
             assertNull(harness.controller.currentLease())
+            assertEquals(cycle + 1, harness.native.openedHandles.size)
         }
-        assertEquals(10, micStartsSeen)
         assertEquals(10, harness.native.openedHandles.size)
         assertEquals(10, harness.native.closedHandles.size) // each handle closed once
         assertTrue(harness.mic.allReleasedExactlyOnce())

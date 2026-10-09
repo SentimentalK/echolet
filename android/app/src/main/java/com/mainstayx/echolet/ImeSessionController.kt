@@ -130,6 +130,14 @@ class ImeSessionController internal constructor(
     private val nativeLock = Any()
     private var nativeOwner: NativeOwner? = null
 
+    /**
+     * Deterministic test barrier (Java-Kotlin JVM mediation tests only):
+     * invoked on the generation lane exactly between the stop precheck and
+     * the nativeLock publish decision, letting tests hold Stop in the exact
+     * Design-1 race window. NEVER set in production.
+     */
+    @Volatile internal var nativePublishGate: (() -> Unit)? = null
+
     @Volatile private var active: ActiveLease? = null
     @Volatile private var serviceVisible: Boolean = false
     @Volatile private var lastStatus: String = ""
@@ -210,11 +218,26 @@ class ImeSessionController internal constructor(
             currentInfo = null
             applyDecision(model.onServiceDestroyed())
         }
+        // Close any remaining registry owner IDENTIFIED by lease, never a
+        // blind null-scope sweep: the registry may hold nothing (the fencing
+        // task closes its own handle).
+        onDestroyNativeSweep()
         // Lane drains its queued tasks; each is fingerprinted by epoch and
         // stale ones reject at head/idempotently close. Only the real
         // single-thread executor is shut down (test lanes stay drainable).
         executeOnLane {}
         (lane as? java.util.concurrent.ExecutorService)?.shutdown()
+    }
+
+    /** Teardown: enqueue close of whatever owner remains by identity. */
+    private fun onDestroyNativeSweep() {
+        val owner = synchronized(nativeLock) {
+            val currentOwner = nativeOwner
+            if (currentOwner == null) return
+            nativeOwner = null
+            currentOwner
+        }
+        executeOnLane { closeHandleQuietly(owner.handle) }
     }
 
     /**
@@ -325,10 +348,15 @@ class ImeSessionController internal constructor(
      * open/feed. Never closes a handle owned by a NEWER generation.
      */
     private fun closeNativeForStop(stoppedLease: ImeSessionModel.EditorLease?) {
+        // STRICT lease scope: a null/unknown lease must NEVER behave as "close
+        // whatever owner is registered" — that could kill a newer generation's
+        // handle. A fenced handle with no identified owner is closed by its own
+        // generation task's fence release instead.
+        if (stoppedLease == null) return
         val owner = synchronized(nativeLock) {
             val currentOwner = nativeOwner
             if (currentOwner == null) return
-            if (stoppedLease != null && currentOwner.lease != stoppedLease) return
+            if (currentOwner.lease != stoppedLease) return
             nativeOwner = null
             currentOwner
         }
@@ -374,6 +402,10 @@ class ImeSessionController internal constructor(
         executeOnLane { generationTask(lease, modelDir) }
     }
 
+    /** Test seam: queues the generation lane for a lease already issued. */
+    internal fun beginGenerationForTest(lease: ImeSessionModel.EditorLease) =
+        startGeneration(lease)
+
     // ------------------------------- generation task (single background lane)
 
     private fun generationTask(lease: ImeSessionModel.EditorLease, modelDir: String) {
@@ -391,12 +423,28 @@ class ImeSessionController internal constructor(
             closeHandleQuietly(handle)
             return
         }
-        val owner = NativeOwner(lease, handle)
-        synchronized(nativeLock) {
-            // Publish only when the lease is still current (no newer owner).
+        // Design 1 barrier: tests hold Stop exactly here (precheck passed,
+        // publication not yet decided). Production leaves this unset.
+        nativePublishGate?.invoke()
+        // Atomic open/publish decision: EITHER the still-current lease takes
+        // sole ownership of the fresh handle, OR the handle is refused and
+        // closed exactly once right here — never started against the mic,
+        // never orphaned, never overwriting a competing owner. Holding the
+        // lock is microseconds: no native open/feed/close happens inside.
+        val published = synchronized(nativeLock) {
             if (model.isLeaseCurrent(lease) && nativeOwner == null) {
-                nativeOwner = owner
+                nativeOwner = NativeOwner(lease, handle)
+                true
+            } else {
+                false
             }
+        }
+        if (!published) {
+            // Stop raced the precheck, or a conflicting owner is registered:
+            // fail closed for THIS handle only. No mic, no UI, no newer-owner
+            // mutation; the newer generation's own lifecycle continues.
+            closeHandleQuietly(handle)
+            return
         }
         try {
             mic.start()
@@ -437,7 +485,14 @@ class ImeSessionController internal constructor(
                 return
             }
             if (shorts == null) {
-                // stopAndRelease de-armed the adapter: terminate quietly.
+                // A null read is normal ONLY for an already-fenced lease
+                // (stopAndRelease de-armed the adapter). With the lease STILL
+                // current the audio ended unexpectedly: fail THIS generation
+                // closed (Design 2) instead of going silent — never remain
+                // LISTENING without a live microphone.
+                if (model.isLeaseCurrent(lease)) {
+                    fail(lease, "audio stopped unexpectedly")
+                }
                 return
             }
             if (!model.isLeaseCurrent(lease)) return
@@ -588,10 +643,27 @@ class ImeSessionController internal constructor(
         Log.i(TAG, "generation fenced: $message")
         val outcome = model.generationFailed(lease, message)
         if (outcome.noSideEffects) return
+        // Time-of-check/time-of-use guard: the fence above was valid at its
+        // own epoch; if a NEWER lease was issued in the meantime, its own
+        // start path performs the stop/close — executing ours now would stop
+        // or close the newer generation's resources. Safe to skip: the fenced
+        // lease's generation task settles its own handle afterwards.
+        if (model.currentEpoch() != outcome.atEpoch) return
         // Still-current: immediate side effects like a stop, then fenced state.
         mic.stopAndRelease()
         closeNativeForStop(lease)
         main.post { applyDecision(outcome) }
+    }
+
+    // --------------------------------------------------- test seam (JVM only)
+
+    /** Emulates a competing registered owner for publish-refusal tests. */
+    internal fun plantNativeOwnerForTest(lease: ImeSessionModel.EditorLease, handle: Long) {
+        synchronized(nativeLock) { nativeOwner = NativeOwner(lease, handle) }
+    }
+
+    internal fun clearedNativeOwnerForTest(): Boolean = synchronized(nativeLock) {
+        nativeOwner == null
     }
 
     /** Test-friendly current lease accessor. */
