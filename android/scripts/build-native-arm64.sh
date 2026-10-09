@@ -66,12 +66,23 @@ adb_bin="$sdk_root/platform-tools/adb"
 
 # Locates the NDK toolchain binary directory:
 #   NDK >= r19: <ndk>/toolchains/llvm/prebuilt/<host-tag>/bin
+# Only bins containing the HOST executables are candidates, and the prebuilt
+# host tag matching the host architecture is preferred over anything else
+# (never a random pick, never an Android-target wrapper binary).
 find_ndk_bin_dir() {
-  local ndk="$1" dir
-  for dir in "$ndk"/toolchains/llvm/prebuilt/*/bin; do
-    [ -x "$dir/llvm-readelf" ] && { printf '%s\n' "$dir"; return 0; }
+  local ndk="$1" bin_dir host_arch primary="" fallback=""
+  case "$(uname -s):$(uname -m)" in
+    *[aA]rm64|*aarch64*) host_arch="aarch64" ;;
+    *) host_arch="x86_64" ;;
+  esac
+  for bin_dir in "$ndk"/toolchains/llvm/prebuilt/*/bin; do
+    [ -x "$bin_dir/llvm-readelf" ] || continue
+    case "$bin_dir" in
+      *"-$host_arch/bin") primary="$bin_dir" ;;
+      *) [ -z "$fallback" ] && fallback="$bin_dir" ;;
+    esac
   done
-  printf '%s\n' ""
+  printf '%s\n' "${primary:-$fallback}"
 }
 
 # CMake is required by the sherpa-onnx build. If cmake is not on PATH, use the

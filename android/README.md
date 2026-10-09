@@ -80,18 +80,47 @@ Run the Gradle + verify pair TWICE to prove idempotence: `./gradlew clean`
 deletes `app/build` but `app/.native-jniLibs` (gitignored, never committed)
 survives, and the APK would fail to assemble if the source set were lost.
 
+`verify-apk-arm64.sh` resolves its ELF tools through the SAME read-only SDK
+discovery as `check-env.sh` — `ANDROID_HOME`/`ANDROID_SDK_ROOT`,
+`android/local.properties`, `sdkmanager`, then the default Darwin/Linux roots
+— and then, within the resolved SDK, the pinned
+`ndk/30.0.16248370/toolchains/llvm/prebuilt/<host-tag>/bin`. When several
+prebuilt host tags exist, the prebuilt matching the host architecture is
+preferred. A `llvm-readelf`/`llvm-nm` pair on PATH is accepted only as an
+explicitly reported fallback. If no verified SDK/NDK pair exists, the script
+fails with the exact resolved/searched SDK root and NDK pin; it never installs
+anything. Run it once without arguments to see the resolved paths:
+
+```sh
+android/scripts/test-verify-apk-self-check.sh   # fail-closed negative cases (synthetic fixtures)
+```
+
+This self-check exercises the gate's negative cases (missing APK, missing
+staged `.so`, mismatched packaged bytes, wrong architecture, missing JNI
+export) against header-only synthetic ELFs in a temp dir; it never touches the
+real staged set or the developer's APK.
+
 `verify-apk-arm64.sh` confirms, with hard nonzero failures:
 
 * the APK packages `lib/arm64-v8a/libecholet_android.so`,
-  `libsherpa-onnx-c-api.so` and `libonnxruntime.so` (exact names, plus
-  `libc++_shared.so` only when the ELF dependency check requires it);
+  `libsherpa-onnx-c-api.so` and `libonnxruntime.so` (exact names, each entry
+  EXACTLY once, plus `libc++_shared.so` only when the ELF dependency check
+  requires it);
 * every packaged `.so` is ELF64 AArch64;
 * the packaged bytes are byte-identical (cmp/sha256) to the staged set — a
   stale or wrong `.so` cannot pass, because the packaged bytes are re-validated
   against the staging root;
 * the staged JNI lib exports the three
-  `Java_com_…_NativeBridge_native{Open,Feed,Close}` symbols and no packaged
-  `.so` carries an unplanned `DT_NEEDED`.
+  `Java_com_…_NativeBridge_native{Open,Feed,Close}` symbols;
+* the FULL `DT_NEEDED` dependency map of all three packaged libraries is
+  audited: Android platform libraries (`libc.so`, `libm.so`, `libdl.so`,
+  `liblog.so`, `libandroid.so`, `libstdc++.so`, `libz.so`) are device-provided
+  and never packaged; every OTHER `DT_NEEDED` name must be a packaged
+  arm64-v8a library (missing, duplicate, unplanned or wrong-architecture
+  dependencies fail). `libc++_shared.so` is currently NOT required (`readelf
+  -d` of the pinned set shows no dependency on it); if a future build needs
+  it, the gate fails until `build-native-arm64.sh` stages the matching NDK
+  file.
 
 `./gradlew :app:assembleDebug` alone is NEVER reported as proof of packaging.
 
