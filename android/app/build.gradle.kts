@@ -26,6 +26,10 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
+
+    // JVM mediation tests exercise the real controller with fake main/lane;
+    // they need android.util.Log calls to return defaults instead of throwing.
+    testOptions.unitTests.isReturnDefaultValues = true
 }
 
 // Pure-JVM projection tests (CodepointDiffBuffer), runnable without Android:

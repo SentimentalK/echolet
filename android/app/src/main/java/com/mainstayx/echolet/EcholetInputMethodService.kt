@@ -34,9 +34,11 @@ class EcholetInputMethodService : InputMethodService() {
 
     override fun onCreate() {
         super.onCreate()
-        controller = ImeSessionController(applicationContext) { state, text ->
-            render(state, text)
-        }
+        controller = ImeSessionController(
+            applicationContext,
+            onState = { state, text -> render(state, text) },
+            icProvider = { currentInputConnection },
+        )
         controller.onServiceCreated()
     }
 

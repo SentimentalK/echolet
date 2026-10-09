@@ -7,8 +7,12 @@ package com.mainstayx.echolet
  * and the HIDDEN/PREPARING/LISTENING/PAUSED/BLOCKED state chart. Android
  * execution lives in [EcholetInputMethodService] + [ImeSessionController]:
  * they only ever execute decided values, never re-derive them.
+ *
+ * Instantiable and owned exclusively by one [ImeSessionController]/service
+ * lifetime: a fresh service never inherits a previous instance's process state
+ * (in particular, a manual pause never survives hide/reopen of the keyboard).
  */
-object ImeSessionModel {
+class ImeSessionModel {
 
     enum class ImeState { HIDDEN, PREPARING, LISTENING, PAUSED, BLOCKED }
 
@@ -33,8 +37,21 @@ object ImeSessionModel {
         val status: String? = null,
         /** Immediate synchronous AudioRecord stop on the stop initiator. */
         val requestStop: Boolean = false,
-        /** nativeClose of currently held handle, on the single lane. */
+        /** nativeClose of the handle owned by THIS generation, on the lane. */
         val closeNative: Boolean = false,
+        /**
+         * The epoch the decision was made under (decided inside the model
+         * lock). The controller refuses to apply queued outcomes whose epoch
+         * is already superseded, so a late stop/failure can never overwrite a
+         * newer generation's state or side effects.
+         */
+        val atEpoch: Long = 0L,
+        /**
+         * True when the call was a stale candidate no-op: NO state/UI change,
+         * NO mic stop, NO native close. The controller checks this before any
+         * side effect.
+         */
+        val noSideEffects: Boolean = false,
     )
 
     // ------------------------------------------------------------------ state
@@ -43,7 +60,11 @@ object ImeSessionModel {
 
     private var state: ImeState = ImeState.HIDDEN
     private var visible: Boolean = false
-    /** Manual Stop blocks auto-restart until an explicit tap for that keyboard. */
+    /**
+     * Manual Stop blocks auto-restart for THIS visible activation only;
+     * persisting across a redraw of the same keyboard, but cleared when the
+     * keyboard hides / a fresh visibility begins.
+     */
     private var pausedByUser: Boolean = false
     private var blockedReason: String? = null
 
@@ -56,8 +77,6 @@ object ImeSessionModel {
         get() = synchronized(stateLock) { state }
 
     fun currentEpoch(): Long = synchronized(stateLock) { epoch }
-
-    fun issueNonce(): Long = synchronized(stateLock) { nextNonceLocked() }
 
     fun isLeaseCurrent(candidate: EditorLease?): Boolean =
         synchronized(stateLock) { candidate != null && candidate == lease }
@@ -84,12 +103,30 @@ object ImeSessionModel {
         return created
     }
 
+    private fun clearLeaseLocked() {
+        bumpEpochLocked()
+        lease = null
+    }
+
+    private fun fenceOutcomeLocked(
+        next: ImeState,
+        status: String?,
+        blocked: String? = null,
+    ): Outcome {
+        clearLeaseLocked()
+        state = next
+        if (blocked != null) blockedReason = blocked
+        return Outcome(next, null, status, requestStop = true, closeNative = true, atEpoch = epoch)
+    }
+
     // -------------------------------------------------------- visibility path
 
     /**
      * onStartInputView. Auto-starts when visible + permission + staged model +
-     * loadable libs; a sticky manual pause needs an explicit tap; missing
-     * prerequisites show BLOCKED without any microphone or editor write.
+     * loadable libs; a manual pause from THIS activation needs an explicit
+     * tap; missing prerequisites show BLOCKED without any microphone or
+     * editor write. A fresh visibility (after hide) always auto-starts when
+     * ready — a manual pause never outlives the hidden keyboard.
      */
     fun onVisible(
         ready: Boolean,
@@ -101,23 +138,22 @@ object ImeSessionModel {
         visible = true
         when {
             pausedByUser -> {
+                // Same visibility, manual pause: stay explicit-tap-only.
                 state = ImeState.PAUSED
-                bumpEpochLocked()
-                lease = null
-                Outcome(state, null, "Paused — tap Start")
+                clearLeaseLocked()
+                Outcome(state, null, "Paused — tap Start", atEpoch = epoch)
             }
             !ready -> {
                 state = ImeState.BLOCKED
-                bumpEpochLocked()
-                lease = null
                 blockedReason = reason ?: "Not ready"
-                Outcome(state, null, blockedReason, requestStop = true, closeNative = true)
+                clearLeaseLocked()
+                Outcome(state, null, blockedReason, requestStop = true, closeNative = true, atEpoch = epoch)
             }
             else -> {
                 blockedReason = null
                 val created = newLeaseLocked(pkg, fieldId, inputType)
                 state = ImeState.PREPARING
-                Outcome(state, created, "Preparing…", requestStop = true, closeNative = true)
+                Outcome(state, created, "Preparing…", requestStop = true, closeNative = true, atEpoch = epoch)
             }
         }
     }
@@ -134,33 +170,34 @@ object ImeSessionModel {
         fieldId: Int,
         inputType: Int,
     ): Outcome = synchronized(stateLock) {
-        bumpEpochLocked()
-        lease = null
-        if (!hasView) {
-            visible = false
-            state = ImeState.HIDDEN
-        } else if (pausedByUser) {
-            state = ImeState.PAUSED
-        }
-        Outcome(state, null, null, requestStop = true, closeNative = true)
+        // Keyboard still visible: land in PAUSED (not user-paused, redraw can
+        // still auto-start when the next visibility decision comes); gone:
+        // full HIDDEN bookkeeping.
+        fenceOutcomeLocked(
+            if (hasView) ImeState.PAUSED else ImeState.HIDDEN.also { visible = false },
+            status = null,
+        )
     }
 
     /** onStartInput with no editor info: fence everything, hidden bookkeeping. */
     fun onNoEditor(): Outcome = synchronized(stateLock) {
-        bumpEpochLocked()
-        lease = null
-        state = ImeState.HIDDEN
-        Outcome(state, null, null, requestStop = true, closeNative = true)
+        visible = false
+        fenceOutcomeLocked(ImeState.HIDDEN, status = null)
     }
 
     /** Lifecycle hide (view or window): ALWAYS invalidate and free resources. */
     fun onHidden(): Outcome = synchronized(stateLock) {
         visible = false
-        bumpEpochLocked()
-        lease = null
+        // Manual pause does NOT outlive a hidden keyboard: the next fresh
+        // visibility auto-starts when prerequisites are ready.
+        pausedByUser = false
         state = ImeState.HIDDEN
-        // pausedByUser survives so reopen stays manual-explicit.
-        Outcome(state, null, null, requestStop = true, closeNative = true)
+        fenceOutcomeLocked(ImeState.HIDDEN, status = null)
+    }
+
+    /** A FRESH visibility begins: manual pause was per-activation only. */
+    fun onFreshVisibility() = synchronized(stateLock) {
+        pausedByUser = false
     }
 
     /** Service destruction. */
@@ -178,46 +215,28 @@ object ImeSessionModel {
         inputType: Int,
     ): Outcome = synchronized(stateLock) {
         when {
-            !hasView -> Outcome(state, null, "Keyboard not visible")
+            !hasView -> Outcome(state, null, "Keyboard not visible", atEpoch = epoch)
             state == ImeState.LISTENING || state == ImeState.PREPARING -> {
-                // Manual STOP: freeze text + mic, set PAUSED; no auto-restart
-                // on redraw. Old editor composing finish is controller-wired.
-                bumpEpochLocked()
-                lease = null
+                // Manual STOP: freeze text + mic, set PAUSED for THIS visible
+                // keyboard; persists across redraws of the same visibility,
+                // never across hide/reopen. Old editor composing finish is
+                // controller-wired.
                 state = ImeState.PAUSED
                 pausedByUser = true
-                Outcome(state, null, "Paused — tap Start", requestStop = true, closeNative = true)
+                fenceOutcomeLocked(ImeState.PAUSED, status = "Paused — tap Start")
             }
-            pausedByUser -> {
-                // Explicit resume for THIS visible keyboard: new generation.
-                if (!ready) {
-                    state = ImeState.BLOCKED
-                    blockedReason = reason ?: "Not ready"
-                    bumpEpochLocked()
-                    lease = null
-                    Outcome(state, null, blockedReason, requestStop = true, closeNative = true)
-                } else {
-                    blockedReason = null
-                    pausedByUser = false
-                    val created = newLeaseLocked(pkg, fieldId, inputType)
-                    state = ImeState.PREPARING
-                    Outcome(state, created, "Preparing…", requestStop = true, closeNative = true)
-                }
+            !ready -> {
+                state = ImeState.BLOCKED
+                blockedReason = reason ?: "Not ready"
+                fenceOutcomeLocked(ImeState.BLOCKED, status = blockedReason)
             }
             else -> {
-                // BLOCKED or HIDDEN-with-view: explicit tap may start.
-                if (!ready) {
-                    state = ImeState.BLOCKED
-                    blockedReason = reason ?: "Not ready"
-                    bumpEpochLocked()
-                    lease = null
-                    Outcome(state, null, blockedReason, requestStop = true, closeNative = true)
-                } else {
-                    blockedReason = null
-                    val created = newLeaseLocked(pkg, fieldId, inputType)
-                    state = ImeState.PREPARING
-                    Outcome(state, created, "Preparing…")
-                }
+                // PAUSED-explicit-resume, BLOCKED, or HIDDEN-with-view.
+                blockedReason = null
+                pausedByUser = false
+                val created = newLeaseLocked(pkg, fieldId, inputType)
+                state = ImeState.PREPARING
+                Outcome(state, created, "Preparing…", requestStop = true, closeNative = true, atEpoch = epoch)
             }
         }
     }
@@ -227,39 +246,30 @@ object ImeSessionModel {
     /** Lane confirms recognizer + mic are live for this exact lease. */
     fun generationListening(candidate: EditorLease): Outcome = synchronized(stateLock) {
         if (candidate != lease) {
-            return Outcome(state, null, null)
+            // Stale candidate: no-op, no state/UI change, no side effects.
+            return Outcome(state, null, null, noSideEffects = true, atEpoch = epoch)
         }
         state = ImeState.LISTENING
-        Outcome(state, null, "Listening…")
+        Outcome(state, null, "Listening…", atEpoch = epoch)
     }
 
-    /** Failure/interruption: fence + stop; BLOCKED when visible, else HIDDEN. */
+    /**
+     * Failure/interruption: fence + stop ONLY when the candidate is STILL the
+     * current lease; a late failure from a previous generation changes
+     * nothing (no epoch bump, no mic stop on a newer lease, no UI churn).
+     */
     fun generationFailed(candidate: EditorLease?, message: String): Outcome =
         synchronized(stateLock) {
-            bumpEpochLocked()
-            lease = null
-            state = if (visible) ImeState.BLOCKED else ImeState.HIDDEN
-            blockedReason = if (visible) message else blockedReason
-            Outcome(state, null, message, requestStop = true, closeNative = true)
+            if (candidate == null || candidate != lease) {
+                return Outcome(state, null, null, noSideEffects = true, atEpoch = epoch)
+            }
+            val next = if (visible) ImeState.BLOCKED else ImeState.HIDDEN
+            fenceOutcomeLocked(next, status = message, blocked = message)
         }
 
     /** Deterministic stop from any lifecycle path. */
     fun stop(reason: String?): Outcome = synchronized(stateLock) {
-        bumpEpochLocked()
-        lease = null
-        state = if (visible) ImeState.PAUSED else ImeState.HIDDEN
-        Outcome(state, null, reason, requestStop = true, closeNative = true)
-    }
-
-    /** JUnit-only: restore construction state (never called on Android). */
-    fun resetForJUnit() = synchronized(stateLock) {
-        state = ImeState.HIDDEN
-        visible = false
-        pausedByUser = false
-        blockedReason = null
-        epoch = 0L
-        nonceCounter = 0L
-        lease = null
-        Unit
+        val next = if (visible) ImeState.PAUSED else ImeState.HIDDEN
+        fenceOutcomeLocked(next, status = reason)
     }
 }

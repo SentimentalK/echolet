@@ -30,6 +30,102 @@ sealed interface EditorOp {
 }
 
 /**
+ * JVM-testable seam over the LIVE editor writing surface. The Android
+ * implementation is [InputConnectionSink], created ONLY on Android with a real
+ * InputConnection; JVM tests inject fakes here. Every method returns false on
+ * editor refusal / thrown editor exception, so callers fail closed with no
+ * destructive fallback and no uncaught exception on the Android main thread.
+ */
+interface ComposingEditor {
+    /**
+     * Settle the PRE-EXISTING editor composition exactly once (before the
+     * first Echolet write): finishComposingText keeps already-visible text
+     * and commits nothing new; refusals/exceptions are refused (false).
+     */
+    fun settlePreexisting(): Boolean
+
+    /** Replace ONLY the owned composing region with the full recognized text. */
+    fun setComposing(text: String): Boolean
+
+    /** Finalize the owned composing region, leaving the text visible/intact. */
+    fun finish(): Boolean
+}
+
+/**
+ * Persistent per-generation composition OWNER: one instance spans ALL
+ * partial/endpoint batches of one lease, so the pre-existing editor
+ * composition is settled exactly ONCE at the first accepted write and
+ * subsequent partials merely replace the same owned composing span. Creating
+ * a fresh writer per batch would re-run the settle step and prematurely
+ * commit the previous partial, then re-compose from scratch — the exact bug
+ * this class exists to prevent (visible `partial partial…` duplication).
+ *
+ * Also owns the "stop finalize" transition: [finishOwnedIfAny] commits the
+ * already-visible owned composition exactly once (Stop mid-partial keeps the
+ * exact visible text), and is safe/idempotent to call repeatedly.
+ */
+class CompositionOwner(private val editor: ComposingEditor) {
+    private var settledPreexisting = false
+    private var hasOwnedComposition = false
+
+    fun ownsComposition(): Boolean = hasOwnedComposition
+
+    /** Applies one validated op batch; false = refused/failed, no fallback. */
+    fun apply(ops: List<EditorOp>): Boolean {
+        for (op in ops) {
+            val accepted = try {
+                when (op) {
+                    is EditorOp.SetComposing -> {
+                        if (!settledPreexisting) {
+                            // Settle the pre-existing composition ONCE, on the
+                            // first ACCEPTED write of this lease. Retried by
+                            // later batches if the editor refuses now.
+                            if (!editor.settlePreexisting()) return false
+                            settledPreexisting = true
+                        }
+                        hasOwnedComposition = true
+                        editor.setComposing(op.text)
+                    }
+                    EditorOp.FinishComposing -> {
+                        if (hasOwnedComposition) {
+                            hasOwnedComposition = false
+                            editor.finish()
+                        } else {
+                            true // duplicate endpoint: nothing owned to finish
+                        }
+                    }
+                    EditorOp.Noop -> true
+                }
+            } catch (_: Throwable) {
+                // A thrown editor method must never crash the Android main
+                // thread: treat as refusal, fail closed.
+                false
+            }
+            if (!accepted) return false
+        }
+        return true
+    }
+
+    /**
+     * Stop/Hide/ServiceDestroy finalize on the STILL-VALID captured editor:
+     * commits the owned, already-visible composition exactly once without
+     * appending, deleting or re-committing anything. Returns true when
+     * nothing was owned (nothing to do).
+     */
+    fun finishOwnedIfAny(): Boolean {
+        if (!hasOwnedComposition) return true
+        val finished = try {
+            settledPreexisting = true
+            hasOwnedComposition = false
+            editor.finish()
+        } catch (_: Throwable) {
+            false
+        }
+        return finished
+    }
+}
+
+/**
  * Pure projection reducer for one editor lease/native generation.
  * Throws IllegalArgumentException on malformed wire payloads (fail closed:
  * caller stops capture rather than writing anything unvalidated).
@@ -37,13 +133,11 @@ sealed interface EditorOp {
 class ProjectionReducer(private val lease: ImeSessionModel.EditorLease) {
     private var session: Long = -1
     private var lastRevision: Long = -1
-    private var hasOwnedComposition = false
-    private var sawEndpointText = false
+    private var sawEndpointSincePartial = false
 
     fun lease(): ImeSessionModel.EditorLease = lease
     fun nativeSession(): Long = session
     fun lastRevision(): Long = lastRevision
-    fun ownsComposition(): Boolean = hasOwnedComposition
 
     private fun requireSessionEvent(event: JSONObject, kind: String): Long {
         val sessionValue = event.optLong("session", -1L)
@@ -101,8 +195,7 @@ class ProjectionReducer(private val lease: ImeSessionModel.EditorLease) {
                         )
                     }
                     lastRevision = revisionValue
-                    sawEndpointText = false
-                    hasOwnedComposition = true
+                    sawEndpointSincePartial = false
                     ops.add(EditorOp.SetComposing(event.optString("text")))
                 }
                 "endpoint" -> {
@@ -117,13 +210,13 @@ class ProjectionReducer(private val lease: ImeSessionModel.EditorLease) {
                         session = sessionValue
                     }
                     // A session CAN emit several endpoints (per utterance);
-                    // guarded so a stale/double endpoint with no owned
-                    // composition is a Noop instead of a duplicate finish.
-                    if (sawEndpointText || !hasOwnedComposition) {
+                    // guarded so a stale/double endpoint between partials is
+                    // a Noop instead of a duplicate finish. A partial after an
+                    // endpoint opens the NEXT utterance's fresh owned span.
+                    if (sawEndpointSincePartial) {
                         ops.add(EditorOp.Noop)
                     } else {
-                        sawEndpointText = true
-                        hasOwnedComposition = false
+                        sawEndpointSincePartial = true
                         ops.add(EditorOp.FinishComposing)
                     }
                 }
@@ -138,36 +231,33 @@ class ProjectionReducer(private val lease: ImeSessionModel.EditorLease) {
 
 /**
  * The one place that touches the OS InputConnection. Must be invoked ONLY on
- * the Android main thread. Every method returns false on editor refusal so the
- * caller fails closed and stops (no destructive backspace fallback).
+ * the Android main thread. Wraps EVERY InputConnection call in an exception
+ * barrier: a thrown/null/stale editor method returns false (refusal) instead
+ * of crashing the IME UI; the controller fails closed and stops that lease.
  */
-class InputConnectionSink(
-    private val lease: ImeSessionModel.EditorLease,
-    private val ic: InputConnection,
-) : EditorConnection {
-    private var settledPreexisting = false
+class InputConnectionSink(private val ic: InputConnection) : ComposingEditor {
+    private var settledPreexistingForIc = false
 
-    override fun beginOrReplaceComposing(text: String): Boolean {
-        if (!settledPreexisting) {
-            // First write: settle any pre-existing composition WITHOUT
-            // deleting prefix text (finishComposingText keeps the text).
-            settledPreexisting = true
+    override fun settlePreexisting(): Boolean {
+        if (settledPreexistingForIc) return true
+        settledPreexistingForIc = true
+        return try {
             ic.finishComposingText()
+        } catch (_: Throwable) {
+            settledPreexistingForIc = false
+            false
         }
-        // The sink targets exactly the binding this lease captured; the
-        // controller re-validates the live current InputConnection before
-        // calling in, so no cross-editor write can originate here.
-        return ic.setComposingText(text, 1)
     }
 
-    override fun finishComposing(): Boolean = ic.finishComposingText()
-}
+    override fun setComposing(text: String): Boolean = try {
+        ic.setComposingText(text, 1)
+    } catch (_: Throwable) {
+        false
+    }
 
-/**
- * Thinner interface used by both the controller and the JUnit fake: the sink
- * is the only OS boundary, everything above it is pure.
- */
-interface EditorConnection {
-    fun beginOrReplaceComposing(text: String): Boolean
-    fun finishComposing(): Boolean
+    override fun finish(): Boolean = try {
+        ic.finishComposingText()
+    } catch (_: Throwable) {
+        false
+    }
 }

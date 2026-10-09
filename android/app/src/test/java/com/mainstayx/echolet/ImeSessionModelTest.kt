@@ -10,16 +10,19 @@ import org.junit.Test
 
 /**
  * Plain-JVM JUnit tests (no Android runtime) of the PURE lease/state-chart
- * decisions in [ImeSessionModel].
+ * decisions in [ImeSessionModel]. Each test owns a fresh instance — a new
+ * service/controller never inherits sticky process-global state.
  */
 class ImeSessionModelTest {
     private val PKG: String? = "com.notes"
     private val FIELD = 42
     private val INPUT = 0x80000
 
+    private lateinit var model: ImeSessionModel
+
     @Before
-    fun reset() {
-        ImeSessionModel.resetForJUnit()
+    fun freshModel() {
+        model = ImeSessionModel()
     }
 
     private fun leaseOf(outcome: ImeSessionModel.Outcome): ImeSessionModel.EditorLease {
@@ -28,19 +31,31 @@ class ImeSessionModelTest {
     }
 
     @Test
+    fun fresh_instances_do_not_share_sticky_process_state() {
+        val first = ImeSessionModel()
+        first.onVisible(true, null, PKG, FIELD, INPUT)
+        first.onTapControl(ready = true, reason = null, hasView = true, pkg = PKG, fieldId = FIELD, inputType = INPUT)
+        assertEquals(ImeSessionModel.ImeState.PAUSED, first.currentState)
+        // A new service lifetime starts clean: auto-listening when visible.
+        val second = ImeSessionModel()
+        assertEquals(ImeSessionModel.ImeState.HIDDEN, second.currentState)
+    }
+
+    @Test
     fun visibility_auto_starts_when_ready() {
-        val outcome = ImeSessionModel.onVisible(true, null, PKG, FIELD, INPUT)
+        val outcome = model.onVisible(true, null, PKG, FIELD, INPUT)
         assertEquals(ImeSessionModel.ImeState.PREPARING, outcome.state)
         val lease = leaseOf(outcome)
         assertEquals("Preparing…", outcome.status)
-        assertTrue(ImeSessionModel.isLeaseCurrent(lease))
-        val listening = ImeSessionModel.generationListening(lease)
+        assertTrue(model.isLeaseCurrent(lease))
+        val listening = model.generationListening(lease)
         assertEquals(ImeSessionModel.ImeState.LISTENING, listening.state)
+        assertFalse(listening.noSideEffects)
     }
 
     @Test
     fun missing_prerequisite_blocks_no_mic_no_editor() {
-        val outcome = ImeSessionModel.onVisible(false, "Mic permission missing", PKG, FIELD, INPUT)
+        val outcome = model.onVisible(false, "Mic permission missing", PKG, FIELD, INPUT)
         assertEquals(ImeSessionModel.ImeState.BLOCKED, outcome.state)
         assertNull(outcome.lease)
         assertEquals("Mic permission missing", outcome.status)
@@ -49,26 +64,26 @@ class ImeSessionModelTest {
 
     @Test
     fun repeated_hide_focus_stop_is_idempotent_and_always_fences() {
-        val first = ImeSessionModel.onVisible(true, null, PKG, FIELD, INPUT)
+        val first = model.onVisible(true, null, PKG, FIELD, INPUT)
         val lease1 = leaseOf(first)
-        val hidden = ImeSessionModel.onHidden()
+        val hidden = model.onHidden()
         assertEquals(ImeSessionModel.ImeState.HIDDEN, hidden.state)
         assertTrue(hidden.requestStop && hidden.closeNative)
-        assertFalse(ImeSessionModel.isLeaseCurrent(lease1))
-        val before = ImeSessionModel.currentEpoch()
+        assertFalse(model.isLeaseCurrent(lease1))
+        val before = model.currentEpoch()
         repeat(5) {
-            val repeatHide = ImeSessionModel.onHidden()
+            val repeatHide = model.onHidden()
             assertTrue(repeatHide.requestStop && repeatHide.closeNative)
             assertEquals(ImeSessionModel.ImeState.HIDDEN, repeatHide.state)
         }
-        assertTrue(ImeSessionModel.currentEpoch() > before)
+        assertTrue(model.currentEpoch() > before)
     }
 
     @Test
-    fun paused_does_not_auto_resume_on_next_visibility() {
-        val start = ImeSessionModel.onVisible(true, null, PKG, FIELD, INPUT)
-        ImeSessionModel.generationListening(leaseOf(start))
-        val stopped = ImeSessionModel.onTapControl(
+    fun manual_stop_persists_only_within_same_visibility_redraw() {
+        val start = model.onVisible(true, null, PKG, FIELD, INPUT)
+        model.generationListening(leaseOf(start))
+        val stopped = model.onTapControl(
             ready = true, reason = null, hasView = true,
             pkg = PKG, fieldId = FIELD, inputType = INPUT,
         )
@@ -76,104 +91,155 @@ class ImeSessionModelTest {
         assertTrue(stopped.requestStop)
         assertNull(stopped.lease)
 
-        ImeSessionModel.onHidden()
-        val reopened = ImeSessionModel.onVisible(true, null, PKG, FIELD, INPUT)
-        assertEquals(ImeSessionModel.ImeState.PAUSED, reopened.state)
-        assertNull(reopened.lease) // NO auto start
+        // Redraw of the SAME visible keyboard: manual pause persists.
+        val redraw = model.onVisible(true, null, PKG, FIELD, INPUT)
+        assertEquals(ImeSessionModel.ImeState.PAUSED, redraw.state)
+        assertNull(redraw.lease) // NO auto start within this visibility
 
-        val resumed = ImeSessionModel.onTapControl(
-            ready = true, reason = null, hasView = true,
-            pkg = PKG, fieldId = FIELD, inputType = INPUT,
-        )
-        assertEquals(ImeSessionModel.ImeState.PREPARING, resumed.state)
-        assertTrue(ImeSessionModel.isLeaseCurrent(resumed.lease))
+        // Hide/reopen is a FRESH visibility: manual pause does NOT persist.
+        model.onHidden()
+        val reopened = model.onVisible(true, null, PKG, FIELD, INPUT)
+        assertEquals(ImeSessionModel.ImeState.PREPARING, reopened.state)
+        assertTrue(model.isLeaseCurrent(reopened.lease)) // auto-start when ready
+    }
+
+    @Test
+    fun fresh_visibility_reset_is_also_honoured_via_onFreshVisibility() {
+        model.onVisible(true, null, PKG, FIELD, INPUT)
+        model.onTapControl(ready = true, reason = null, hasView = true, pkg = PKG, fieldId = FIELD, inputType = INPUT)
+        // Service marks a new visibility (window shown) even before onVisible.
+        model.onFreshVisibility()
+        val outcome = model.onVisible(true, null, PKG, FIELD, INPUT)
+        assertEquals(ImeSessionModel.ImeState.PREPARING, outcome.state)
+    }
+
+    @Test
+    fun stale_generationListening_is_a_noop_without_side_effects() {
+        val start = model.onVisible(true, null, PKG, FIELD, INPUT)
+        val lease1 = leaseOf(start)
+        model.onHidden()
+        val lease2 = leaseOf(model.onVisible(true, null, PKG, FIELD, INPUT))
+        val stateBefore = model.currentState
+        val late = model.generationListening(lease1)
+        assertTrue(late.noSideEffects)
+        assertEquals(stateBefore, late.state)
+        assertTrue(model.currentState == ImeSessionModel.ImeState.PREPARING)
+        assertTrue(model.isLeaseCurrent(lease2))
+        assertFalse(model.isLeaseCurrent(lease1))
     }
 
     @Test
     fun preparing_canceled_before_native_open_finishes() {
-        val start = ImeSessionModel.onVisible(true, null, PKG, FIELD, INPUT)
+        val start = model.onVisible(true, null, PKG, FIELD, INPUT)
         val lease1 = leaseOf(start)
-        val cancel = ImeSessionModel.stop("user stop while preparing")
-        assertFalse(ImeSessionModel.isLeaseCurrent(lease1))
+        val cancel = model.stop("user stop while preparing")
+        assertFalse(model.isLeaseCurrent(lease1))
         assertTrue(cancel.requestStop && cancel.closeNative)
     }
 
     @Test
     fun old_lease_delayed_events_rejected_after_new_editor() {
-        val first = ImeSessionModel.onVisible(true, null, PKG, FIELD, INPUT)
+        val first = model.onVisible(true, null, PKG, FIELD, INPUT)
         val lease1 = leaseOf(first)
-        ImeSessionModel.onEditorRebinding(hasView = true, pkg = PKG, fieldId = FIELD, inputType = INPUT)
-        assertFalse(ImeSessionModel.isLeaseCurrent(lease1))
+        model.onEditorRebinding(hasView = true, pkg = PKG, fieldId = FIELD, inputType = INPUT)
+        assertFalse(model.isLeaseCurrent(lease1))
 
-        val second = ImeSessionModel.onVisible(true, null, PKG, FIELD, INPUT)
+        val second = model.onVisible(true, null, PKG, FIELD, INPUT)
         val lease2 = leaseOf(second)
-        assertTrue(ImeSessionModel.isLeaseCurrent(lease2))
-        assertFalse(ImeSessionModel.isLeaseCurrent(lease1))
+        assertTrue(model.isLeaseCurrent(lease2))
+        assertFalse(model.isLeaseCurrent(lease1))
         assertTrue(lease1.epoch != lease2.epoch && lease1.nonce != lease2.nonce)
     }
 
     @Test
     fun field_id_reuse_keeps_leases_distinct() {
-        val leaseA = leaseOf(ImeSessionModel.onVisible(true, null, PKG, FIELD, INPUT))
-        ImeSessionModel.stop("switch")
-        val b = ImeSessionModel.onVisible(true, null, PKG, FIELD, INPUT)
+        val leaseA = leaseOf(model.onVisible(true, null, PKG, FIELD, INPUT))
+        model.stop("switch")
+        val b = model.onVisible(true, null, PKG, FIELD, INPUT)
         val leaseB = leaseOf(b)
         assertEquals(leaseA.fieldId, leaseB.fieldId) // SAME reused fieldId
         assertTrue(leaseA.nonce != leaseB.nonce && leaseA.epoch != leaseB.epoch)
-        assertTrue(ImeSessionModel.isLeaseCurrent(leaseB))
-        assertFalse(ImeSessionModel.isLeaseCurrent(leaseA))
+        assertTrue(model.isLeaseCurrent(leaseB))
+        assertFalse(model.isLeaseCurrent(leaseA))
     }
 
     @Test
     fun ten_start_stop_cycles_never_reuse_a_stale_generation() {
         val issued = HashSet<ImeSessionModel.EditorLease>()
-        var previousEpoch = ImeSessionModel.currentEpoch()
+        var previousEpoch = model.currentEpoch()
         repeat(10) {
-            val lease = leaseOf(ImeSessionModel.onVisible(true, null, PKG, FIELD, INPUT))
+            val lease = leaseOf(model.onVisible(true, null, PKG, FIELD, INPUT))
             assertTrue(issued.none { it.epoch == lease.epoch && it.nonce == lease.nonce })
             issued.add(lease)
-            assertTrue(ImeSessionModel.currentEpoch() > previousEpoch)
-            previousEpoch = ImeSessionModel.currentEpoch()
-            val stop = ImeSessionModel.stop("cycle end")
-            assertFalse(ImeSessionModel.isLeaseCurrent(lease))
+            assertTrue(model.currentEpoch() > previousEpoch)
+            previousEpoch = model.currentEpoch()
+            val stop = model.stop("cycle end")
+            assertFalse(model.isLeaseCurrent(lease))
             assertTrue(stop.requestStop && stop.closeNative)
         }
     }
 
     @Test
     fun editor_switch_counts_as_stop_even_without_finish_input_view() {
-        val lease = leaseOf(ImeSessionModel.onVisible(true, null, PKG, FIELD, INPUT))
-        val rebind = ImeSessionModel.onEditorRebinding(
+        val lease = leaseOf(model.onVisible(true, null, PKG, FIELD, INPUT))
+        val rebind = model.onEditorRebinding(
             hasView = true, pkg = PKG, fieldId = FIELD, inputType = INPUT,
         )
         assertTrue(rebind.requestStop && rebind.closeNative)
-        assertFalse(ImeSessionModel.isLeaseCurrent(lease))
+        assertFalse(model.isLeaseCurrent(lease))
+    }
+
+    @Test
+    fun late_generationFailure_from_old_generation_changes_nothing() {
+        val first = model.onVisible(true, null, PKG, FIELD, INPUT)
+        val lease1 = leaseOf(first)
+        model.stop("stop A")
+        val second = model.onVisible(true, null, PKG, FIELD, INPUT)
+        val lease2 = leaseOf(second)
+        assertTrue(model.isLeaseCurrent(lease2))
+        val failed = model.generationFailed(lease2, "microphone read failed")
+        assertEquals(ImeSessionModel.ImeState.BLOCKED, failed.state)
+        assertFalse(failed.noSideEffects)
+        assertFalse(model.isLeaseCurrent(lease2))
+
+        val stateBefore = model.currentState
+        val epochBefore = model.currentEpoch()
+        // A LATE failure from the OLD generation: strict no-op.
+        val stale = model.generationFailed(lease1, "native feed failed")
+        assertTrue(stale.noSideEffects)
+        assertEquals(stateBefore, stale.state)
+        assertEquals(epochBefore, model.currentEpoch())
+        assertEquals(stateBefore, model.currentState)
+        assertFalse(model.isLeaseCurrent(lease1))
     }
 
     @Test
     fun error_marks_blocked_when_visible_hidden_when_not() {
-        val lease = leaseOf(ImeSessionModel.onVisible(true, null, PKG, FIELD, INPUT))
-        val failed = ImeSessionModel.generationFailed(lease, "microphone read failed")
+        val lease = leaseOf(model.onVisible(true, null, PKG, FIELD, INPUT))
+        val failed = model.generationFailed(lease, "microphone read failed")
         assertEquals(ImeSessionModel.ImeState.BLOCKED, failed.state)
         assertTrue(failed.requestStop && failed.closeNative)
-        assertFalse(ImeSessionModel.isLeaseCurrent(lease))
+        assertFalse(model.isLeaseCurrent(lease))
 
-        val lease2 = leaseOf(ImeSessionModel.onVisible(true, null, PKG, FIELD, INPUT))
-        ImeSessionModel.onHidden()
-        val failed2 = ImeSessionModel.generationFailed(lease2, "native feed failed")
+        val lease2 = leaseOf(model.onVisible(true, null, PKG, FIELD, INPUT))
+        model.onHidden()
+        val failed2 = model.generationFailed(lease2, "native feed failed")
         assertEquals(ImeSessionModel.ImeState.HIDDEN, failed2.state)
     }
 
     @Test
     fun hidden_invalidates_even_when_paused() {
-        ImeSessionModel.onVisible(true, null, PKG, FIELD, INPUT)
-        val pause = ImeSessionModel.onTapControl(
+        model.onVisible(true, null, PKG, FIELD, INPUT)
+        val pause = model.onTapControl(
             ready = true, reason = null, hasView = true,
             pkg = PKG, fieldId = FIELD, inputType = INPUT,
         )
         assertEquals(ImeSessionModel.ImeState.PAUSED, pause.state)
-        val hidden = ImeSessionModel.onHidden()
+        val hidden = model.onHidden()
         assertEquals(ImeSessionModel.ImeState.HIDDEN, hidden.state)
         assertTrue(hidden.requestStop) // mic released regardless of PAUSED
+        // Manual pause cleared for the NEXT visibility.
+        val reopened = model.onVisible(true, null, PKG, FIELD, INPUT)
+        assertEquals(ImeSessionModel.ImeState.PREPARING, reopened.state)
     }
 }

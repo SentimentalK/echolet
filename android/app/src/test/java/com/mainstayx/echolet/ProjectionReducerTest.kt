@@ -4,17 +4,19 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
-import org.junit.Before
 import org.junit.Test
 
 /**
  * Plain-JVM JUnit tests (no Android runtime) of the Phase 0-B EDITOR
  * projection: strict nativeFeed JSON validation, contiguous revision
- * watermarking, endpoint guarding and composing-only mapping. The fake
- * [ProjectionReducerTest.FakeEditor] implements the same [EditorConnection]
- * contract the Android [InputConnectionSink] fulfils against the real OS
- * editor; per Design 9, real InputConnection/AudioRecord behavior is validated
- * by a debug device smoke instead of JVM tests.
+ * watermarking, endpoint guarding and composing-only mapping. The batches are
+ * applied through the REAL per-lease [CompositionOwner] over a fake
+ * [ComposingEditor] implementing the same contract the Android
+ * [InputConnectionSink] fulfils against the OS editor — so the persistent
+ * one-owner-per-lease lifecycle is genuinely exercised (a fresh writer per
+ * batch reproduces the `partial partial…` commit duplication bug this file
+ * historically prevents). Real InputConnection/AudioRecord behavior is
+ * validated on device smoke instead of JVM.
  */
 class ProjectionReducerTest {
     private val lease = ImeSessionModel.EditorLease(
@@ -23,42 +25,77 @@ class ProjectionReducerTest {
 
     private fun lease2() = ImeSessionModel.EditorLease(1L, null, 0, 0, 1L)
 
-    /** Simulated editor: pre-existing prefix text + one owned composition. */
-    private class FakeEditor : EditorConnection {
+    /**
+     * Simulated editor: pre-existing prefix text + Echolet-owned composing
+     * span; beginOrReplaceComposing REPLACES the owned span only.
+     */
+    private class FakeEditor : ComposingEditor {
         var prefix = "existing "
         var composed = ""
+        var disposes = 0
         var refuseNext = false
+        var throwNext = false
 
         fun visible(): String = prefix + composed
 
-        override fun beginOrReplaceComposing(text: String): Boolean {
+        override fun settlePreexisting(): Boolean {
             if (refuseNext) return false
+            if (throwNext) {
+                throwNext = false
+                throw RuntimeException("editor threw at settle")
+            }
+            // Finishing the pre-existing composition commits into prefix.
+            prefix += composed
+            composed = ""
+            return true
+        }
+
+        override fun setComposing(text: String): Boolean {
+            if (refuseNext) return false
+            if (throwNext) {
+                throwNext = false
+                throw RuntimeException("editor threw at setComposing")
+            }
             composed = text
             return true
         }
 
-        override fun finishComposing(): Boolean {
+        override fun finish(): Boolean {
             if (refuseNext) return false
-            prefix = prefix + composed
+            if (throwNext) {
+                throwNext = false
+                throw RuntimeException("editor threw at finish")
+            }
+            prefix += composed
             composed = ""
+            disposes += 1
             return true
         }
     }
 
-    @Before
-    fun reset() {
-        ImeSessionModel.resetForJUnit()
+    /** One owner per lease, spanning every batch (real lifecycle). */
+    private fun owner(editor: FakeEditor) = ProjectionReducerOwnerProxy(editor)
+
+    /** Applies a validated batch through the persistent composition owner. */
+    private fun applyAll(
+        reducer: ProjectionReducer,
+        editor: FakeEditor,
+        memo: ProjectionReducerOwnerProxy,
+        json: String,
+    ) {
+        assertTrue(memo.applyVia(reducer.accept(json)))
     }
 
-    /** Apply helper mirroring the Android sink op dispatch. */
-    private fun apply(editor: FakeEditor, op: EditorOp): Boolean = when (op) {
-        is EditorOp.SetComposing -> editor.beginOrReplaceComposing(op.text)
-        EditorOp.FinishComposing -> editor.finishComposing()
-        EditorOp.Noop -> true
-    }
+    /** Small wrapper so tests go through CompositionOwner, not raw ops. */
+    private class ProjectionReducerOwnerProxy(private val editor: ComposingEditor) {
+        private val owner = CompositionOwner(editor)
 
-    private fun applyAll(reducer: ProjectionReducer, editor: FakeEditor, json: String) {
-        for (op in reducer.accept(json)) apply(editor, op)
+        fun applyVia(ops: List<EditorOp>): Boolean {
+            return owner.apply(ops)
+        }
+
+        fun owns(): Boolean = owner.ownsComposition()
+        fun finishOwnedNow(): Boolean = owner.finishOwnedIfAny()
     }
 
     private fun partial(revision: Long, text: String) =
@@ -71,20 +108,39 @@ class ProjectionReducerTest {
     fun accepted_full_text_replaces_only_owned_span_prefix_survives() {
         val reducer = ProjectionReducer(lease)
         val editor = FakeEditor()
-        applyAll(reducer, editor, partial(1L, "你好"))
+        val chip = owner(editor)
+        applyAll(reducer, editor, chip, partial(1L, "你好"))
         assertEquals("existing 你好", editor.visible())
         assertEquals("existing ", editor.prefix) // prefix never mutated by partials
-        applyAll(reducer, editor, partial(2L, "你坏"))
-        assertEquals("existing 你坏", editor.visible()) // correction, prefix intact
-        assertTrue(reducer.ownsComposition())
+        assertTrue(chip.owns())
+        // SECOND partial in a DISTINCT batch must REPLACE, never duplicate.
+        applyAll(reducer, editor, chip, partial(2L, "你们好"))
+        assertEquals("existing 你们好", editor.visible())
+        assertEquals(0, editor.disposes) // nothing committed until endpoint
+    }
+
+    @Test
+    fun two_batches_through_one_owner_must_not_duplicate() {
+        // The wire sends batches through ONE lease-scoped reducer + owner.
+        // Two DISTINCT batches arrive: reducer revision watermark continues
+        // and the persistent owner replaces, never duplicates.
+        val reducer = ProjectionReducer(lease)
+        val editor = FakeEditor()
+        val chip = owner(editor)
+        applyAll(reducer, editor, chip, partial(1L, "你好"))
+        applyAll(reducer, editor, chip, partial(2L, "你们好"))
+        assertEquals("existing 你们好", editor.visible())
+        assertEquals("existing ", editor.prefix)
+        assertEquals(0, editor.disposes)
     }
 
     @Test
     fun accepted_empty_text_clears_only_owned_composing_region() {
         val reducer = ProjectionReducer(lease)
         val editor = FakeEditor()
-        applyAll(reducer, editor, partial(1L, "你好"))
-        applyAll(reducer, editor, partial(2L, ""))
+        val chip = owner(editor)
+        applyAll(reducer, editor, chip, partial(1L, "你好"))
+        applyAll(reducer, editor, chip, partial(2L, ""))
         assertTrue(editor.composed.isEmpty()) // owned span cleared
         assertEquals("existing ", editor.prefix) // prefix preserved exactly
         assertEquals("existing ", editor.visible())
@@ -94,32 +150,55 @@ class ProjectionReducerTest {
     fun endpoint_finishes_once_and_guards_stale_duplicates() {
         val reducer = ProjectionReducer(lease)
         val editor = FakeEditor()
-        applyAll(reducer, editor, partial(1L, "好的"))
-        applyAll(reducer, editor, endpoint(text = "好的"))
+        val chip = owner(editor)
+        applyAll(reducer, editor, chip, partial(1L, "好的"))
+        applyAll(reducer, editor, chip, endpoint(text = "好的"))
         assertEquals("existing 好的", editor.visible()) // finalized once, no
         // extra commit duplication
-        assertFalse(reducer.ownsComposition())
+        assertFalse(chip.owns())
+        assertEquals(1, editor.disposes)
 
-        // A REAL same-session duplicate endpoint (device haters: none in rust
-        // but the contract allows several per session): guarded Noop only when
+        // A REAL same-session duplicate endpoint: guarded Noop only when
         // there is no owned composition to finish.
         val lateOps = reducer.accept(endpoint(text = "好的"))
         assertEquals(1, lateOps.size)
         assertTrue(lateOps[0] is EditorOp.Noop)
+        applyAll(reducer, editor, chip, "[]")
         assertEquals("existing 好的", editor.visible()) // untouched
+        assertEquals(1, editor.disposes) // second finish never happened
     }
 
     @Test
     fun multiple_endpoints_in_one_session_are_not_globally_suppressed() {
         val reducer = ProjectionReducer(lease)
         val editor = FakeEditor()
-        applyAll(reducer, editor, partial(1L, "第一"))
-        applyAll(reducer, editor, endpoint(text = "第一"))
+        val chip = owner(editor)
+        applyAll(reducer, editor, chip, partial(1L, "第一"))
+        applyAll(reducer, editor, chip, endpoint(text = "第一"))
         assertEquals("existing 第一", editor.visible())
         // Next utterance: revision keeps ascending, composing span restarts.
-        applyAll(reducer, editor, partial(2L, "第二"))
-        applyAll(reducer, editor, endpoint(text = "第二"))
+        applyAll(reducer, editor, chip, partial(2L, "第二"))
+        applyAll(reducer, editor, chip, endpoint(text = "第二"))
         assertEquals("existing 第一第二", editor.visible())
+        assertEquals(2, editor.disposes)
+    }
+
+    @Test
+    fun stop_mid_partial_preserves_exact_visible_text_without_extra_commit() {
+        val reducer = ProjectionReducer(lease)
+        val editor = FakeEditor()
+        val chip = owner(editor)
+        applyAll(reducer, editor, chip, partial(1L, "说到一半"))
+        assertEquals("existing 说到一半", editor.visible())
+        assertTrue(chip.owns())
+        // Stop: finalize ONLY what's already visible; appends nothing.
+        assertTrue(chip.finishOwnedNow())
+        assertEquals("existing 说到一半", editor.visible())
+        assertTrue(editor.composed.isEmpty())
+        assertEquals(1, editor.disposes) // exactly one settle-free commit
+        assertTrue(chip.finishOwnedNow()) // idempotent: no second commit
+        assertEquals(1, editor.disposes)
+        assertEquals("existing 说到一半", editor.visible())
     }
 
     @Test
@@ -148,6 +227,7 @@ class ProjectionReducerTest {
     fun malformed_wire_payloads_fail_closed_without_writes() {
         val reducer = ProjectionReducer(lease)
         val editor = FakeEditor()
+        val chip = owner(editor)
         val malformed = listOf(
             """[{"kind":"weird"}]""",
             """[{"kind":"partial","session":0,"revision":1,"backspaces":0,"suffix":"","text":"a"}]""",
@@ -173,33 +253,32 @@ class ProjectionReducerTest {
     fun surrogate_characters_handled_as_full_text() {
         val reducer = ProjectionReducer(lease)
         val editor = FakeEditor()
-        applyAll(reducer, editor, partial(1L, "说🤖🈚️你好"))
-        applyAll(reducer, editor, partial(2L, "说🤖🈚️再見"))
+        val chip = owner(editor)
+        applyAll(reducer, editor, chip, partial(1L, "说🤖🈚️你好"))
+        applyAll(reducer, editor, chip, partial(2L, "说🤖🈚️再見"))
         assertEquals("existing 说🤖🈚️再見", editor.visible())
     }
 
     @Test
-    fun stop_keeps_last_visible_partial_and_emits_no_late_final() {
-        // Issue the lease through the REAL model, mirroring controller flow.
-        val issued = ImeSessionModel.onVisible(true, null, "com.notes", 3, 1).lease!!
-        val reducer = ProjectionReducer(issued)
-        val editor = FakeEditor()
-        applyAll(reducer, editor, partial(1L, "说到一半"))
-        assertEquals("existing 说到一半", editor.visible())
-        // Stop fences the lease: late events for it are dropped upstream
-        // (controller isLeaseCurrent), the visible partial is NEVER drained.
-        ImeSessionModel.stop("stop mid-utterance")
-        assertFalse(ImeSessionModel.isLeaseCurrent(issued))
-        assertEquals("existing 说到一半", editor.visible())
+    fun editor_refusal_fails_closed_without_any_owner_write() {
+        val reducer = ProjectionReducer(lease)
+        val editor = FakeEditor().apply { refuseNext = true }
+        val chip = owner(editor)
+        // Editor refuses the settle step: fail closed, no fallback writes.
+        val ops = reducer.accept(partial(1L, "x"))
+        assertFalse(chip.applyVia(ops))
+        assertEquals("existing ", editor.visible())
+        assertFalse(chip.owns())
     }
 
     @Test
-    fun error_path_drops_pending_callbacks_and_owner_never_writes() {
+    fun editor_thrown_exception_is_refusal_never_a_crash() {
         val reducer = ProjectionReducer(lease)
-        val editor = FakeEditor().apply { refuseNext = true }
-        // Editor refuses the composing API: fail closed, no fallback writes.
-        val ops = reducer.accept(partial(1L, "x"))
-        assertFalse(apply(editor, ops[0]))
+        val editor = FakeEditor().apply { throwNext = true }
+        val chip = owner(editor)
+        val ops = reducer.accept(partial(1L, "y"))
+        assertFalse(chip.applyVia(ops)) // caught, mapped to refusal
+        assertEquals("existing ", editor.visible()) // nothing was written
     }
 
     @Test
@@ -211,5 +290,22 @@ class ProjectionReducerTest {
         assertEquals(9L, reducer.nativeSession()) // stable session id locked in
         val ops2 = reducer.accept("""[{"kind":"partial","session":9,"revision":2,"backspaces":0,"suffix":"","text":"初次第"}]""")
         assertEquals(1, ops2.size)
+    }
+
+    @Test
+    fun stop_keeps_last_visible_partial_and_emits_no_late_final() {
+        val model = ImeSessionModel()
+        // Issue the lease through the REAL model, mirroring controller flow.
+        val issued = model.onVisible(true, null, "com.notes", 3, 1).lease!!
+        val reducer = ProjectionReducer(issued)
+        val editor = FakeEditor()
+        val chip = owner(editor)
+        applyAll(reducer, editor, chip, partial(1L, "说到一半"))
+        assertEquals("existing 说到一半", editor.visible())
+        // Stop fences the lease: late events for it are dropped upstream
+        // (controller isLeaseCurrent), the visible partial is NEVER drained.
+        model.stop("stop mid-utterance")
+        assertFalse(model.isLeaseCurrent(issued))
+        assertEquals("existing 说到一半", editor.visible()) // exact partial kept
     }
 }
