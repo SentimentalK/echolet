@@ -238,5 +238,46 @@ than faking verification.
 
 ## Permissions
 
-The manifest does not request `INTERNET`, `RECORD_AUDIO`, or any other
-permission; it does not declare an input method or a foreground service.
+The manifest now (Phase 0-B) requests exactly `RECORD_AUDIO` for the IME; it
+still does not request `INTERNET` or declare any foreground service — audio
+stays on-device and the microphone is held only while the keyboard is visible
+and Listening.
+
+## Phase 0-B system IME (offline voice keyboard)
+
+`com.mainstayx.echolet.EcholetInputMethodService` (exported, guarded by
+`android.permission.BIND_INPUT_METHOD`, metadata `res/xml/echolet_method.xml`)
+is the minimal system IME: one status label + one wide Start/Stop control, no
+QWERTY. All lifecycle entry points and the control route through
+`ImeSessionController` (pure decisions in `ImeSessionModel`):
+
+- Readiness on visibility: microphone permission, the SAME pinned fixture
+  under `…/files/models/bilingual-zh-en` as the diagnostic Activity, and
+  loadable native libs. Anything missing shows a BLOCKED state — no microphone,
+  no editor writes — with a tap through to `MainActivity`'s explicit "Allow
+  microphone" and "Enable/Select Echolet keyboard" setup affordances.
+- Ready + visible auto-starts one generation: `NativeBridge.nativeOpen` on the
+  single background lane, then `AudioRecord` (VOICE_RECOGNITION, mono PCM16
+  16 kHz via `AndroidMicCapture`, ~200 ms chunks).
+- Every `nativeFeed` event batch is validated by `ProjectionReducer` (lease
+  freshness, native-session stability, contiguous revisions from 1), posted to
+  the main thread behind a bounded ACK latch, re-validated against the CURRENT
+  editor binding, then projected ONLY through the composing region:
+  `setComposingText(full text, 1)` for partials, `finishComposingText()` once
+  per endpoint. Backspaces/suffix wire metadata stays diagnostic-only and
+  `deleteSurroundingText` is never used, so pre-session text survives.
+- Stop (control tap, hide, view finish, editor switch, service destroy) fences
+  the epoch synchronously, stops AudioRecord immediately, closes the native
+  handle exactly once on the lane, and never injects a late final; delivered
+  text is kept. Each Start issues a fresh epoch/lease/generation.
+
+Host verification for this slice is unchanged plus:
+
+```sh
+(cd android && ./gradlew :app:testDebugUnitTest :app:assembleDebug)
+android/scripts/verify-apk-arm64.sh
+```
+
+ JVM tests cover the pure lease/reducer transitions; real OS editor and
+ microphone behavior require the device smoke (Design 10) and stay explicitly
+ UNVERIFIED until a physical arm64 phone is attached.

@@ -1,6 +1,10 @@
 package com.mainstayx.echolet
 
+import android.Manifest
 import android.app.Activity
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.provider.Settings
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -19,10 +23,13 @@ import org.json.JSONObject
  * libecholet_android.so / sherpa-onnx C API) recognizes the real pinned X-ASR
  * fixture on this device. This is NOT the IME, NOT streaming microphone
  * capture, and NOT an InputConnection — no deltas are written to any OS editor
- * here, and history stays off.
+ * here, and history stays off. Phase 0-B adds ONLY two setup affordances:
+ * 'Allow microphone' and 'Enable/Select Echolet keyboard'.
  */
 class MainActivity : Activity() {
     private var runButton: TextView? = null
+    private var micButton: TextView? = null
+    private var imeButton: TextView? = null
     private var output: TextView? = null
     private var executor: ExecutorService? = null
     private val main = Handler(Looper.getMainLooper())
@@ -43,6 +50,53 @@ class MainActivity : Activity() {
         }
         root.addView(
             runButton,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+            ),
+        )
+
+        // Phase 0-B setup affordances (explicit user gesture only).
+        micButton = TextView(this).apply {
+            text = "Allow microphone"
+            textSize = 18f
+            gravity = Gravity.CENTER
+            setPadding(32, 24, 32, 24)
+            setOnClickListener {
+                val granted =
+                    checkSelfPermission(Manifest.permission.RECORD_AUDIO) ==
+                        PackageManager.PERMISSION_GRANTED
+                if (granted) {
+                    status("Microphone permission already granted.")
+                } else {
+                    requestPermissions(
+                        arrayOf(Manifest.permission.RECORD_AUDIO),
+                        REQUEST_MIC,
+                    )
+                }
+            }
+        }
+        root.addView(
+            micButton,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+            ),
+        )
+
+        imeButton = TextView(this).apply {
+            text = "Enable/Select Echolet keyboard"
+            textSize = 18f
+            gravity = Gravity.CENTER
+            setPadding(32, 24, 32, 24)
+            setOnClickListener {
+                // System gesture path: open IME settings; the picker needs an
+                // active token we do not have from an idle Activity.
+                startActivity(Intent(Settings.ACTION_INPUT_METHOD_SETTINGS))
+            }
+        }
+        root.addView(
+            imeButton,
             LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT,
@@ -178,6 +232,27 @@ class MainActivity : Activity() {
         executor?.shutdown()
         executor = null
         super.onDestroy()
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray,
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == REQUEST_MIC) {
+            status(
+                if (grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) {
+                    "Microphone permission granted."
+                } else {
+                    "Microphone permission denied; the IME stays BLOCKED until granted."
+                }
+            )
+        }
+    }
+
+    companion object {
+        private const val REQUEST_MIC = 7001
     }
 }
 

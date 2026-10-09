@@ -1,6 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <!-- Phase 0-B: microphone for the IME voice keyboard. No INTERNET and no
+         foreground-service permission: audio stays on-device, mic is held only
+         while the Echolet keyboard is visible and Listening. -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+
     <application
         android:allowBackup="false"
         android:label="@string/app_name"
@@ -13,6 +18,20 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- Phase 0-B IME: one exported service, BIND_INPUT_METHOD-guarded. -->
+        <service
+            android:name=".EcholetInputMethodService"
+            android:exported="true"
+            android:label="@string/ime_name"
+            android:permission="android.permission.BIND_INPUT_METHOD">
+            <intent-filter>
+                <action android:name="android.view.InputMethod" />
+            </intent-filter>
+            <meta-data
+                android:name="android.view.im"
+                android:resource="@xml/echolet_method" />
+        </service>
     </application>
 
 </manifest>

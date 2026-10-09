@@ -32,6 +32,9 @@ android {
 //   (cd android && ./gradlew :app:testDebugUnitTest)
 dependencies {
     testImplementation("junit:junit:4.13.2")
+    // Real org.json for JVM tests: the android.jar stub throws "not mocked"
+    // when ProjectionReducer parses nativeFeed wire payloads.
+    testImplementation("org.json:json:20240303")
 }
 
 // Native .so binaries are staged by android/scripts/build-native-arm64.sh
