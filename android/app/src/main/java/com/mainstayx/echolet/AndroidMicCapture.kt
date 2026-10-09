@@ -15,10 +15,11 @@ import android.media.MediaRecorder
  */
 interface MicCapture {
     /**
-     * Constructs and starts one capture. Throws IllegalStateException for an
-     * unsupported config or device refusal; the caller maps that to
-     * BLOCKED/Stop. A start that was overtaken by [stopAndRelease] must not
-     * leave a live recording behind.
+     * Constructs and starts one capture. Throws for an unsupported config,
+     * device refusal or a revoked/failed OS start (any realistic unchecked
+     * failure, e.g. IllegalStateException, SecurityException, RuntimeException);
+     * the caller maps that to BLOCKED/Stop. A start that was overtaken by
+     * [stopAndRelease] must not leave a live recording behind.
      */
     fun start()
 
@@ -137,10 +138,41 @@ class AndroidMicCapture(
         const val SAMPLE_RATE = 16000
         const val CHUNK_SHORTS = 3200 // 200 ms at 16 kHz, mono
         const val MAX_FEED_SAMPLES = 32000 // JNI nativeFeed ceiling
+
+        /** Bounded wait for an in-flight teardown to settle, then BLOCKED. */
+        const val CLOSE_SETTLE_TIMEOUT_MILLIS = 5_000L
+        private const val CLOSE_SETTLE_TIMEOUT_NANOS =
+            CLOSE_SETTLE_TIMEOUT_MILLIS * 1_000_000
+        private const val CLOSE_SETTLE_STEP_NANOS = 50_000_000L
     }
 
     override fun start() {
         synchronized(lock) {
+            // A CLOSED phase here means the PREVIOUS lease's teardown is
+            // still settling (marked CLOSED before its halt/free finishes).
+            // That is a transient "closing" state, not a permanent mic
+            // failure: wait bounded for the settle reset to FRESH, so a fast
+            // valid Stop->Start never spuriously errors. If the underlying
+            // OS teardown hangs, the bounded wait expires and the caller
+            // surfaces BLOCKED instead of starting over an unsettled or
+            //possibly live recorder.
+            var remaining = CLOSE_SETTLE_TIMEOUT_NANOS
+            while (phase == Phase.CLOSED && remaining > 0) {
+                val step = CLOSE_SETTLE_STEP_NANOS
+                try {
+                    (lock as java.lang.Object).wait(step, (step % 1_000_000).toInt())
+                } catch (_: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                }
+                remaining -= step
+            }
+            if (phase == Phase.CLOSED) {
+                // Teardown did not settle in time: do NOT start a second
+                // recorder over a possibly still-live or half-released one.
+                throw IllegalStateException(
+                    "mic capture still closing; previous teardown unsettled"
+                )
+            }
             if (phase != Phase.FRESH) {
                 throw IllegalStateException(
                     "mic capture reused without a full stop (phase=$phase)"
@@ -183,14 +215,20 @@ class AndroidMicCapture(
         }
         try {
             os.startRecording()
-        } catch (e: IllegalStateException) {
+        } catch (e: Throwable) {
+            // EVERY realistic Android start failure (SecurityException when
+            // RECORD_AUDIO was revoked, IllegalStateException, any runtime
+            // glitch) must release the recorder EXACTLY ONCE and reset the
+            // instance, then RETHROW the original failure unswallowed: the
+            // caller maps the type/message to BLOCKED and never sees a
+            // half-configured capture.
             synchronized(lock) {
                 record = null
                 phase = Phase.CLOSED
                 owedTeardown = os
             }
             finishTeardown(os)
-            throw IllegalStateException("AudioRecord.startRecording failed: $e")
+            throw e
         }
         val orphan = synchronized(lock) {
             if (stopRequested) {
@@ -297,6 +335,9 @@ class AndroidMicCapture(
         if (record == null && owedTeardown == null && phase == Phase.CLOSED) {
             phase = Phase.FRESH
             stopRequested = false
+            // Wake any start() waiting in the closing-settlement gate so the
+            // next lease may begin the moment the OS recorder is truly free.
+            (lock as java.lang.Object).notifyAll()
         }
     }
 }

@@ -156,6 +156,11 @@ class ImeSessionControllerMediationTest {
         val closedHandles = mutableListOf<Long>()
         /** EVERY close attempt, even for unowned/duplicate handles. */
         val closeAttempts = mutableListOf<Long>()
+        /** Global open/close event order (Design A close-before-open proof). */
+        val events = mutableListOf<String>()
+
+        /** When set, the NEXT close attempt throws (Design A close fault). */
+        @Volatile var throwOnClose = false
 
         /** Parked INSIDE open() to emulate "generation still preparing". */
         @Volatile var openGate: CountDownLatch? = null
@@ -177,6 +182,7 @@ class ImeSessionControllerMediationTest {
             synchronized(lock) {
                 val handle = ++counter
                 openedHandles.add(handle)
+                events.add("open:$handle")
                 byHandle[handle] = ArrayDeque(pendingFeeds.removeFirstOrNull() ?: emptyList())
                 return handle
             }
@@ -195,7 +201,14 @@ class ImeSessionControllerMediationTest {
         }
 
         override fun close(handle: Long) {
-            synchronized(lock) { closeAttempts.add(handle) }
+            synchronized(lock) {
+                closeAttempts.add(handle)
+                events.add("close:$handle")
+            }
+            if (throwOnClose) {
+                throwOnClose = false
+                throw RuntimeException("native session already gone")
+            }
             synchronized(lock) {
                 if (!openedHandles.contains(handle)) return
                 if (byHandle.remove(handle) == null) return // duplicate: no-op
@@ -1133,5 +1146,177 @@ class ImeSessionControllerMediationTest {
         assertEquals(10, harness.native.openedHandles.size)
         assertEquals(10, harness.native.closedHandles.size) // each handle closed once
         assertTrue(harness.mic.allReleasedExactlyOnce())
+    }
+
+    /**
+     * Design A / E Scenario 1: generation A fails on the lane, its epoch is
+     * fenced, and B is issued from main WHILE A is parked after the fence and
+     * BEFORE its close. Releasing A must settle A's native handle EXACTLY
+     * ONCE and BEFORE B's native.open (lane-ordered close-before-open, no
+     * overlapping Rust sessions / AlreadyActive), with B reaching LISTENING;
+     * A's close never touches B.
+     */
+    @Test
+    fun failed_a_parked_after_fence_closes_exactly_once_before_b_opens() {
+        val harness = sequencedHarness()
+        val tokenA = EditorToken("A")
+        val tokenB = EditorToken("B")
+        val native = harness.native
+        val fenceEntered = CountDownLatch(1)
+        val releaseLane = CountDownLatch(1)
+        harness.controller.onAfterFailureFenceBeforeClose = {
+            fenceEntered.countDown()
+            releaseLane.await()
+        }
+
+        native.planOpen(listOf(partial(1L, "甲文")))
+        val park = harness.mic.planReadsThenPark(1)
+        val laneThread = drainLaneInThread(harness)
+        startVisibility(harness, tokenA)
+        awaitCondition("A reader parked live") { harness.mic.parkedInRead }
+        val handleA = native.openedHandles.single()
+        assertEquals("甲文", editors.getValue(tokenA).visible())
+        assertEquals(ImeSessionModel.ImeState.LISTENING, harness.model.currentState)
+
+        // Trigger A's EOF failure; the lane parks after the epoch fence.
+        park.countDown()
+        assertTrue(fenceEntered.await(2, TimeUnit.SECONDS))
+        // B issued from main while A is parked before close scheduling.
+        native.planOpen(listOf(partial(1L, "乙文")))
+        val parkB = harness.mic.planReadsThenPark(1)
+        harness.controller.onInputStarted(info(), restarting = false, viewVisible = true)
+        activeEditorToken = tokenB
+        harness.controller.onInputViewStarted(info(), tokenB, ready = true, blockedReason = null)
+        val leaseB = harness.controller.currentLease()
+        assertNotNull(leaseB)
+
+        // Release A: its close must run before B's queued generation opens.
+        releaseLane.countDown()
+        awaitCondition("B listening, live, parked") {
+            harness.model.currentState == ImeSessionModel.ImeState.LISTENING &&
+                harness.mic.parkedInRead &&
+                editsVisible(harness, tokenB) == "乙文"
+        }
+        val handleB = native.openedHandles.getOrNull(1)
+            ?: throw AssertionError("B never opened natively")
+        // STRICT ordering proof on the serial lane.
+        assertEquals(listOf("open:$handleA", "close:$handleA", "open:$handleB"), native.events)
+        assertEquals(1, native.closeAttempts.count { it == handleA }) // exactly once
+        assertEquals(ImeSessionModel.ImeState.LISTENING, harness.model.currentState) // B live
+
+        harness.controller.stop("teardown")
+        parkB.countDown()
+        endLane(harness)
+        assertTrue(laneDied(laneThread))
+        drainLane(harness)
+        assertTrue(harness.mic.allReleasedExactlyOnce())
+        assertTrue(native.closedHandles.containsAll(native.openedHandles))
+        assertEquals(1, editors.getValue(tokenB).finishCount) // B finalized ONCE
+    }
+
+    /**
+     * Design A / E Scenario 2: ordinary user Stop queues/fires A's native
+     * close BEFORE a newer generation B is scheduled on the same lane, so
+     * B's native.open can never precede A's close.
+     */
+    @Test
+    fun user_stop_settles_a_close_before_b_generation_opens() {
+        val harness = sequencedHarness()
+        val tokenA = EditorToken("A")
+        val tokenB = EditorToken("B")
+        val native = harness.native
+
+        native.planOpen(listOf(partial(1L, "甲文")))
+        val parkA = harness.mic.planReadsThenPark(1)
+        val laneThreadA = drainLaneInThread(harness)
+        startVisibility(harness, tokenA)
+        awaitCondition("A reader parked") { harness.mic.parkedInRead }
+        val handleA = native.openedHandles.single()
+        assertTrue(native.closedHandles.isEmpty()) // A alive while listening
+
+        // User Stop: fence + finalize + mic stop NOW; the close is settled
+        // by the lane behind the PRODUCER queue, never behind a newer B open.
+        harness.controller.stop("user stop")
+        parkA.countDown()
+        endLane(harness)
+        assertTrue(laneDied(laneThreadA))
+        drainLane(harness) // A's producer loop ends; A close settled in FIFO order
+        assertEquals(listOf("open:$handleA", "close:$handleA"), native.events)
+        assertEquals(1, native.closeAttempts.count { it == handleA })
+
+        // Fresh B on the same view: opens only after A's close took effect.
+        native.planOpen(listOf(partial(1L, "乙文")))
+        val parkB = harness.mic.planReadsThenPark(1)
+        val laneThreadB = drainLaneInThread(harness)
+        harness.controller.onInputStarted(info(), restarting = false, viewVisible = true)
+        activeEditorToken = tokenB
+        harness.controller.onInputViewStarted(info(), tokenB, ready = true, blockedReason = null)
+        awaitCondition("B listening, live, parked") {
+            harness.model.currentState == ImeSessionModel.ImeState.LISTENING &&
+                harness.mic.parkedInRead &&
+                editsVisible(harness, tokenB) == "乙文"
+        }
+        val handleB = native.openedHandles[1]
+        assertEquals(
+            listOf("open:$handleA", "close:$handleA", "open:$handleB"),
+            native.events,
+        )
+
+        harness.controller.stop("teardown")
+        parkB.countDown()
+        endLane(harness)
+        assertTrue(laneDied(laneThreadB))
+        drainLane(harness)
+        assertTrue(harness.mic.allReleasedExactlyOnce())
+        assertTrue(native.closedHandles.containsAll(native.openedHandles))
+    }
+
+    private fun editsVisible(
+        harness: Harness,
+        token: EditorToken,
+    ): String = editors.getOrPut(token) { FakeEditor(token.name) }.visible()
+
+    /**
+     * Design A: a native close that THROWS leaves a possibly live Rust
+     * session; every later generation must fail BEFORE native.open instead
+     * of silently opening a second engine session.
+     */
+    @Test
+    fun thrown_native_close_blocks_subsequent_generations_before_open() {
+        val harness = sequencedHarness()
+        val token = EditorToken("throwing")
+        val tokenB = EditorToken("B")
+        val native = harness.native
+        native.throwOnClose = true // next close throws once
+        native.planOpen(listOf(partial(1L, "甲文")))
+        val park = harness.mic.planReadsThenPark(1)
+        val laneThread = drainLaneInThread(harness)
+        startVisibility(harness, token)
+        awaitCondition("A reader parked") { harness.mic.parkedInRead }
+        val handleA = native.openedHandles.single()
+
+        park.countDown() // EOF failure -> fail() -> close throws
+        awaitCondition("A fenced (fault observed)") {
+            harness.controller.currentLease() == null
+        }
+        assertEquals(ImeSessionModel.ImeState.BLOCKED, harness.model.currentState)
+
+        // A newer generation MUST NOT open: the close fault is sticky.
+        val epochBefore = harness.model.currentEpoch()
+        harness.controller.onInputStarted(info(), restarting = false, viewVisible = true)
+        activeEditorToken = tokenB
+        harness.controller.onInputViewStarted(info(), tokenB, ready = true, blockedReason = null)
+        awaitCondition("later generation fenced before open") {
+            harness.model.currentState == ImeSessionModel.ImeState.BLOCKED &&
+                harness.model.currentEpoch() > epochBefore
+        }
+        assertEquals(1, native.openedHandles.size) // ONLY A ever opened
+        // The failed close was ATTEMPTED once; the handle is NOT closed and
+        // must not be blindly retried/silent-freed afterwards.
+        assertEquals(1, native.closeAttempts.count { it == handleA })
+        assertFalse(native.closedHandles.contains(handleA))
+
+        endLane(harness)
+        assertTrue(laneDied(laneThread))
     }
 }

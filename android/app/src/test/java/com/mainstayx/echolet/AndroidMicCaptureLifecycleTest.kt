@@ -1,6 +1,7 @@
 package com.mainstayx.echolet
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -38,6 +39,10 @@ class AndroidMicCaptureLifecycleTest {
         /** When non-null, read throws this (emulating a released recorder). */
         @Volatile var readFailure: IllegalStateException? = null
 
+        /** Parks INSIDE halt to emulate an OS teardown in flight (Design C). */
+        @Volatile var haltGate: CountDownLatch? = null
+        val haltEntered = CountDownLatch(1)
+
         override fun startRecording() {
             startEntered.countDown()
             startGate?.await()
@@ -53,6 +58,8 @@ class AndroidMicCaptureLifecycleTest {
         }
 
         override fun halt() {
+            haltEntered.countDown()
+            haltGate?.await()
             haltCount.incrementAndGet()
         }
 
@@ -88,13 +95,15 @@ class AndroidMicCaptureLifecycleTest {
         }
     }
 
-    private fun awaitPort(factory: RecordingFactory): FakePort {
+    private fun awaitPort(factory: RecordingFactory, index: Int = 0): FakePort {
         val deadline = System.currentTimeMillis() + 2000
         while (System.currentTimeMillis() < deadline) {
-            synchronized(factory) { factory.built.firstOrNull() }?.let { return it }
+            synchronized(factory) {
+                if (factory.built.size > index) return factory.built[index]
+            }
             Thread.sleep(5)
         }
-        throw AssertionError("OS recorder never built")
+        throw AssertionError("OS recorder #$index never built")
     }
 
     private fun awaitFreeCount(port: FakePort, expected: Int) {
@@ -128,7 +137,7 @@ class AndroidMicCaptureLifecycleTest {
         // The NEXT lease obtains a fresh, un-poisoned capture (no lingering
         // cancel fence, no poisoned STOP_REQUESTED gate).
         capture.start()
-        val second = awaitPort(factory)
+        val second = awaitPort(factory, index = 1)
         assertEquals(2, factory.built.size)
         assertEquals(1, second.startCount.get())
         capture.stopAndRelease()
@@ -281,5 +290,211 @@ class AndroidMicCaptureLifecycleTest {
         assertNull(results[0])
         assertEquals(1, port.haltCount.get())
         assertEquals(1, port.freeCount.get())
+    }
+
+    /**
+     * Design B(4): EVERY unchecked start failure — not only
+     * IllegalStateException, but a revoked-permission SecurityException or
+     * any RuntimeException — must free the recorder EXACTLY ONCE, start
+     * NOTHING, never record, and reset the instance so a subsequent
+     * independent start on the SAME capture works. The underlying failure is
+     * rethrown unswallowed (not converted into a generic wrapper).
+     */
+    @Test
+    fun any_unchecked_start_failure_releases_once_and_restarts_clean() {
+        for (failure in listOf(
+            SecurityException("RECORD_AUDIO permission revoked"),
+            RuntimeException("HAL recorder glitch"),
+        )) {
+            val halted = AtomicInteger()
+            val freed = AtomicInteger()
+            val started = AtomicInteger()
+            val startsRemaining = AtomicInteger(1)
+            val factory = MicOsRecordFactory {
+                if (startsRemaining.getAndDecrement() > 0) {
+                    object : MicOsRecord {
+                        override fun startRecording(): Nothing = throw failure
+                        override fun read(out: ShortArray): Int = out.size
+                        override fun halt() {
+                            halted.incrementAndGet()
+                        }
+
+                        override fun free() {
+                            freed.incrementAndGet()
+                        }
+                    }
+                } else {
+                    object : MicOsRecord {
+                        override fun startRecording() {
+                            started.incrementAndGet()
+                        }
+
+                        override fun read(out: ShortArray): Int = out.size
+                        override fun halt() {
+                            halted.incrementAndGet()
+                        }
+
+                        override fun free() {
+                            freed.incrementAndGet()
+                        }
+                    }
+                }
+            }
+            val capture = AndroidMicCapture(factory)
+            val thrown = try {
+                capture.start()
+                null
+            } catch (t: Throwable) {
+                t
+            }
+            assertEquals(failure, thrown) // underlying failure NOT swallowed
+            assertEquals(0, started.get()) // NOTHING ever recorded
+            assertEquals(1, halted.get()) // teardown exactly once
+            assertEquals(1, freed.get())
+
+            // The reset instance takes a clean subsequent start.
+            capture.start()
+            assertEquals(1, started.get())
+            capture.stopAndRelease()
+            assertEquals(2, halted.get())
+            assertEquals(2, freed.get())
+            assertNull(capture.readChunkShorts())
+        }
+    }
+
+    /**
+     * Design C(5): with halt/free deliberately BLOCKED (teardown in flight),
+     * a fast immediate Start request must WAIT for settlement on the same
+     * lane — it must never build a concurrent OS recorder, never report the
+     * unrelated permanent "reused" failure while the close is merely in
+     * progress, and it starts cleanly once the prior recorder is released.
+     */
+    @Test
+    fun start_during_ongoing_close_waits_for_settlement_then_starts_clean() {
+        val factory = RecordingFactory()
+        val capture = AndroidMicCapture(factory)
+        capture.start()
+        val port = awaitPort(factory)
+        assertEquals(1, port.startCount.get())
+        port.haltGate = CountDownLatch(1)
+
+        val stopErrors = arrayOf<Throwable?>(null)
+        val stopper = Thread({
+            try {
+                capture.stopAndRelease()
+            } catch (t: Throwable) {
+                stopErrors[0] = t
+            }
+        }, "capture-stop")
+        stopper.isDaemon = true
+        stopper.start()
+        assertTrue(port.haltEntered.await(2, TimeUnit.SECONDS)) // halt IS blocked
+
+        val startErrors = arrayOf<Throwable?>(null)
+        val starter = Thread({
+            try {
+                capture.start()
+            } catch (t: Throwable) {
+                startErrors[0] = t
+            }
+        }, "capture-start-during-close")
+        starter.isDaemon = true
+        starter.start()
+
+        // While the prior halt is parked: the deferred start must sit in the
+        // closing-settlement wait (deterministic thread state proof) and
+        // must NOT build a second concurrent OS recorder.
+        val deadline = System.currentTimeMillis() + 2000
+        while (!((starter.state == Thread.State.TIMED_WAITING ||
+                starter.state == Thread.State.WAITING) &&
+                synchronized(factory) { factory.built.size == 1 })
+        ) {
+            if (System.currentTimeMillis() > deadline) {
+                throw AssertionError(
+                    "deferred start did not wait for settlement: " +
+                        "state=${starter.state} built=${factory.built.size}"
+                )
+            }
+            assertFalse(startErrors[0].let { it != null })
+            Thread.sleep(5)
+        }
+        port.haltGate?.countDown() // release the parked halt
+        port.haltGate = null
+
+        // Release the teardown: settlement must un-block the deferred start
+        // naturally (no BLOCKED error, no concurrent recorder).
+        stopper.join(2000)
+        assertTrue(!stopper.isAlive)
+        assertNull(stopErrors[0])
+        starter.join(2000)
+        assertTrue(!starter.isAlive)
+        assertNull(startErrors[0])
+        assertEquals(1, port.haltCount.get())
+        assertEquals(1, port.freeCount.get()) // first recorder freed ONCE
+
+        val second = awaitPort(factory, index = 1)
+        assertEquals(1, second.startCount.get()) // started cleanly after settle
+        capture.stopAndRelease()
+        assertEquals(1, second.haltCount.get())
+        assertEquals(1, second.freeCount.get())
+        assertNull(capture.readChunkShorts())
+    }
+
+    /**
+     * Design D(6): two concurrent Stops racing an in-flight startRecording:
+     * the fence is raised exactly once, the start thread performs the
+     * teardown EXACTLY once, no recorder survives and nothing double-frees.
+     */
+    @Test
+    fun concurrent_stops_during_in_flight_start_tear_down_exactly_once() {
+        val factory = RecordingFactory()
+        val inFlight = CountDownLatch(1)
+        factory.pendingStartGate = inFlight
+        val capture = AndroidMicCapture(factory)
+        val starter = startInThread(capture)
+        val port = awaitPort(factory)
+        assertTrue(port.startEntered.await(2, TimeUnit.SECONDS))
+
+        val stopDone = CountDownLatch(2)
+        repeat(2) { n ->
+            Thread({
+                capture.stopAndRelease()
+                stopDone.countDown()
+            }, "capture-stop-$n").apply {
+                isDaemon = true
+                start()
+            }
+        }
+        assertTrue(stopDone.await(2, TimeUnit.SECONDS))
+        assertEquals(0, port.haltCount.get()) // deferred: start in flight
+        inFlight.countDown()
+        starter.join(2000)
+        assertTrue(!starter.isAlive)
+        assertEquals(1, port.startCount.get())
+        assertEquals(1, port.haltCount.get())
+        awaitFreeCount(port, 1)
+        assertNull(capture.readChunkShorts())
+    }
+
+    /**
+     * Design E(7): ten rapid Stop->Start transitions on ONE instance — every
+     * OS recorder is started, halted and freed EXACTLY once, none is left
+     * live, and the settled instance never poisons the next lease.
+     */
+    @Test
+    fun ten_rapid_stop_then_start_cycles_release_each_port_exactly_once() {
+        val factory = RecordingFactory()
+        val capture = AndroidMicCapture(factory)
+        repeat(10) {
+            capture.start()
+            capture.stopAndRelease()
+        }
+        assertEquals(10, factory.built.size)
+        factory.built.forEachIndexed { index, port ->
+            assertEquals("port $index start", 1, port.startCount.get())
+            assertEquals("port $index halt", 1, port.haltCount.get())
+            assertEquals("port $index free", 1, port.freeCount.get())
+        }
+        assertNull(capture.readChunkShorts())
     }
 }

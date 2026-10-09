@@ -131,12 +131,27 @@ class ImeSessionController internal constructor(
     private var nativeOwner: NativeOwner? = null
 
     /**
+     * Sticky fault when a native close threw (Design A): a Rust session may
+     * still be alive, so every later generation fails BEFORE native.open.
+     */
+    @Volatile private var nativeCloseFault: String? = null
+
+    /**
      * Deterministic test barrier (Java-Kotlin JVM mediation tests only):
      * invoked on the generation lane exactly between the stop precheck and
      * the nativeLock publish decision, letting tests hold Stop in the exact
      * Design-1 race window. NEVER set in production.
      */
     @Volatile internal var nativePublishGate: (() -> Unit)? = null
+
+    /**
+     * Deterministic test barrier (JVM mediation tests only): invoked on the
+     * generation lane in [fail] exactly AFTER the model epoch fence and
+     * BEFORE the lease's own native close executes, letting tests hold a
+     * failed generation in the close-scheduling window while a newer
+     * generation is issued from main. Null in production.
+     */
+    @Volatile internal var onAfterFailureFenceBeforeClose: (() -> Unit)? = null
 
     @Volatile private var active: ActiveLease? = null
     @Volatile private var serviceVisible: Boolean = false
@@ -387,6 +402,37 @@ class ImeSessionController internal constructor(
         }
     }
 
+    /**
+     * Lane-ordered own-close (Design A): failure runs ON the generation lane,
+     * so the lease's native handle is closed SYNCHRONOUSLY HERE — never
+     * enqueued at the lane tailbehind an already-queued newer generation's
+     * native.open. This makes the single serial lane itself the close-before-
+     * next-open barrier. Exactly-once owner transfer preserved: once claimed,
+     * the owner registry slot is gone, so main-Stop closeNativeForStop and
+     * the task's own releaseOwnNativeOnFence are both no-ops afterwards.
+     * Returns true when a close was claimed and executed for this lease.
+     */
+    private fun takeAndCloseOwnNativeNow(lease: ImeSessionModel.EditorLease): Boolean {
+        val owner = synchronized(nativeLock) {
+            if (nativeOwner?.lease != lease) return false
+            val taken = nativeOwner!!
+            nativeOwner = null
+            taken
+        }
+        try {
+            native.close(owner.handle)
+            return true
+        } catch (t: Throwable) {
+            // A close that failed leaves a MAYBE-LIVE Rust session: newer
+            // generations MUST NOT open until ownership is reconciled, so a
+            // sticky fault blocks every subsequent generation's native.open.
+            Log.w(TAG, "own nativeClose failed; native opens disabled", t)
+            nativeCloseFault =
+                "native session close unsettled: ${t.message ?: t.javaClass.simpleName}"
+            return true
+        }
+    }
+
     private fun executeOnLane(action: () -> Unit) {
         try {
             lane.execute(action)
@@ -411,6 +457,13 @@ class ImeSessionController internal constructor(
     private fun generationTask(lease: ImeSessionModel.EditorLease, modelDir: String) {
         // Head-of-lane stale rejection: tasks queued before a stop are cheap.
         if (!model.isLeaseCurrent(lease)) return
+        // Design A barrier: an earlier native close that THREW leaves a
+        // possibly live Rust session; opening a new one here could raise
+        // AlreadyActive and silently double-own the engine. Fail closed.
+        nativeCloseFault?.let { fault ->
+            fail(lease, fault)
+            return
+        }
         val handle = try {
             native.open(modelDir)
         } catch (t: Throwable) {
@@ -651,7 +704,13 @@ class ImeSessionController internal constructor(
         if (model.currentEpoch() != outcome.atEpoch) return
         // Still-current: immediate side effects like a stop, then fenced state.
         mic.stopAndRelease()
-        closeNativeForStop(lease)
+        // Test seam (null in production): park BEFORE the close executes.
+        onAfterFailureFenceBeforeClose?.invoke()
+        // Design A: we are ON the lane; close our OWN handle HERE so any
+        // newer generation queued on this lane can only native.open AFTER
+        // our handle is fully closed — closeNativeForStop's tail-enqueued
+        // close could land behind a queued generationTask(B) otherwise.
+        takeAndCloseOwnNativeNow(lease)
         main.post { applyDecision(outcome) }
     }
 
