@@ -1,10 +1,10 @@
 # TEMPORARY RESEARCH / DELETE AFTER DESIGN ACCEPTANCE
 
-> **Status:** **BLOCKED** (Missing `Xcode.app` IDE installation; standalone `CommandLineTools` present but insufficient for iOS simulator builds).  
-> **Date:** 2026-10-10  
+> **Status:** **BLOCKED** (J1B: Full Xcode 16.2 installation requires authenticated Apple Developer Portal download / Apple ID credentials or manual browser download; unattended CLI download blocked by Apple auth wall 302 redirect).  
+> **Date:** 2026-10-10 (J1 Audit & J1B Install Gate)  
 > **Host:** macOS 14.6.1 (Darwin 23.6.0 x86_64, Intel Core i7-9750H)  
-> **Agent:** Orca logical agent `antigravity` (Google Gemini provider)  
-> **Repository:** `SentimentalK/echolet` (`master` @ commit `ffbab07a2349ded72f21cc81728d7759d45e2169`)
+> **Agent:** Orca logical agent `antigravity` (Google Gemini provider, Gemini 3.8 Flash model)  
+> **Repository:** `SentimentalK/echolet` (`master` @ commit `1f0e75ba64e68d38f8973893711db0c26043dae5`)
 
 ---
 
@@ -253,3 +253,77 @@ To ensure reliable communication between Keyboard Extension and Main App:
 - If Xcode installation is blocked or unlicensed -> STOP.
 - Do NOT download heavy ASR models in J2.
 - Do NOT modify existing Android or desktop codebase.
+
+---
+
+## 9. Job 1B (J1B) — Xcode 16.2 Installation & Simulator Gate Results
+
+### 9.1 Preflight & Environment Verification
+- **Host Platform:** macOS Sonoma 14.6.1 (Build 23G93, Kernel Darwin 23.6.0 x86_64).
+- **CPU:** Intel(R) Core(TM) i7-9750H @ 2.60GHz (x86_64 architecture).
+- **Available Disk Space:** 264 GiB free on `/` (`/System/Volumes/Data`).
+- **Rust Toolchains & Installed Targets:**
+  - `aarch64-apple-ios` (installed)
+  - `aarch64-apple-ios-sim` (installed)
+  - `x86_64-apple-ios` (installed)
+  - `x86_64-apple-darwin` (host default)
+- **Active Developer Directory:** `/Library/Developer/CommandLineTools` (Xcode Command Line Tools only).
+- **Existing Simulator Runtimes:**
+  - iOS 18.2 CoreSimulator volume image (`iOS_22C150`) is mounted at `/Library/Developer/CoreSimulator/Volumes/iOS_22C150`, referencing bundle `SimRuntimeBundle-CFF3DFCD-0254-481E-AB73-82A5D91A5146` (`com.apple.CoreSimulator.SimRuntime.iOS-18-2`).
+  - However, without full Xcode (`xcodebuild`, `Developer/usr/bin/simctl`, iOS SDK headers/libraries), simulator builds cannot run.
+- **Physical Device Audit:** No physical iPad or iPhone connected via USB (`system_profiler SPUSBDataType` returns 0 Apple mobile devices).
+- **Code Signing Identities:** 0 valid identities found (`security find-identity -p codesigning -v`).
+
+### 9.2 Xcode 16.2 Installation Attempt & Official Download Gate
+- **Target Version:** Apple Xcode 16.2 (compatible with macOS 14.5+ through 15.x on x86_64 and Apple Silicon, includes iOS/iPadOS 18.2 SDK).
+- **On-Disk Search:**
+  - Audited `/Applications/Xcode*.app`, `~/Applications/Xcode*.app`, `~/Downloads`, `/Library/Caches`, and user directories.
+  - Result: No local `Xcode_16.2.xip` or extracted `Xcode.app` bundle was present.
+- **Official Download Probe:**
+  - Attempted HTTP download probe to official Apple Developer URL:
+    `curl -I -s https://download.developer.apple.com/Developer_Tools/Xcode_16.2/Xcode_16.2.xip`
+  - Response:
+    ```http
+    HTTP/1.1 302 Redirect
+    Location: https://developer.apple.com/unauthorized/
+    ```
+  - **Security & Authorization Policy Constraint:**
+    Per the worker security specification:
+    - Never scrape or store Apple ID credentials, 2FA tokens, session cookies, or Keychain items.
+    - Never use unofficial third-party mirrors, rehosted binaries, or unsigned torrents/bundles.
+    - If official download requires interactive Apple Developer login/MFA or license acceptance, stop with status **BLOCKED** and report exact human action and resume command.
+- **Current Gate Verdict:** **BLOCKED** on human Apple ID authentication and Xcode download.
+
+### 9.3 Concrete Human Action Required to Resume
+To proceed with J1B verification and J2 development:
+1. **Download Xcode 16.2:**
+   - Log in to [Apple Developer Downloads](https://developer.apple.com/download/all/?q=Xcode%2016.2) using your Apple ID in Safari/Chrome.
+   - Download `Xcode_16.2.xip` (or install via a developer CLI tool like `xcodes` if authenticated).
+2. **Expand and Place Application:**
+   - Expand `Xcode_16.2.xip` (e.g. `xip --expand ~/Downloads/Xcode_16.2.xip`).
+   - Move `Xcode.app` to `/Applications/Xcode_16.2.app` or `~/Applications/Xcode_16.2.app`.
+   - Verify Apple signature:
+     ```sh
+     codesign -dv --verbose=4 /Applications/Xcode_16.2.app
+     ```
+3. **Accept License & Set Developer Dir:**
+   ```sh
+   DEVELOPER_DIR=/Applications/Xcode_16.2.app/Contents/Developer
+   # Or system-wide:
+   sudo xcode-select -s /Applications/Xcode_16.2.app/Contents/Developer
+   sudo xcodebuild -license accept
+   ```
+4. **Resume Verification Command:**
+   Run the J1B smoke verification:
+   ```sh
+   export DEVELOPER_DIR=/Applications/Xcode_16.2.app/Contents/Developer
+   xcodebuild -version
+   xcrun --sdk iphonesimulator --show-sdk-path
+   xcrun simctl list runtimes
+   xcrun simctl list devices available
+   ```
+
+### 9.4 Revised J2 Readiness Verdict
+- **Verdict:** **BLOCKED** (Pending human Xcode 16.2 download & license acceptance).
+- Once Xcode 16.2 is positioned at `/Applications/Xcode_16.2.app` or `~/Applications/Xcode_16.2.app`, the existing iOS 18.2 CoreSimulator volume image (`iOS_22C150`) can be linked immediately without requiring an additional 7+ GB simulator runtime download.
+
