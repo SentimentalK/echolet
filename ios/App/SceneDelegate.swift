@@ -14,4 +14,16 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         self.window = window
         window.makeKeyAndVisible()
     }
+
+    func sceneWillEnterForeground(_ scene: UIScene) {
+        // App became active/foreground: ensure WarmIPCService is polling
+        WarmIPCService.shared.startPolling()
+    }
+
+    func sceneDidEnterBackground(_ scene: UIScene) {
+        // Background transition: retain polling only if active recording is underway
+        if AudioCaptureController.shared.status != .recording {
+            WarmIPCService.shared.stopPolling()
+        }
+    }
 }

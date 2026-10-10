@@ -63,12 +63,11 @@ class AppStatusViewController: UIViewController, AudioCaptureDelegate, WarmIPCSe
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
         refreshIPCStatus()
-        WarmIPCService.shared.startPolling()
     }
 
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
-        WarmIPCService.shared.stopPolling()
+        // Note: Polling lifecycle is app-owned (AppDelegate/SceneDelegate), not tied to VC presentation.
     }
 
     private func setupUI() {

@@ -327,7 +327,9 @@ class KeyboardViewController: UIInputViewController {
             } else {
                 // Non-final intermediate revision: record watermark without duplicate full insertion
                 self.activeSession?.lastAcceptedRevision = response.revision
-                if response.state == .listening {
+                if response.state == .preparing {
+                    statusLabel.text = "Mic PREPARING on iPad (rev \(response.revision))..."
+                } else if response.state == .listening {
                     statusLabel.text = "Mic ACTIVE on iPad (rev \(response.revision))\nListening..."
                 } else if response.state == .blocked {
                     statusLabel.text = "Mic BLOCKED: Open Echolet to arm test"

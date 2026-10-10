@@ -7,17 +7,25 @@ This directory contains the native iOS / iPadOS Containing Application and Custo
 - **`App/`**: Minimal UIKit containing application (`EcholetApp`).
   - Initializes and displays the per-process launch epoch (`echolet.app.epoch.v2`).
   - Contains an in-app editable `UITextView` test harness so the custom keyboard can be tested directly inside Echolet without app-switching or losing keyboard focus.
-  - Houses `AudioCaptureController.swift` managing real `AVAudioEngine` microphone tap, truthful permission flow, allocation-free RMS/peak level metering, interruption and route changes.
-  - Houses `WarmIPCService.swift` coordinating foreground keyboard requests, admission gate checks, and response snapshots.
-  - Houses a DEBUG-only test responder button to validate IPC message intake and mock regression testing.
+  - Houses `AudioCaptureController.swift`:
+    - Manages real `AVAudioEngine` microphone tap, truthful permission flow, allocation-free RMS/peak level metering, interruption and route changes.
+    - Generation-fenced transitions: fences permission callbacks, engine starts, and tap processing to ensure stale asynchronous operations cannot mutate state or leak active mics.
+    - Asynchronous start and stop completions: provides explicit completion handlers ensuring responses correlate with actual hardware state.
+    - Real-time-safe metering: mutable accumulators are confined to the audio tap execution context, dispatching immutable, rate-limited (~4Hz) summaries to the serialized control queue.
+  - Houses `WarmIPCService.swift`:
+    - Process-owned lifecycle wired directly to `AppDelegate` and `UISceneDelegate`, running independently of UIViewController appearance.
+    - Reads latest App Group state at launch/reactivation, polls at a bounded cadence (0.3s) while foreground/active, and listens for Darwin notification hints (`com.echolet.ipc.request.v2`).
+    - Distinguishes receipt of START from affirmative user arming; emits `preparing` while asynchronous audio engine start is in flight, and `listening` only after confirmed hardware start.
+    - Synchronously invalidates active session tokens on STOP/CANCEL and writes `completed` only after native hardware stops.
+    - Manages background command intake as long as iOS genuinely schedules the app under `UIBackgroundModes audio`; avoids busy loops and makes no false claims about cold wake or background scheduling guarantees when suspended.
 - **`Keyboard/`**: Custom `UIInputViewController` Keyboard Extension (`EcholetKeyboard`).
   - Note: Per Apple custom keyboard security requirements, custom keyboards have **no microphone access**. Containing `EcholetApp` exclusively owns audio capture.
   - Provides required Apple keyboard switching (`advanceToNextInputMode()`).
   - Dispatches validated v2 `KeyboardRequest` envelopes into App Group `UserDefaults` (`group.com.mainstayx.echolet.dev`).
   - Gated response consumer: safely correlates session ID, app epoch, sequence, and strictly monotonic response revision before invoking `textDocumentProxy.insertText`.
-  - Honestly surfaces listening and blocked microphone states without inserting fabricated transcripts.
+  - Honestly surfaces preparing, listening, and blocked microphone states without inserting fabricated transcripts.
   - Automatically fences and invalidates active session on input focus change (`textWillChange`).
-- **`protocol/`**: Pure Foundation Swift wire protocol codec (`EcholetIPC.swift`) and admission gate port (`EcholetAdmission.swift`), mirroring canonical Rust `src/ios_ipc.rs`. Includes pure Swift CLI tests (`AdmissionTests.swift`, `IPCCodecSmoke.swift`).
+- **`protocol/`**: Pure Foundation Swift wire protocol codec (`EcholetIPC.swift`) and admission gate port (`EcholetAdmission.swift`), mirroring canonical Rust `src/ios_ipc.rs`. Includes pure Swift CLI tests (`AdmissionTests.swift`, `AdversarialTests.swift`, `IPCCodecSmoke.swift`).
 - **`project.yml`**: Declarative XcodeGen project specification generating `Echolet.xcodeproj`.
 - **`scripts/`**: Safe device discovery and automation scripts (`verify-device.sh`).
 
@@ -25,7 +33,7 @@ This directory contains the native iOS / iPadOS Containing Application and Custo
 
 ## Status: BUILT & TESTED (Xcode 16.2 / Sonoma)
 
-All pure Foundation protocol tests and admission gate tests run via CLI. Native `EcholetApp` and embedded `EcholetKeyboard` targets compile cleanly on Xcode 16.2 (`** BUILD SUCCEEDED **`) for both physical iPhoneOS (arm64) and Simulator. Signed debug build deployed to connected iPad mini (iPadOS 18.7.7).
+All pure Foundation protocol tests, admission gate tests, and adversarial fence tests run via CLI. Native `EcholetApp` and embedded `EcholetKeyboard` targets compile cleanly on Xcode 16.2 (`** BUILD SUCCEEDED **`) for both physical iPhoneOS (arm64) and Simulator. Signed debug build deployed to connected iPad mini (iPadOS 18.7.7).
 
 ---
 

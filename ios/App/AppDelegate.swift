@@ -17,7 +17,26 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
             defaults.set(Self.sharedEpoch, forKey: EcholetIPC.appEpochKey)
             defaults.synchronize()
         }
+
+        // Initialize and start process-owned WarmIPCService early so command intake is live
+        WarmIPCService.shared.initializeGate()
+        WarmIPCService.shared.startPolling()
+
         return true
+    }
+
+    func applicationWillEnterForeground(_ application: UIApplication) {
+        // Re-read latest App Group state and resume polling upon foreground return
+        WarmIPCService.shared.startPolling()
+    }
+
+    func applicationDidEnterBackground(_ application: UIApplication) {
+        // While active recording is ongoing under UIBackgroundModes audio,
+        // keep polling active as long as iOS genuinely schedules the app process.
+        // If microphone is not actively recording, stop polling to avoid background CPU drains.
+        if AudioCaptureController.shared.status != .recording {
+            WarmIPCService.shared.stopPolling()
+        }
     }
 
     func application(
