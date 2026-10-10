@@ -1,0 +1,7 @@
+{
+  "protocol_version": 1,
+  "session_id": "session-golden-42",
+  "sequence": 2,
+  "request_id": "req-golden-002",
+  "command": "stop"
+}

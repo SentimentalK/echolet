@@ -1,0 +1,11 @@
+{
+  "protocol_version": 1,
+  "session_id": "session-golden-42",
+  "acknowledged_request_id": "req-golden-001",
+  "acknowledged_sequence": 1,
+  "revision": 3,
+  "state": "listening",
+  "recognized_text": "testing speech recognition",
+  "is_final": false,
+  "server_timestamp_ms": 1728570001500
+}

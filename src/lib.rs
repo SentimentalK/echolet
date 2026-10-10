@@ -4,6 +4,7 @@ pub mod capture;
 pub mod config;
 pub mod diff;
 pub mod ffi;
+pub mod ios_ipc;
 pub mod models;
 pub mod paths;
 pub mod session;
