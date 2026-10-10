@@ -46,6 +46,8 @@ public enum EcholetIPC {
         case emptySessionId
         case emptyRequestId
         case invalidSequence(UInt64)
+        case invalidAcknowledgedSequence(UInt64)
+        case invalidRevision(UInt64)
     }
 
     /// Keyboard Extension request envelope.
@@ -119,12 +121,9 @@ public enum EcholetIPC {
         public let revision: UInt64
         public let state: AppState
         public let recognizedText: String?
-        public let isFinal: bool_alias
+        public let isFinal: Bool
         public let errorCode: String?
         public let serverTimestampMs: UInt64?
-
-        // Swift bool alias for type clarity
-        public typealias bool_alias = Bool
 
         enum CodingKeys: String, CodingKey {
             case protocolVersion = "protocol_version"
@@ -159,6 +158,12 @@ public enum EcholetIPC {
             guard !trimmedReq.isEmpty else {
                 throw ValidationError.emptyRequestId
             }
+            guard acknowledgedSequence >= 1 else {
+                throw ValidationError.invalidAcknowledgedSequence(acknowledgedSequence)
+            }
+            guard revision >= 1 else {
+                throw ValidationError.invalidRevision(revision)
+            }
 
             self.protocolVersion = EcholetIPC.protocolVersion
             self.sessionId = trimmedSession
@@ -181,6 +186,12 @@ public enum EcholetIPC {
             }
             guard !acknowledgedRequestId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                 throw ValidationError.emptyRequestId
+            }
+            guard acknowledgedSequence >= 1 else {
+                throw ValidationError.invalidAcknowledgedSequence(acknowledgedSequence)
+            }
+            guard revision >= 1 else {
+                throw ValidationError.invalidRevision(revision)
             }
         }
     }

@@ -191,6 +191,12 @@ impl AppResponse {
         if acknowledged_request_id.trim().is_empty() {
             return Err(IpcValidationError::EmptyRequestId);
         }
+        if acknowledged_sequence == 0 {
+            return Err(IpcValidationError::InvalidAcknowledgedSequence(0));
+        }
+        if revision == 0 {
+            return Err(IpcValidationError::InvalidRevision(0));
+        }
 
         Ok(Self {
             protocol_version: PROTOCOL_VERSION,
@@ -219,6 +225,14 @@ impl AppResponse {
         if self.acknowledged_request_id.trim().is_empty() {
             return Err(IpcValidationError::EmptyRequestId);
         }
+        if self.acknowledged_sequence == 0 {
+            return Err(IpcValidationError::InvalidAcknowledgedSequence(
+                self.acknowledged_sequence,
+            ));
+        }
+        if self.revision == 0 {
+            return Err(IpcValidationError::InvalidRevision(self.revision));
+        }
         Ok(())
     }
 
@@ -243,6 +257,8 @@ pub enum IpcValidationError {
     EmptySessionId,
     EmptyRequestId,
     InvalidSequence(u64),
+    InvalidAcknowledgedSequence(u64),
+    InvalidRevision(u64),
     MalformedJson(String),
 }
 
@@ -253,6 +269,10 @@ impl std::fmt::Display for IpcValidationError {
             Self::EmptySessionId => write!(f, "session_id cannot be empty"),
             Self::EmptyRequestId => write!(f, "request_id cannot be empty"),
             Self::InvalidSequence(s) => write!(f, "invalid sequence (must be >= 1): {s}"),
+            Self::InvalidAcknowledgedSequence(s) => {
+                write!(f, "invalid acknowledged_sequence (must be >= 1): {s}")
+            }
+            Self::InvalidRevision(r) => write!(f, "invalid revision (must be >= 1): {r}"),
             Self::MalformedJson(msg) => write!(f, "malformed JSON: {msg}"),
         }
     }
@@ -282,6 +302,13 @@ pub enum AppAdmissionRejection {
         session_id: String,
         command: IpcCommand,
         reason: &'static str,
+    },
+    ColdBootFenceReject {
+        reason: &'static str,
+    },
+    StaleBootEpoch {
+        incoming_epoch: u64,
+        active_epoch: u64,
     },
 }
 
@@ -320,6 +347,16 @@ impl std::fmt::Display for AppAdmissionRejection {
                 f,
                 "invalid command order {command:?} for session '{session_id}': {reason}"
             ),
+            Self::ColdBootFenceReject { reason } => {
+                write!(f, "request rejected by cold-boot fence: {reason}")
+            }
+            Self::StaleBootEpoch {
+                incoming_epoch,
+                active_epoch,
+            } => write!(
+                f,
+                "stale boot epoch {incoming_epoch} does not match active epoch {active_epoch}"
+            ),
         }
     }
 }
@@ -333,27 +370,98 @@ enum ActiveSessionState {
     Ended,
 }
 
+/// Outcome of admitting an incoming request on the App side.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AppAdmissionOutcome {
+    /// Request admitted to the existing or current session.
+    Admitted,
+    /// Request was a fresh START for a new editor session that replaced
+    /// a prior unstopped/stranded session. The prior session is retired.
+    ReplacedPriorSession { retired_session_id: String },
+}
+
 /// Producer/App-side admission gate.
 ///
 /// Ensures that incoming requests obey session boundaries:
 /// 1. A `START` command initiates a new session if no live session is active,
 ///    or transitions cleanly if the previous session has ended.
-/// 2. If a session is already active, another `START` with a different session ID
-///    is rejected (callers must STOP/CANCEL previous first).
+/// 2. If a prior session was active but missed a STOP, a fresh authenticated
+///    `START` (sequence == 1) for a NEW editor session cleanly and atomically retires
+///    the prior session and arms the new session (safe handoff). Stale STOP/CANCEL
+///    from the retired session can never kill the new session.
 /// 3. Stale `STOP` or `CANCEL` commands belonging to an older session are rejected
 ///    and NEVER terminate or interfere with a newer active session.
 /// 4. Sequences within a session must be strictly monotonic (`seq > last_seq`).
 /// 5. Duplicate commands or commands after session termination are rejected.
-#[derive(Debug, Default)]
+/// 6. Boot-time rehydration / fencing against cached UserDefaults requests:
+///    The App gate can be booted in cold mode (`with_boot_epoch` or `cold_boot()`)
+///    which rejects any replayed requests from durable storage until explicit
+///    foreground handoff authorization or fresh token arrival.
+#[derive(Debug)]
 pub struct AppAdmissionGate {
     active_session_id: Option<String>,
     session_state: Option<ActiveSessionState>,
     last_sequence: u64,
+    /// Boot epoch of the containing App process.
+    boot_epoch: u64,
+    /// When cold-booted, the gate fails closed against cached requests until authorized.
+    cold_boot_armed: bool,
+    /// Last applied request_id to prevent re-applying identical durable requests.
+    last_applied_request_id: Option<String>,
+}
+
+impl Default for AppAdmissionGate {
+    fn default() -> Self {
+        Self {
+            active_session_id: None,
+            session_state: None,
+            last_sequence: 0,
+            boot_epoch: 1,
+            cold_boot_armed: false,
+            last_applied_request_id: None,
+        }
+    }
 }
 
 impl AppAdmissionGate {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Initializes an AppAdmissionGate with an explicit boot epoch, armed in cold mode.
+    ///
+    /// In cold mode, any cached request in UserDefaults from a prior process run
+    /// is rejected until explicit foreground handoff authorization occurs.
+    pub fn cold_boot(boot_epoch: u64) -> Self {
+        Self {
+            active_session_id: None,
+            session_state: None,
+            last_sequence: 0,
+            boot_epoch,
+            cold_boot_armed: true,
+            last_applied_request_id: None,
+        }
+    }
+
+    /// Authorizes the gate after boot (e.g., when the Containing App is explicitly
+    /// foregrounded or receives verified fresh IPC activation).
+    pub fn authorize_boot(&mut self) {
+        self.cold_boot_armed = false;
+    }
+
+    /// Whether the gate is currently armed in cold-boot mode.
+    pub fn is_cold_boot_armed(&self) -> bool {
+        self.cold_boot_armed
+    }
+
+    /// App process boot epoch.
+    pub fn boot_epoch(&self) -> u64 {
+        self.boot_epoch
+    }
+
+    /// Last applied request ID admitted by the gate.
+    pub fn last_applied_request_id(&self) -> Option<&str> {
+        self.last_applied_request_id.as_deref()
     }
 
     pub fn active_session_id(&self) -> Option<&str> {
@@ -364,9 +472,27 @@ impl AppAdmissionGate {
     pub fn admit_request(
         &mut self,
         request: &KeyboardRequest,
-    ) -> Result<(), AppAdmissionRejection> {
+    ) -> Result<AppAdmissionOutcome, AppAdmissionRejection> {
         if let Err(err) = request.validate() {
             return Err(AppAdmissionRejection::InvalidPayload(err));
+        }
+
+        // Cold-boot fence check: do not autonomously execute cached requests upon restart
+        if self.cold_boot_armed {
+            return Err(AppAdmissionRejection::ColdBootFenceReject {
+                reason: "app cold-boot fence active; cannot execute unverified cached request",
+            });
+        }
+
+        // Duplicate replay check: if request_id matches last applied, reject as duplicate
+        if let Some(ref last_req) = self.last_applied_request_id {
+            if last_req == &request.request_id {
+                return Err(AppAdmissionRejection::CommandOrderViolation {
+                    session_id: request.session_id.clone(),
+                    command: request.command,
+                    reason: "duplicate request_id already applied",
+                });
+            }
         }
 
         match request.command {
@@ -380,6 +506,23 @@ impl AppAdmissionGate {
                             reason: "session already started",
                         });
                     }
+
+                    // A new session arrives (different session_id).
+                    // If sequence == 1, this is a fresh START from an editor session.
+                    // Under single-slot wire where preceding STOP might have been missed:
+                    // Atomically retire prior session identity and arm new session.
+                    if request.sequence == 1 {
+                        let retired = current_id.clone();
+                        self.active_session_id = Some(request.session_id.clone());
+                        self.session_state = Some(ActiveSessionState::Listening);
+                        self.last_sequence = request.sequence;
+                        self.last_applied_request_id = Some(request.request_id.clone());
+                        return Ok(AppAdmissionOutcome::ReplacedPriorSession {
+                            retired_session_id: retired,
+                        });
+                    }
+
+                    // If sequence > 1 for a new session or prior session is active and sequence != 1:
                     if self.session_state != Some(ActiveSessionState::Ended) {
                         return Err(AppAdmissionRejection::ActiveSessionConflict {
                             incoming_session_id: request.session_id.clone(),
@@ -388,11 +531,12 @@ impl AppAdmissionGate {
                     }
                 }
 
-                // New session starts
+                // New session starts cleanly (no prior session active)
                 self.active_session_id = Some(request.session_id.clone());
                 self.session_state = Some(ActiveSessionState::Listening);
                 self.last_sequence = request.sequence;
-                Ok(())
+                self.last_applied_request_id = Some(request.request_id.clone());
+                Ok(AppAdmissionOutcome::Admitted)
             }
             IpcCommand::Stop | IpcCommand::Cancel => match &self.active_session_id {
                 Some(current_id) if current_id == &request.session_id => {
@@ -413,7 +557,8 @@ impl AppAdmissionGate {
 
                     self.last_sequence = request.sequence;
                     self.session_state = Some(ActiveSessionState::Ended);
-                    Ok(())
+                    self.last_applied_request_id = Some(request.request_id.clone());
+                    Ok(AppAdmissionOutcome::Admitted)
                 }
                 Some(other_active) => Err(AppAdmissionRejection::StaleSessionCommand {
                     incoming_session_id: request.session_id.clone(),
@@ -439,6 +584,7 @@ impl AppAdmissionGate {
         self.active_session_id = None;
         self.session_state = None;
         self.last_sequence = 0;
+        self.last_applied_request_id = None;
     }
 }
 
@@ -458,6 +604,12 @@ pub enum KeyboardAdmissionRejection {
     },
     ResurrectionAttemptAfterClose {
         session_id: String,
+    },
+    RequestCorrelationMismatch {
+        session_id: String,
+        acknowledged_request_id: String,
+        acknowledged_sequence: u64,
+        reason: &'static str,
     },
 }
 
@@ -485,25 +637,46 @@ impl std::fmt::Display for KeyboardAdmissionRejection {
                 f,
                 "late response for session '{session_id}' after session was closed/finalized"
             ),
+            Self::RequestCorrelationMismatch {
+                session_id,
+                acknowledged_request_id,
+                acknowledged_sequence,
+                reason,
+            } => write!(
+                f,
+                "request correlation mismatch for session '{session_id}' (ack_req: '{acknowledged_request_id}', ack_seq: {acknowledged_sequence}): {reason}"
+            ),
         }
     }
 }
 
 impl std::error::Error for KeyboardAdmissionRejection {}
 
+/// Record of an outgoing command issued by the Keyboard Extension.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IssuedCommand {
+    pub request_id: String,
+    pub sequence: u64,
+    pub command: IpcCommand,
+}
+
 /// Consumer/Keyboard-side admission gate.
 ///
 /// Ensures that incoming responses from App UserDefaults snapshots:
 /// 1. Match the currently active editor `session_id`.
-/// 2. Strictly increase the response `revision` watermark.
-/// 3. Discard duplicate snapshots, out-of-order snapshots, or snapshots
+/// 2. Explicitly correlate with an outgoing issued command (`acknowledged_request_id`
+///    and `acknowledged_sequence` match a sent command in the active session).
+/// 3. Reject responses acknowledging unissued or future sequence numbers.
+/// 4. Strictly increase the response `revision` watermark.
+/// 5. Discard duplicate snapshots, out-of-order snapshots, or snapshots
 ///    received after the local session has ended or closed.
-/// 4. Cannot resurrect a closed or cancelled session.
+/// 6. Cannot resurrect a closed or cancelled session.
 #[derive(Debug, Default)]
 pub struct KeyboardAdmissionGate {
     current_session_id: Option<String>,
     last_accepted_revision: u64,
     is_closed: bool,
+    issued_commands: Vec<IssuedCommand>,
 }
 
 impl KeyboardAdmissionGate {
@@ -524,6 +697,43 @@ impl KeyboardAdmissionGate {
         self.current_session_id = Some(session_id);
         self.last_accepted_revision = 0;
         self.is_closed = false;
+        self.issued_commands.clear();
+        Ok(())
+    }
+
+    /// Register an outgoing command issued by the Keyboard Extension for correlation.
+    pub fn register_issued_command(
+        &mut self,
+        request: &KeyboardRequest,
+    ) -> Result<(), KeyboardAdmissionRejection> {
+        if let Err(err) = request.validate() {
+            return Err(KeyboardAdmissionRejection::InvalidPayload(err));
+        }
+
+        let current_id = match &self.current_session_id {
+            Some(id) => id,
+            None => return Err(KeyboardAdmissionRejection::SessionInactive),
+        };
+
+        if current_id != &request.session_id {
+            return Err(KeyboardAdmissionRejection::MismatchedSession {
+                expected_session_id: current_id.clone(),
+                received_session_id: request.session_id.clone(),
+            });
+        }
+
+        if self.is_closed {
+            return Err(KeyboardAdmissionRejection::ResurrectionAttemptAfterClose {
+                session_id: current_id.clone(),
+            });
+        }
+
+        self.issued_commands.push(IssuedCommand {
+            request_id: request.request_id.clone(),
+            sequence: request.sequence,
+            command: request.command,
+        });
+
         Ok(())
     }
 
@@ -538,6 +748,7 @@ impl KeyboardAdmissionGate {
         self.current_session_id = None;
         self.last_accepted_revision = 0;
         self.is_closed = false;
+        self.issued_commands.clear();
     }
 
     pub fn current_session_id(&self) -> Option<&str> {
@@ -576,6 +787,32 @@ impl KeyboardAdmissionGate {
         if self.is_closed {
             return Err(KeyboardAdmissionRejection::ResurrectionAttemptAfterClose {
                 session_id: current_id.clone(),
+            });
+        }
+
+        // Verify request correlation against issued commands
+        let matched = self.issued_commands.iter().find(|cmd| {
+            cmd.request_id == response.acknowledged_request_id
+                && cmd.sequence == response.acknowledged_sequence
+        });
+
+        if matched.is_none() {
+            let reason = if self.issued_commands.is_empty() {
+                "no issued commands recorded for active session"
+            } else if self
+                .issued_commands
+                .iter()
+                .all(|c| response.acknowledged_sequence > c.sequence)
+            {
+                "acknowledged sequence is ahead of any issued sequence"
+            } else {
+                "acknowledged request id/sequence does not match any issued command"
+            };
+            return Err(KeyboardAdmissionRejection::RequestCorrelationMismatch {
+                session_id: current_id.clone(),
+                acknowledged_request_id: response.acknowledged_request_id.clone(),
+                acknowledged_sequence: response.acknowledged_sequence,
+                reason,
             });
         }
 
@@ -721,11 +958,11 @@ mod tests {
             Err(AppAdmissionRejection::CommandOrderViolation { .. })
         ));
 
-        // 3. Reject start for sess-2 while sess-1 is active
-        let req2_start =
-            KeyboardRequest::new("sess-2", 1, "req-3", IpcCommand::Start, None).unwrap();
+        // 3. Reject start for sess-2 if sequence > 1 while sess-1 is active (not a fresh start)
+        let req2_start_seq2 =
+            KeyboardRequest::new("sess-2", 2, "req-3", IpcCommand::Start, None).unwrap();
         assert!(matches!(
-            gate.admit_request(&req2_start),
+            gate.admit_request(&req2_start_seq2),
             Err(AppAdmissionRejection::ActiveSessionConflict { .. })
         ));
 
@@ -741,7 +978,9 @@ mod tests {
         let req1_stop = KeyboardRequest::new("sess-1", 2, "req-5", IpcCommand::Stop, None).unwrap();
         assert!(gate.admit_request(&req1_stop).is_ok());
 
-        // 6. Now sess-2 can start
+        // 6. Now sess-2 can start cleanly
+        let req2_start =
+            KeyboardRequest::new("sess-2", 1, "req-6", IpcCommand::Start, None).unwrap();
         assert!(gate.admit_request(&req2_start).is_ok());
         assert_eq!(gate.active_session_id(), Some("sess-2"));
 
@@ -757,7 +996,7 @@ mod tests {
 
         // 8. Cancel sess-2
         let req2_cancel =
-            KeyboardRequest::new("sess-2", 2, "req-6", IpcCommand::Cancel, None).unwrap();
+            KeyboardRequest::new("sess-2", 2, "req-7", IpcCommand::Cancel, None).unwrap();
         assert!(gate.admit_request(&req2_cancel).is_ok());
     }
 
@@ -787,6 +1026,16 @@ mod tests {
         gate.open_session("sess-1").unwrap();
         assert!(gate.is_active());
 
+        // Attempting to admit response before registering issued command -> rejected correlation mismatch
+        assert!(matches!(
+            gate.admit_response(&resp1),
+            Err(KeyboardAdmissionRejection::RequestCorrelationMismatch { .. })
+        ));
+
+        // Register outgoing START request
+        let req1 = KeyboardRequest::new("sess-1", 1, "req-1", IpcCommand::Start, None).unwrap();
+        gate.register_issued_command(&req1).unwrap();
+
         // Admit first revision
         assert!(gate.admit_response(&resp1).is_ok());
         assert_eq!(gate.last_accepted_revision(), 1);
@@ -803,21 +1052,27 @@ mod tests {
 
         // Out-of-order / older revision -> rejected
         let mut resp_old = resp1.clone();
-        resp_old.revision = 0;
+        resp_old.revision = 0; // note: response constructor/validate would reject, but testing gate
         assert!(matches!(
             gate.admit_response(&resp_old),
-            Err(KeyboardAdmissionRejection::NonMonotonicRevision { .. })
+            Err(KeyboardAdmissionRejection::InvalidPayload(_))
         ));
 
-        // Advance to revision 2
+        // Advance to revision 2 (partial update for same req-1)
         let mut resp2 = resp1.clone();
         resp2.revision = 2;
         resp2.recognized_text = Some("Hi there".to_string());
         assert!(gate.admit_response(&resp2).is_ok());
         assert_eq!(gate.last_accepted_revision(), 2);
 
-        // Final response at revision 3 closes the session
+        // Issue STOP request req-2
+        let req2 = KeyboardRequest::new("sess-1", 2, "req-2", IpcCommand::Stop, None).unwrap();
+        gate.register_issued_command(&req2).unwrap();
+
+        // Final response at revision 3 acknowledging req-2 closes the session
         let mut resp3 = resp1.clone();
+        resp3.acknowledged_request_id = "req-2".to_string();
+        resp3.acknowledged_sequence = 2;
         resp3.revision = 3;
         resp3.state = IpcAppState::Completed;
         resp3.is_final = true;
@@ -826,7 +1081,7 @@ mod tests {
         assert!(!gate.is_active());
 
         // Any subsequent response for sess-1 is rejected as resurrection
-        let mut resp4 = resp1.clone();
+        let mut resp4 = resp3.clone();
         resp4.revision = 4;
         assert_eq!(
             gate.admit_response(&resp4).unwrap_err(),
@@ -853,24 +1108,270 @@ mod tests {
         gate.close_session();
         assert!(!gate.is_active());
 
-        let resp_sess2 = AppResponse::new(
-            "sess-2",
-            "req-2",
+        let req_sess2 =
+            KeyboardRequest::new("sess-2", 1, "req-201", IpcCommand::Start, None).unwrap();
+        // Registering on closed session fails
+        assert_eq!(
+            gate.register_issued_command(&req_sess2).unwrap_err(),
+            KeyboardAdmissionRejection::ResurrectionAttemptAfterClose {
+                session_id: "sess-2".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn test_adversarial_defect_1_mismatched_ack_with_same_session_and_higher_revision() {
+        let mut gate = KeyboardAdmissionGate::new();
+        gate.open_session("sess-adv-1").unwrap();
+
+        let req1 =
+            KeyboardRequest::new("sess-adv-1", 1, "req-real-1", IpcCommand::Start, None).unwrap();
+        gate.register_issued_command(&req1).unwrap();
+
+        // Valid initial response
+        let resp1 = AppResponse::new(
+            "sess-adv-1",
+            "req-real-1",
             1,
             1,
             IpcAppState::Listening,
-            Some("Test".to_string()),
+            Some("Partial 1".to_string()),
             false,
             None,
             None,
         )
         .unwrap();
+        assert!(gate.admit_response(&resp1).is_ok());
+        assert_eq!(gate.last_accepted_revision(), 1);
+
+        // Adversarial response: same session, higher revision (rev=2), but WRONG acknowledged_request_id
+        let resp_wrong_id = AppResponse::new(
+            "sess-adv-1",
+            "req-phantom-99",
+            1,
+            2,
+            IpcAppState::Listening,
+            Some("Malicious injected text".to_string()),
+            false,
+            None,
+            None,
+        )
+        .unwrap();
+
+        let err = gate.admit_response(&resp_wrong_id).unwrap_err();
+        assert!(matches!(
+            err,
+            KeyboardAdmissionRejection::RequestCorrelationMismatch { .. }
+        ));
+        // Crucial invariant: watermark did NOT advance
+        assert_eq!(gate.last_accepted_revision(), 1);
+
+        // Adversarial response: same session, higher revision (rev=2), but unissued future sequence (seq=99)
+        let resp_future_seq = AppResponse::new(
+            "sess-adv-1",
+            "req-real-1",
+            99,
+            2,
+            IpcAppState::Listening,
+            Some("Unissued future seq".to_string()),
+            false,
+            None,
+            None,
+        )
+        .unwrap();
+
+        let err2 = gate.admit_response(&resp_future_seq).unwrap_err();
+        assert!(matches!(
+            err2,
+            KeyboardAdmissionRejection::RequestCorrelationMismatch { .. }
+        ));
+        assert_eq!(gate.last_accepted_revision(), 1);
+    }
+
+    #[test]
+    fn test_adversarial_defect_2_zero_sequence_and_zero_revision_rejection() {
+        // AppResponse with zero acknowledged_sequence must fail validate and gate
+        let resp_zero_seq = AppResponse {
+            protocol_version: PROTOCOL_VERSION,
+            session_id: "sess-1".to_string(),
+            acknowledged_request_id: "req-1".to_string(),
+            acknowledged_sequence: 0,
+            revision: 1,
+            state: IpcAppState::Listening,
+            recognized_text: None,
+            is_final: false,
+            error_code: None,
+            server_timestamp_ms: None,
+        };
         assert_eq!(
-            gate.admit_response(&resp_sess2).unwrap_err(),
-            KeyboardAdmissionRejection::ResurrectionAttemptAfterClose {
-                session_id: "sess-2".to_string()
+            resp_zero_seq.validate().unwrap_err(),
+            IpcValidationError::InvalidAcknowledgedSequence(0)
+        );
+
+        // AppResponse with zero revision must fail validate and gate
+        let resp_zero_rev = AppResponse {
+            protocol_version: PROTOCOL_VERSION,
+            session_id: "sess-1".to_string(),
+            acknowledged_request_id: "req-1".to_string(),
+            acknowledged_sequence: 1,
+            revision: 0,
+            state: IpcAppState::Listening,
+            recognized_text: None,
+            is_final: false,
+            error_code: None,
+            server_timestamp_ms: None,
+        };
+        assert_eq!(
+            resp_zero_rev.validate().unwrap_err(),
+            IpcValidationError::InvalidRevision(0)
+        );
+
+        // Gate rejects invalid payload fail-closed
+        let mut gate = KeyboardAdmissionGate::new();
+        gate.open_session("sess-1").unwrap();
+        assert!(matches!(
+            gate.admit_response(&resp_zero_seq),
+            Err(KeyboardAdmissionRejection::InvalidPayload(_))
+        ));
+        assert!(matches!(
+            gate.admit_response(&resp_zero_rev),
+            Err(KeyboardAdmissionRejection::InvalidPayload(_))
+        ));
+    }
+
+    #[test]
+    fn test_adversarial_defect_3_lost_stop_then_new_start_and_stale_stop() {
+        let mut app_gate = AppAdmissionGate::new();
+
+        // Editor 1 starts session A
+        let req_start_a =
+            KeyboardRequest::new("sess-A", 1, "req-A-1", IpcCommand::Start, None).unwrap();
+        assert_eq!(
+            app_gate.admit_request(&req_start_a).unwrap(),
+            AppAdmissionOutcome::Admitted
+        );
+        assert_eq!(app_gate.active_session_id(), Some("sess-A"));
+
+        // Preceding STOP for sess-A is lost in transit!
+        // User moves focus to Editor 2: Keyboard issues fresh START for sess-B (sequence=1)
+        let req_start_b =
+            KeyboardRequest::new("sess-B", 1, "req-B-1", IpcCommand::Start, None).unwrap();
+        let outcome = app_gate.admit_request(&req_start_b).unwrap();
+        assert_eq!(
+            outcome,
+            AppAdmissionOutcome::ReplacedPriorSession {
+                retired_session_id: "sess-A".to_string(),
             }
         );
+        assert_eq!(app_gate.active_session_id(), Some("sess-B"));
+
+        // Now late STOP from old sess-A finally arrives (from delayed delivery or retry)
+        let late_stop_a =
+            KeyboardRequest::new("sess-A", 2, "req-A-2", IpcCommand::Stop, None).unwrap();
+        let rejection = app_gate.admit_request(&late_stop_a).unwrap_err();
+        assert!(matches!(
+            rejection,
+            AppAdmissionRejection::StaleSessionCommand {
+                ref incoming_session_id,
+                ref active_session_id,
+                command: IpcCommand::Stop,
+            } if incoming_session_id == "sess-A" && active_session_id.as_deref() == Some("sess-B")
+        ));
+
+        // Verify sess-B is unharmed and remains active
+        assert_eq!(app_gate.active_session_id(), Some("sess-B"));
+    }
+
+    #[test]
+    fn test_adversarial_defect_4_old_cached_start_after_process_restart() {
+        // App restarts: AppAdmissionGate initialized in cold_boot mode
+        let mut app_gate = AppAdmissionGate::cold_boot(42);
+        assert!(app_gate.is_cold_boot_armed());
+
+        // Stale cached START from UserDefaults is read upon boot
+        let cached_req =
+            KeyboardRequest::new("sess-old-cached", 1, "req-old", IpcCommand::Start, None).unwrap();
+
+        // Must reject without starting microphone or arming session
+        let err = app_gate.admit_request(&cached_req).unwrap_err();
+        assert!(matches!(
+            err,
+            AppAdmissionRejection::ColdBootFenceReject { .. }
+        ));
+        assert_eq!(app_gate.active_session_id(), None);
+
+        // After containing App is brought to foreground and authorized by host
+        app_gate.authorize_boot();
+        assert!(!app_gate.is_cold_boot_armed());
+
+        // Now fresh incoming request is accepted
+        let fresh_req =
+            KeyboardRequest::new("sess-fresh", 1, "req-fresh-1", IpcCommand::Start, None).unwrap();
+        assert_eq!(
+            app_gate.admit_request(&fresh_req).unwrap(),
+            AppAdmissionOutcome::Admitted
+        );
+        assert_eq!(app_gate.active_session_id(), Some("sess-fresh"));
+
+        // Duplicate replay of identical request_id is rejected
+        let dup_replay = fresh_req.clone();
+        assert!(matches!(
+            app_gate.admit_request(&dup_replay),
+            Err(AppAdmissionRejection::CommandOrderViolation { .. })
+        ));
+    }
+
+    #[test]
+    fn test_adversarial_defect_5_local_close_ignoring_late_valid_higher_revision() {
+        let mut gate = KeyboardAdmissionGate::new();
+        gate.open_session("sess-close-test").unwrap();
+
+        let req_start =
+            KeyboardRequest::new("sess-close-test", 1, "req-start-1", IpcCommand::Start, None)
+                .unwrap();
+        gate.register_issued_command(&req_start).unwrap();
+
+        let resp_part = AppResponse::new(
+            "sess-close-test",
+            "req-start-1",
+            1,
+            1,
+            IpcAppState::Listening,
+            Some("Partial text".to_string()),
+            false,
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(gate.admit_response(&resp_part).is_ok());
+
+        // Keyboard is dismissed or user taps stop/dismiss: local session closed immediately
+        gate.close_session();
+        assert!(!gate.is_active());
+
+        // Late response arrives with valid session, valid ack, higher revision (rev=2) and even is_final=true
+        let resp_late = AppResponse::new(
+            "sess-close-test",
+            "req-start-1",
+            1,
+            2,
+            IpcAppState::Completed,
+            Some("Late text that must NOT inject".to_string()),
+            true,
+            None,
+            None,
+        )
+        .unwrap();
+
+        let err = gate.admit_response(&resp_late).unwrap_err();
+        assert_eq!(
+            err,
+            KeyboardAdmissionRejection::ResurrectionAttemptAfterClose {
+                session_id: "sess-close-test".to_string(),
+            }
+        );
+        // Watermark remains at 1
+        assert_eq!(gate.last_accepted_revision(), 1);
     }
 }
 
@@ -929,10 +1430,13 @@ fn test_golden_fixtures_decode_and_validate() {
     let mut kb_gate = KeyboardAdmissionGate::new();
 
     kb_gate.open_session("session-golden-42").unwrap();
+    kb_gate.register_issued_command(&req_start).unwrap();
     app_gate.admit_request(&req_start).expect("app admit start");
     kb_gate
         .admit_response(&resp_part)
         .expect("kb admit partial");
+
+    kb_gate.register_issued_command(&req_stop).unwrap();
     app_gate.admit_request(&req_stop).expect("app admit stop");
     kb_gate.admit_response(&resp_final).expect("kb admit final");
 

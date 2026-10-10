@@ -169,6 +169,28 @@ struct IPCCodecSmoke {
             }
             assert(threw, "Must reject empty response session ID")
 
+            // Zero acknowledgedSequence
+            threw = false
+            do {
+                _ = try EcholetIPC.AppResponse(sessionId: "s1", acknowledgedRequestId: "r1", acknowledgedSequence: 0, revision: 1, state: .listening)
+            } catch EcholetIPC.ValidationError.invalidAcknowledgedSequence(0) {
+                threw = true
+            } catch {
+                fputs("Unexpected error: \(error)\n", stderr)
+            }
+            assert(threw, "Must reject acknowledgedSequence 0")
+
+            // Zero revision
+            threw = false
+            do {
+                _ = try EcholetIPC.AppResponse(sessionId: "s1", acknowledgedRequestId: "r1", acknowledgedSequence: 1, revision: 0, state: .listening)
+            } catch EcholetIPC.ValidationError.invalidRevision(0) {
+                threw = true
+            } catch {
+                fputs("Unexpected error: \(error)\n", stderr)
+            }
+            assert(threw, "Must reject revision 0")
+
             // Malformed JSON decode
             let badJson = Data("{\"not_valid_json\":".utf8)
             threw = false
