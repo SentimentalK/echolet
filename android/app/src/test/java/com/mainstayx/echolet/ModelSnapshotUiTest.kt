@@ -174,4 +174,100 @@ class ModelSnapshotUiTest {
         assertNotNull(updatedPlan.expandedPanel!!.modelSnapshot)
         assertEquals(2, updatedPlan.expandedPanel!!.modelSnapshot!!.groups.size)
     }
+
+    @Test
+    fun `parses snapshot with selected but uninstalled default model`() {
+        val missingSelectedJson = """
+        {
+          "schema_version": 2,
+          "selected_model_id": "echolet-xasr-zh-en-480ms-689ff18c584d29910da37b6fe904db0c1489c9d1",
+          "selected_model_dir": null,
+          "runtime_state": "NoModel",
+          "model_groups": [
+            {
+              "id": "bilingual",
+              "label": "Chinese + English",
+              "models": [
+                {
+                  "id": "echolet-xasr-zh-en-480ms-689ff18c584d29910da37b6fe904db0c1489c9d1",
+                  "label": "X-ASR 0.16B",
+                  "release_date": "2026-05-18",
+                  "verification_label": "Echolet Verified",
+                  "is_verified": true,
+                  "selected": true,
+                  "installed": false,
+                  "download": {
+                    "phase": "NotDownloading",
+                    "label": null,
+                    "progress_fraction": null,
+                    "progress_percent": null,
+                    "retryable": false
+                  },
+                  "primary_action": "Download",
+                  "enabled": true
+                }
+              ]
+            }
+          ]
+        }
+        """.trimIndent()
+
+        val snapshot = ModelSnapshotUi.parseJson(missingSelectedJson)
+        assertEquals("echolet-xasr-zh-en-480ms-689ff18c584d29910da37b6fe904db0c1489c9d1", snapshot.selectedModelId)
+        assertNull(snapshot.selectedModelDir)
+        assertFalse(snapshot.hasSelectedAndInstalledModel)
+        assertEquals(1, snapshot.groups.size)
+
+        val xasr = snapshot.groups[0].models[0]
+        assertTrue(xasr.selected)
+        assertFalse(xasr.installed)
+        assertEquals("Download", xasr.primaryAction)
+        assertTrue(xasr.enabled)
+    }
+
+    @Test
+    fun `listening state snapshot disables action for selected uninstalled model`() {
+        val listeningMissingJson = """
+        {
+          "schema_version": 2,
+          "selected_model_id": "echolet-xasr-zh-en-480ms-689ff18c584d29910da37b6fe904db0c1489c9d1",
+          "selected_model_dir": null,
+          "runtime_state": "Listening",
+          "model_groups": [
+            {
+              "id": "bilingual",
+              "label": "Chinese + English",
+              "models": [
+                {
+                  "id": "echolet-xasr-zh-en-480ms-689ff18c584d29910da37b6fe904db0c1489c9d1",
+                  "label": "X-ASR 0.16B",
+                  "release_date": "2026-05-18",
+                  "verification_label": "Echolet Verified",
+                  "is_verified": true,
+                  "selected": true,
+                  "installed": false,
+                  "download": {
+                    "phase": "NotDownloading",
+                    "label": null,
+                    "progress_fraction": null,
+                    "progress_percent": null,
+                    "retryable": false
+                  },
+                  "primary_action": "Download",
+                  "enabled": false
+                }
+              ]
+            }
+          ]
+        }
+        """.trimIndent()
+
+        val snapshot = ModelSnapshotUi.parseJson(listeningMissingJson)
+        assertEquals("Listening", snapshot.runtimeState)
+        val xasr = snapshot.groups[0].models[0]
+        assertTrue(xasr.selected)
+        assertFalse(xasr.installed)
+        assertEquals("Download", xasr.primaryAction)
+        assertFalse(xasr.enabled)
+    }
 }

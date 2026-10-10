@@ -557,12 +557,17 @@ pub fn build_control_surface_state(
         });
         let download = DownloadPresentation::from_status(&download_status);
 
-        // Derive explicit primary action and enabled state
-        let (primary_action, enabled) = if is_selected {
+        // Derive explicit primary action and enabled state according to canonical precedence:
+        // 1. in_progress => None, disabled (no duplicate download), regardless of selected flag
+        // 2. if model is installed AND selected => None / Selected, disabled
+        // 3. if install/download previously failed AND model not installed => RetryDownload, enabled only if !Listening
+        // 4. installed but not selected => Select, enabled only if !Listening
+        // 5. not installed (including selected default) => Download, enabled only if !Listening
+        let (primary_action, enabled) = if download.is_in_progress() {
             (ModelPrimaryAction::None, false)
-        } else if download.is_in_progress() {
+        } else if is_installed && is_selected {
             (ModelPrimaryAction::None, false)
-        } else if download.phase == DownloadPhase::Failed {
+        } else if download.phase == DownloadPhase::Failed && !is_installed {
             (ModelPrimaryAction::RetryDownload, !is_listening)
         } else if is_installed {
             (ModelPrimaryAction::Select, !is_listening)
@@ -832,6 +837,90 @@ mod tests {
             "starting download must be disabled while listening"
         );
         assert_eq!(m5_list.surface_action(), None);
+
+        // 3. Selected but NOT installed default model (contract case):
+        // Must show Download action and be enabled when not listening.
+        let selected_missing_state = build_control_surface_state(
+            &registry,
+            Some("m5"), // m5 is not installed
+            &installed,
+            &downloading,
+            &progress,
+            &config,
+            RuntimeState::Ready,
+            false,
+        );
+        let m5_selected = selected_missing_state.find_model("m5").unwrap();
+        assert!(m5_selected.selected);
+        assert!(!m5_selected.installed);
+        assert_eq!(m5_selected.primary_action, ModelPrimaryAction::Download);
+        assert!(m5_selected.enabled);
+        assert_eq!(
+            m5_selected.surface_action(),
+            Some(SurfaceAction::DownloadModel("m5".to_string()))
+        );
+
+        // While listening, selected-missing model download is disabled
+        let selected_missing_listening = build_control_surface_state(
+            &registry,
+            Some("m5"),
+            &installed,
+            &downloading,
+            &progress,
+            &config,
+            RuntimeState::Listening,
+            false,
+        );
+        let m5_sel_listening = selected_missing_listening.find_model("m5").unwrap();
+        assert!(m5_sel_listening.selected);
+        assert!(!m5_sel_listening.installed);
+        assert_eq!(m5_sel_listening.primary_action, ModelPrimaryAction::Download);
+        assert!(!m5_sel_listening.enabled);
+        assert_eq!(m5_sel_listening.surface_action(), None);
+
+        // 4. In-progress selected-missing model: None, disabled
+        let selected_inprogress_state = build_control_surface_state(
+            &registry,
+            Some("m3"), // m3 is downloading
+            &installed,
+            &downloading,
+            &progress,
+            &config,
+            RuntimeState::Ready,
+            false,
+        );
+        let m3_sel = selected_inprogress_state.find_model("m3").unwrap();
+        assert!(m3_sel.selected);
+        assert!(!m3_sel.installed);
+        assert_eq!(m3_sel.primary_action, ModelPrimaryAction::None);
+        assert!(!m3_sel.enabled);
+
+        // 5. Failed selected-missing model: RetryDownload, enabled when !Listening
+        let selected_failed_state = build_control_surface_state(
+            &registry,
+            Some("m4"), // m4 failed
+            &installed,
+            &downloading,
+            &progress,
+            &config,
+            RuntimeState::Ready,
+            false,
+        );
+        let m4_sel = selected_failed_state.find_model("m4").unwrap();
+        assert!(m4_sel.selected);
+        assert!(!m4_sel.installed);
+        assert_eq!(m4_sel.primary_action, ModelPrimaryAction::RetryDownload);
+        assert!(m4_sel.enabled);
+        assert_eq!(
+            m4_sel.surface_action(),
+            Some(SurfaceAction::DownloadModel("m4".to_string()))
+        );
+
+        // 6. Installed model remains installed even after an unrelated download failure
+        let m1_after_fail = selected_failed_state.find_model("m1").unwrap();
+        assert!(m1_after_fail.installed);
+        assert_eq!(m1_after_fail.primary_action, ModelPrimaryAction::Select);
+        assert!(m1_after_fail.enabled);
     }
 
     #[test]

@@ -385,8 +385,18 @@ class EcholetInputMethodService : InputMethodService() {
 
     // ------------------------------------------------------------ plan binder
 
+    private var lastRenderedState: ImeSessionModel.ImeState? = null
+
     private fun render(state: ImeSessionModel.ImeState, text: String) {
-        runOnUi { applyPlan(presenter.render(state, text)) }
+        val stateChanged = state != lastRenderedState
+        lastRenderedState = state
+        runOnUi {
+            val plan = presenter.render(state, text)
+            applyPlan(plan)
+            if (stateChanged && plan.layout == ImeLayoutMode.EXPANDED) {
+                refreshModelSnapshot()
+            }
+        }
     }
 
     /** Applies one pure plan to the live views; view refs may be gone. */
@@ -502,6 +512,14 @@ class EcholetInputMethodService : InputMethodService() {
         val snapshot = panel.modelSnapshot
         if (snapshot != null && snapshot.groups.isNotEmpty()) {
             body.addView(sectionLabel("MODELS"), matchWrap().apply { bottomMargin = dp(8) })
+            if (snapshot.runtimeState == "Listening") {
+                body.addView(
+                    singleLine("Stop Listening to download or switch models", 12f, COLOR_NOTICE_TEXT).apply {
+                        setPadding(0, 0, 0, dp(6))
+                    },
+                    matchWrap()
+                )
+            }
             snapshot.groups.forEachIndexed { gi, group ->
                 body.addView(
                     singleLine(group.label, 11f, COLOR_TEXT_MUTED, bold = true),
@@ -528,14 +546,15 @@ class EcholetInputMethodService : InputMethodService() {
 
     /** One desktop-style model row: name + date on the left, action on the right. */
     private fun modelRow(model: ModelItemUi): View {
+        val isSelectedAndInstalled = model.selected && model.installed
         val row = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(12), dp(6), dp(8), dp(6))
             background = GradientDrawable().apply {
                 cornerRadius = dp(10).toFloat()
-                setColor(if (model.selected) COLOR_ROW_SELECTED else COLOR_CARD)
-                setStroke(dp(1), if (model.selected) COLOR_BORDER_STRONG else COLOR_BORDER)
+                setColor(if (isSelectedAndInstalled) COLOR_ROW_SELECTED else COLOR_CARD)
+                setStroke(dp(1), if (isSelectedAndInstalled) COLOR_BORDER_STRONG else COLOR_BORDER)
             }
         }
 
@@ -573,11 +592,6 @@ class EcholetInputMethodService : InputMethodService() {
             setPadding(dp(4), 0, dp(4), 0)
         }
         when {
-            model.selected -> {
-                action.text = "✓ Selected"
-                action.setTextColor(Color.WHITE)
-                action.background = roundedFilled(COLOR_PRIMARY_BUTTON, 8)
-            }
             inProgress -> {
                 val pct = model.progressPercent
                 action.text = when (model.downloadPhase) {
@@ -592,6 +606,11 @@ class EcholetInputMethodService : InputMethodService() {
                 val fill = ClipDrawable(roundedFilled(COLOR_BORDER_STRONG, 8), Gravity.START, ClipDrawable.HORIZONTAL)
                 fill.level = ((pct ?: 0).coerceIn(0, 100)) * 100
                 action.background = LayerDrawable(arrayOf(smallOutline(), fill))
+            }
+            model.selected && model.installed -> {
+                action.text = "✓ Selected"
+                action.setTextColor(Color.WHITE)
+                action.background = roundedFilled(COLOR_PRIMARY_BUTTON, 8)
             }
             model.primaryAction == "Select" || model.primaryAction == "Download" ||
                 model.primaryAction == "RetryDownload" -> {

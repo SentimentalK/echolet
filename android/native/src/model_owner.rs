@@ -912,4 +912,86 @@ mod tests {
         assert!(old_dir.exists(), "Recovery backup must still be preserved");
         assert_eq!(owner.selected_model_id(), xasr_entry.id);
     }
+
+    #[test]
+    fn test_missing_default_model_returns_download_action_and_selected_after_install() {
+        let (models_dir, files_dir) = temp_test_dirs("missing-default");
+        let registry = ModelRegistry::canonical().unwrap();
+        let xasr_id = &registry.default_model_id;
+        let xasr_entry = registry.get_model(xasr_id).unwrap();
+
+        // Fresh owner with empty models directory (default X-ASR not installed)
+        let owner = AndroidModelOwner::new(models_dir.clone(), files_dir.clone());
+        assert_eq!(owner.selected_model_id(), xasr_id);
+        assert!(!owner.installed_model_ids().contains(xasr_id));
+        assert!(owner.current_model_dir().is_none());
+
+        // 1. Snapshot JSON when idle / not listening
+        let snapshot_json = owner.build_snapshot_json(RuntimeState::Ready).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&snapshot_json).unwrap();
+        assert_eq!(parsed["selected_model_id"], *xasr_id);
+        assert!(parsed["selected_model_dir"].is_null());
+        assert_eq!(parsed["runtime_state"], "Ready");
+
+        let groups = parsed["model_groups"].as_array().unwrap();
+        let mut found_xasr = None;
+        for g in groups {
+            for m in g["models"].as_array().unwrap() {
+                if m["id"] == *xasr_id {
+                    found_xasr = Some(m.clone());
+                    break;
+                }
+            }
+        }
+        let xasr_val = found_xasr.expect("Default X-ASR model must be present in snapshot");
+        assert_eq!(xasr_val["selected"], true);
+        assert_eq!(xasr_val["installed"], false);
+        assert_eq!(xasr_val["primary_action"], "Download");
+        assert_eq!(xasr_val["enabled"], true);
+
+        // 2. Snapshot JSON when Listening: primary_action is Download but enabled is false
+        let listening_snapshot_json = owner.build_snapshot_json(RuntimeState::Listening).unwrap();
+        let parsed_listening: serde_json::Value = serde_json::from_str(&listening_snapshot_json).unwrap();
+        assert_eq!(parsed_listening["runtime_state"], "Listening");
+        let mut found_xasr_listening = None;
+        for g in parsed_listening["model_groups"].as_array().unwrap() {
+            for m in g["models"].as_array().unwrap() {
+                if m["id"] == *xasr_id {
+                    found_xasr_listening = Some(m.clone());
+                    break;
+                }
+            }
+        }
+        let xasr_val_listening = found_xasr_listening.unwrap();
+        assert_eq!(xasr_val_listening["selected"], true);
+        assert_eq!(xasr_val_listening["installed"], false);
+        assert_eq!(xasr_val_listening["primary_action"], "Download");
+        assert_eq!(xasr_val_listening["enabled"], false);
+
+        // 3. Install default model fixture and verify transition to installed/Selected
+        create_valid_model_dir(&models_dir.join(LEGACY_MODEL_DIR_NAME), xasr_entry);
+        let owner_installed = AndroidModelOwner::new(models_dir, files_dir);
+        assert!(owner_installed.installed_model_ids().contains(xasr_id));
+        assert!(owner_installed.current_model_dir().is_some());
+
+        let installed_json = owner_installed.build_snapshot_json(RuntimeState::Ready).unwrap();
+        let parsed_installed: serde_json::Value = serde_json::from_str(&installed_json).unwrap();
+        assert_eq!(parsed_installed["selected_model_id"], *xasr_id);
+        assert!(parsed_installed["selected_model_dir"].is_string());
+
+        let mut found_xasr_installed = None;
+        for g in parsed_installed["model_groups"].as_array().unwrap() {
+            for m in g["models"].as_array().unwrap() {
+                if m["id"] == *xasr_id {
+                    found_xasr_installed = Some(m.clone());
+                    break;
+                }
+            }
+        }
+        let xasr_installed_val = found_xasr_installed.unwrap();
+        assert_eq!(xasr_installed_val["selected"], true);
+        assert_eq!(xasr_installed_val["installed"], true);
+        assert_eq!(xasr_installed_val["primary_action"], "None");
+        assert_eq!(xasr_installed_val["enabled"], false);
+    }
 }
