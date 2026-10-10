@@ -5,7 +5,7 @@ import Foundation
 /// Tests:
 /// 1. Decoding Golden JSON fixtures (start, stop, partial, final).
 /// 2. Encoding round-trip equality.
-/// 3. Invariant validation (reject empty IDs, version mismatch, sequence=0).
+/// 3. Invariant validation (reject empty IDs, version mismatch, sequence=0, intent_sequence=0, empty app_epoch).
 /// 4. Rejection of malformed / unknown payload structures.
 ///
 /// Returns exit code 0 on success, non-zero on failure.
@@ -13,7 +13,7 @@ import Foundation
 @main
 struct IPCCodecSmoke {
     static func main() {
-        print("[IPCCodecSmoke] Starting Swift Foundation IPC Codec Smoke Suite...")
+        print("[IPCCodecSmoke] Starting Swift Foundation IPC Codec Smoke Suite (v2)...")
 
         let arguments = CommandLine.arguments
         guard arguments.count >= 2 else {
@@ -32,7 +32,9 @@ struct IPCCodecSmoke {
             let req = try decoder.decode(EcholetIPC.KeyboardRequest.self, from: data)
             try req.validate()
 
-            assert(req.protocolVersion == 1, "protocolVersion must be 1")
+            assert(req.protocolVersion == 2, "protocolVersion must be 2")
+            assert(req.appEpoch == "epoch-test-v2-golden", "appEpoch mismatch")
+            assert(req.intentSequence == 1, "intentSequence mismatch")
             assert(req.sessionId == "session-golden-42", "sessionId mismatch")
             assert(req.sequence == 1, "sequence mismatch")
             assert(req.requestId == "req-golden-001", "requestId mismatch")
@@ -56,7 +58,9 @@ struct IPCCodecSmoke {
             let req = try decoder.decode(EcholetIPC.KeyboardRequest.self, from: data)
             try req.validate()
 
-            assert(req.protocolVersion == 1)
+            assert(req.protocolVersion == 2)
+            assert(req.appEpoch == "epoch-test-v2-golden")
+            assert(req.intentSequence == 2)
             assert(req.sessionId == "session-golden-42")
             assert(req.sequence == 2)
             assert(req.requestId == "req-golden-002")
@@ -79,7 +83,8 @@ struct IPCCodecSmoke {
             let resp = try decoder.decode(EcholetIPC.AppResponse.self, from: data)
             try resp.validate()
 
-            assert(resp.protocolVersion == 1)
+            assert(resp.protocolVersion == 2)
+            assert(resp.appEpoch == "epoch-test-v2-golden")
             assert(resp.sessionId == "session-golden-42")
             assert(resp.acknowledgedRequestId == "req-golden-001")
             assert(resp.acknowledgedSequence == 1)
@@ -105,7 +110,8 @@ struct IPCCodecSmoke {
             let resp = try decoder.decode(EcholetIPC.AppResponse.self, from: data)
             try resp.validate()
 
-            assert(resp.protocolVersion == 1)
+            assert(resp.protocolVersion == 2)
+            assert(resp.appEpoch == "epoch-test-v2-golden")
             assert(resp.sessionId == "session-golden-42")
             assert(resp.acknowledgedRequestId == "req-golden-002")
             assert(resp.acknowledgedSequence == 2)
@@ -125,10 +131,32 @@ struct IPCCodecSmoke {
 
         // 5. Verify validation rejects invalid/malformed models
         do {
-            // Empty session
+            // Empty app epoch
             var threw = false
             do {
-                _ = try EcholetIPC.KeyboardRequest(sessionId: "   ", sequence: 1, requestId: "r1", command: .start)
+                _ = try EcholetIPC.KeyboardRequest(appEpoch: "   ", intentSequence: 1, sessionId: "s1", sequence: 1, requestId: "r1", command: .start)
+            } catch EcholetIPC.ValidationError.emptyAppEpoch {
+                threw = true
+            } catch {
+                fputs("Unexpected error: \(error)\n", stderr)
+            }
+            assert(threw, "Must reject empty app epoch in request")
+
+            // Zero intent sequence
+            threw = false
+            do {
+                _ = try EcholetIPC.KeyboardRequest(appEpoch: "ep1", intentSequence: 0, sessionId: "s1", sequence: 1, requestId: "r1", command: .start)
+            } catch EcholetIPC.ValidationError.invalidIntentSequence(0) {
+                threw = true
+            } catch {
+                fputs("Unexpected error: \(error)\n", stderr)
+            }
+            assert(threw, "Must reject intentSequence 0 in request")
+
+            // Empty session
+            threw = false
+            do {
+                _ = try EcholetIPC.KeyboardRequest(appEpoch: "ep1", intentSequence: 1, sessionId: "   ", sequence: 1, requestId: "r1", command: .start)
             } catch EcholetIPC.ValidationError.emptySessionId {
                 threw = true
             } catch {
@@ -139,7 +167,7 @@ struct IPCCodecSmoke {
             // Zero sequence
             threw = false
             do {
-                _ = try EcholetIPC.KeyboardRequest(sessionId: "s1", sequence: 0, requestId: "r1", command: .start)
+                _ = try EcholetIPC.KeyboardRequest(appEpoch: "ep1", intentSequence: 1, sessionId: "s1", sequence: 0, requestId: "r1", command: .start)
             } catch EcholetIPC.ValidationError.invalidSequence(0) {
                 threw = true
             } catch {
@@ -150,7 +178,7 @@ struct IPCCodecSmoke {
             // Empty request ID
             threw = false
             do {
-                _ = try EcholetIPC.KeyboardRequest(sessionId: "s1", sequence: 1, requestId: "", command: .start)
+                _ = try EcholetIPC.KeyboardRequest(appEpoch: "ep1", intentSequence: 1, sessionId: "s1", sequence: 1, requestId: "", command: .start)
             } catch EcholetIPC.ValidationError.emptyRequestId {
                 threw = true
             } catch {
@@ -158,10 +186,21 @@ struct IPCCodecSmoke {
             }
             assert(threw, "Must reject empty request ID")
 
+            // Empty response app epoch
+            threw = false
+            do {
+                _ = try EcholetIPC.AppResponse(appEpoch: "", sessionId: "s1", acknowledgedRequestId: "r1", acknowledgedSequence: 1, revision: 1, state: .listening)
+            } catch EcholetIPC.ValidationError.emptyAppEpoch {
+                threw = true
+            } catch {
+                fputs("Unexpected error: \(error)\n", stderr)
+            }
+            assert(threw, "Must reject empty app epoch in response")
+
             // Empty response session ID
             threw = false
             do {
-                _ = try EcholetIPC.AppResponse(sessionId: "", acknowledgedRequestId: "r1", acknowledgedSequence: 1, revision: 1, state: .listening)
+                _ = try EcholetIPC.AppResponse(appEpoch: "ep1", sessionId: "", acknowledgedRequestId: "r1", acknowledgedSequence: 1, revision: 1, state: .listening)
             } catch EcholetIPC.ValidationError.emptySessionId {
                 threw = true
             } catch {
@@ -172,7 +211,7 @@ struct IPCCodecSmoke {
             // Zero acknowledgedSequence
             threw = false
             do {
-                _ = try EcholetIPC.AppResponse(sessionId: "s1", acknowledgedRequestId: "r1", acknowledgedSequence: 0, revision: 1, state: .listening)
+                _ = try EcholetIPC.AppResponse(appEpoch: "ep1", sessionId: "s1", acknowledgedRequestId: "r1", acknowledgedSequence: 0, revision: 1, state: .listening)
             } catch EcholetIPC.ValidationError.invalidAcknowledgedSequence(0) {
                 threw = true
             } catch {
@@ -183,7 +222,7 @@ struct IPCCodecSmoke {
             // Zero revision
             threw = false
             do {
-                _ = try EcholetIPC.AppResponse(sessionId: "s1", acknowledgedRequestId: "r1", acknowledgedSequence: 1, revision: 0, state: .listening)
+                _ = try EcholetIPC.AppResponse(appEpoch: "ep1", sessionId: "s1", acknowledgedRequestId: "r1", acknowledgedSequence: 1, revision: 0, state: .listening)
             } catch EcholetIPC.ValidationError.invalidRevision(0) {
                 threw = true
             } catch {
@@ -204,7 +243,9 @@ struct IPCCodecSmoke {
             // Unsupported protocol version
             let badVersionJson = Data("""
             {
-                "protocol_version": 99,
+                "protocol_version": 1,
+                "app_epoch": "ep1",
+                "intent_sequence": 1,
                 "session_id": "s1",
                 "sequence": 1,
                 "request_id": "r1",
@@ -215,12 +256,12 @@ struct IPCCodecSmoke {
             do {
                 let parsed = try decoder.decode(EcholetIPC.KeyboardRequest.self, from: badVersionJson)
                 try parsed.validate()
-            } catch EcholetIPC.ValidationError.unsupportedProtocolVersion(99) {
+            } catch EcholetIPC.ValidationError.unsupportedProtocolVersion(1) {
                 threw = true
             } catch {
                 fputs("Unexpected error: \(error)\n", stderr)
             }
-            assert(threw, "Must reject unsupported protocol version 99")
+            assert(threw, "Must reject unsupported protocol version 1")
 
             print("  ✓ Invalidation & malformed payload rejection checks passed")
         }

@@ -1,5 +1,6 @@
 {
-  "protocol_version": 1,
+  "protocol_version": 2,
+  "app_epoch": "epoch-test-v2-golden",
   "session_id": "session-golden-42",
   "acknowledged_request_id": "req-golden-002",
   "acknowledged_sequence": 2,

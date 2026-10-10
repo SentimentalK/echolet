@@ -1,5 +1,7 @@
 {
-  "protocol_version": 1,
+  "protocol_version": 2,
+  "app_epoch": "epoch-test-v2-golden",
+  "intent_sequence": 2,
   "session_id": "session-golden-42",
   "sequence": 2,
   "request_id": "req-golden-002",
