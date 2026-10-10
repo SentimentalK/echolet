@@ -138,8 +138,9 @@ class ImeKeyboardPresenter(private val onSetupRequested: () -> Unit) {
      */
     fun onSetupClicked(): Boolean {
         val blocked = lastState == ImeSessionModel.ImeState.BLOCKED
-        if (blocked) onSetupRequested()
-        return blocked
+        val useful = blocked && (!lastPrereq.permissionGranted || !lastPrereq.nativeReady)
+        if (useful) onSetupRequested()
+        return useful
     }
 
     // ------------------------------------------------------------------ plan
@@ -176,21 +177,78 @@ class ImeKeyboardPresenter(private val onSetupRequested: () -> Unit) {
                 ok = false,
             )
         }
-        val modelLine = if (p.modelStaged) {
-            ImePrerequisiteLine(
-                "Offline voice model",
-                "The fixed on-device bilingual voice model is installed and ready.",
-                ok = true,
-            )
-        } else {
-            ImePrerequisiteLine(
-                "Voice model not installed",
-                "The offline bilingual voice model is not staged on this device yet. " +
-                    "Use the Echolet Setup app below to place it; nothing is downloaded " +
-                    "from this keyboard.",
-                ok = false,
-            )
+
+        val snapshot = modelSnapshot
+        val selectedModel = snapshot?.groups?.flatMap { it.models }?.firstOrNull { it.id == snapshot.selectedModelId }
+        val modelLine = when {
+            snapshot != null && snapshot.runtimeState == "Error" -> {
+                ImePrerequisiteLine(
+                    "Voice model error",
+                    "The selected voice model encountered an error. Select or reinstall a model below.",
+                    ok = false,
+                )
+            }
+            snapshot != null && (snapshot.selectedModelId.isEmpty() || selectedModel == null) -> {
+                ImePrerequisiteLine(
+                    "No voice model selected",
+                    "Select and download a voice model in the browser below to begin dictating.",
+                    ok = false,
+                )
+            }
+            selectedModel != null -> {
+                val label = selectedModel.label
+                when {
+                    p.modelStaged && selectedModel.installed -> {
+                        ImePrerequisiteLine(
+                            "Voice model: $label",
+                            "Installed and ready for on-device voice typing.",
+                            ok = true,
+                        )
+                    }
+                    selectedModel.downloadPhase == "Starting" ||
+                    selectedModel.downloadPhase == "Downloading" ||
+                    selectedModel.downloadPhase == "Verifying" ||
+                    selectedModel.downloadPhase == "Extracting" ||
+                    selectedModel.downloadPhase == "Installing" -> {
+                        val progress = selectedModel.progressPercent?.let { " ($it%)" } ?: ""
+                        ImePrerequisiteLine(
+                            "Voice model: $label",
+                            "Downloading $label$progress. Dictation will be ready once complete.",
+                            ok = false,
+                        )
+                    }
+                    selectedModel.primaryAction == "RetryDownload" -> {
+                        ImePrerequisiteLine(
+                            "Voice model: $label",
+                            "Download failed for $label. Tap Retry Download below to try again.",
+                            ok = false,
+                        )
+                    }
+                    else -> {
+                        ImePrerequisiteLine(
+                            "Voice model: $label",
+                            "$label is selected but not installed. Tap Download below to download it.",
+                            ok = false,
+                        )
+                    }
+                }
+            }
+            p.modelStaged -> {
+                ImePrerequisiteLine(
+                    "Offline voice model",
+                    "On-device voice model is installed and ready.",
+                    ok = true,
+                )
+            }
+            else -> {
+                ImePrerequisiteLine(
+                    "Voice model not installed",
+                    "No voice model is installed. Select and download a model from the list below.",
+                    ok = false,
+                )
+            }
         }
+
         val nativeLine = if (p.nativeReady) {
             ImePrerequisiteLine(
                 "Recognition runtime",
@@ -205,6 +263,9 @@ class ImeKeyboardPresenter(private val onSetupRequested: () -> Unit) {
                 ok = false,
             )
         }
+
+        val needsSetup = !p.permissionGranted || !p.nativeReady
+
         return ImeExpandedPanel(
             statusTitle = when (lastState) {
                 ImeSessionModel.ImeState.HIDDEN -> "Echolet voice keyboard"
@@ -217,7 +278,7 @@ class ImeKeyboardPresenter(private val onSetupRequested: () -> Unit) {
             prerequisiteLines = listOf(permissionLine, modelLine, nativeLine),
             offlineNote = "Voice typing stays on-device: audio is processed locally. " +
                 "Model downloads use Internet solely when requested by you.",
-            setupVisible = lastState == ImeSessionModel.ImeState.BLOCKED,
+            setupVisible = lastState == ImeSessionModel.ImeState.BLOCKED && needsSetup,
             modelSnapshot = modelSnapshot,
         )
     }

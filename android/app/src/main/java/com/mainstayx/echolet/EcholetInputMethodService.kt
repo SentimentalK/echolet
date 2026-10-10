@@ -107,7 +107,7 @@ class EcholetInputMethodService : InputMethodService() {
         (checkSelfPermission(Manifest.permission.RECORD_AUDIO)
             != PackageManager.PERMISSION_GRANTED) -> "Mic permission missing"
         !nativeLibrariesLoadable() -> "Native libraries failed to load"
-        !modelStaged() -> "Selected model not installed (setup in Echolet app)"
+        !modelStaged() -> "Selected model not installed (download in keyboard)"
         else -> null
     }
 
