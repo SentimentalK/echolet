@@ -13,7 +13,7 @@ class AppStatusViewController: UIViewController {
     static let appGroupId = "group.com.mainstayx.echolet.dev"
 
     // MARK: - Process State
-    private let currentEpoch: String = UUID().uuidString
+    private var currentEpoch: String { AppDelegate.sharedEpoch }
     private var sharedDefaults: UserDefaults?
     private var lastObservedRequestId: String?
     private var responseRevision: UInt64 = 0

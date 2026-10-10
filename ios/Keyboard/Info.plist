@@ -33,7 +33,12 @@
             <key>PrimaryLanguage</key>
             <string>en-US</string>
             <key>RequestsOpenAccess</key>
-            <false/>
+            <!-- Apple Requirement: RequestsOpenAccess must be true for the custom keyboard
+                 to write to App Group UserDefaults (group.com.mainstayx.echolet.dev).
+                 Without full access, the shared container is strictly read-only to the keyboard extension.
+                 Privacy Disclosure: Echolet runs completely offline and local-only; Full Access is required
+                 technically for IPC communication with the containing Echolet app, not for network transmission. -->
+            <true/>
         </dict>
     </dict>
 </dict>

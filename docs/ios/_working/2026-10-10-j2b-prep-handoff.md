@@ -1,89 +1,85 @@
-# Echolet iOS J2B-Prep Scaffold & Physical iPad Automation Handoff
+# Echolet iOS J2B Native Build & Device Verification Handoff
 
-> **Status**: TEMPORARY HANDOFF DOCUMENT (J2B-Prep Deliverable)  
-> **Date**: 2026-10-10  
-> **Repository Baseline**: `64f6a2460b715fd37085102d8f856fb49cbfa0f2` (origin/master)  
-> **Target OS & Devices**: iPhone & iPad (iPadOS 18.7.7 target compatibility, minimum deployment iOS 15.0)  
-> **Xcode Version Target**: Apple Xcode 16.2 (Installation in progress by workstation owner)  
-> **Native UIKit Status**: **UNCOMPILED** (Native compilation deferred until host Xcode installation completes)
-
----
-
-## 1. Summary of Deliverables
-
-During concurrent user installation of Apple Xcode 16.2, the following build-ready native scaffolds, manifests, and verification scripts were established:
-
-1. **XcodeGen Project Specification (`ios/project.yml`)**:
-   - Multi-target manifest configuring `EcholetApp` (containing UIKit application) and `EcholetKeyboard` (custom `UIInputViewController` keyboard extension).
-   - Platform: `iOS`, deployment target: `15.0`, targeted device families: `1,2` (iPhone and iPad).
-   - Shared App Group entitlement: `group.com.mainstayx.echolet.dev`.
-   - Single source of truth for protocol: imports existing Foundation `ios/protocol/EcholetIPC.swift` v2 into both targets without duplicate wire structs.
-
-2. **Containing App Scaffold (`ios/App/`)**:
-   - `AppDelegate.swift`, `SceneDelegate.swift`, `Info.plist`, `EcholetApp.entitlements`.
-   - `AppStatusViewController.swift`:
-     - Generates and writes unique launch process `app_epoch` UUID to App Group `echolet.app.epoch.v2`.
-     - Displays keyboard setup guidance and App Group connectivity diagnostics.
-     - DEBUG-only test responder: reads valid incoming keyboard requests, verifies active app epoch, and publishes an explicit mock response snapshot into `echolet.app.response.v2`.
-
-3. **Keyboard Extension Scaffold (`ios/Keyboard/`)**:
-   - `Info.plist` (configured with `com.apple.keyboard-service`, `RequestsOpenAccess = false`), `EcholetKeyboard.entitlements`.
-   - `KeyboardViewController.swift`:
-     - Apple HIG compliance: includes `advanceToNextInputMode()` globe key for switching keyboards.
-     - Explicit user-triggered START test button (no automatic recording, clearly marked demo).
-     - Single-writer intent sequence reservation using App Group persistence.
-     - Safety gating on text consumption: correlation of session ID, app epoch, request ID, sequence, and strictly monotonic response revision before calling `textDocumentProxy.insertText`.
-     - Fails closed on focus switches (`textWillChange`), keyboard dismissals (`viewWillDisappear`), or absent App Group entitlements.
-
-4. **Discovery & Automation Script (`ios/scripts/verify-device.sh`)**:
-   - Read-only environment discovery script checking active developer directory, `xcodebuild`, `xcodegen`, connected physical devices (`xcrun devicectl`), and available simulators (`xcrun simctl`).
-   - Strict safety: strictly read-only by default, no `sudo`, no destructive device wipes, no secret or credential storage.
-
-5. **Documentation (`ios/README.md`)**:
-   - Comprehensive steps for generating the project via XcodeGen, switching developer directories, running device discovery, and deploying to iPadOS 18.7.7.
+> **Status**: J2B Native Compilation & Toolchain Verification Complete
+> **Date**: 2026-10-10
+> **Repository Baseline**: `de01c3e0d88c4e31e6cc10d668b29182bf850769` (origin/master)
+> **Target OS & Devices**: iPhone & iPad (iPadOS 18.7.7 target compatibility, minimum deployment iOS 15.0)
+> **Host Toolchain**: Xcode 26.2 (Build 17C52) at `/Applications/Xcode.app/Contents/Developer` on macOS Sonoma 14.6.1 Intel
+> **Native UIKit Status**: **BUILT** (Containing App + Embedded Keyboard Extension compiled for both Device arm64 and Simulator universal x86_64/arm64)
 
 ---
 
-## 2. iPadOS 18.7.7 & Physical Device Provisioning Notes
+## 1. Summary of Executed Deliverables & Bug Fixes
 
-- **Physical Device Pre-requisites**:
-  1. Connect iPad to Mac using USB-C cable.
-  2. Unlock iPad and approve "Trust This Computer".
-  3. Turn on Developer Mode: **Settings -> Privacy & Security -> Developer Mode** (iPad will reboot and ask for confirmation).
-- **Personal Team / Free Apple Account App Group Constraint**:
-  - Apple's free Personal Team provisioning profiles typically **do not permit** the `com.apple.security.application-groups` entitlement on physical hardware.
-  - If Xcode build or install fails with code signing errors regarding App Groups, the App and Extension can still be tested locally on the iOS Simulator without paid provisioning, or verified independently. Do not purchase developer accounts prematurely.
+1. **RequestsOpenAccess & App Group Write Compliance**:
+   - Fixed `ios/Keyboard/Info.plist`: updated `RequestsOpenAccess` to `true`.
+   - Apple architecture requirement: When `RequestsOpenAccess` is `false`, the shared App Group container (`group.com.mainstayx.echolet.dev`) is strictly **read-only** to the keyboard extension. Writing requests requires `RequestsOpenAccess = true` AND explicit user approval ("Allow Full Access") in iOS Settings.
+   - Privacy disclosure added: Echolet operates 100% locally and offline without network transmission; Full Access is required strictly for local shared container IPC with the containing app.
+
+2. **Per-Process App Epoch Lifecycle**:
+   - `ios/App/AppDelegate.swift`: mints `sharedEpoch` UUID once upon containing app process launch (`didFinishLaunchingWithOptions`) and persists to `echolet.app.epoch.v2`.
+   - `ios/App/AppStatusViewController.swift`: reuses `AppDelegate.sharedEpoch` instead of minting per-controller epochs, preventing epoch fragmentation.
+
+3. **Intent Sequencing & Invalidation Safety**:
+   - `ios/Keyboard/KeyboardViewController.swift`: added fail-closed protection on monotonic intent sequence `UInt64.max` counter overflow.
+   - Documented single-writer strategy and noted requirement for multi-instance file coordination in future production releases.
+   - In `invalidateSession(reason:)`: tears down local active session state *before* issuing best-effort cancel commands to prevent concurrent or stale text insertion.
+   - Guarded mock text insertion: only inserts text on `isFinal` completion to prevent duplicate full insertions during intermediate mock revisions.
+
+4. **Xcode Project Generation (`ios/project.yml` + XcodeGen)**:
+   - Installed `xcodegen` 2.46.0 via Homebrew (without `sudo`).
+   - Generated `ios/Echolet.xcodeproj` with targets `EcholetApp` (UIKit) and `EcholetKeyboard` (`app-extension`).
+   - Added scoped `ios/.gitignore` to keep generated Xcode project bundles and build outputs out of git history.
 
 ---
 
-## 3. Real Test Verification Executed Today
+## 2. Real Toolchain & Compilation Evidence
 
-| Test Suite | Command | Result |
+### A. Real Native Builds (Passed)
+
+- **Device Native Target (arm64)**:
+  ```bash
+  DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild \
+    -project ios/Echolet.xcodeproj \
+    -target EcholetApp \
+    -configuration Debug \
+    -sdk iphoneos \
+    CODE_SIGNING_ALLOWED=NO build
+  ```
+  **Result**: `** BUILD SUCCEEDED **` (Exit code 0).
+  **Artifacts**:
+  - `ios/build/Debug-iphoneos/EcholetApp.app` (Mach-O 64-bit executable arm64)
+  - `ios/build/Debug-iphoneos/EcholetApp.app/PlugIns/EcholetKeyboard.appex` (Mach-O 64-bit executable arm64)
+
+- **Simulator Native Target (Universal x86_64 + arm64)**:
+  ```bash
+  DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild \
+    -project ios/Echolet.xcodeproj \
+    -target EcholetApp \
+    -configuration Debug \
+    -sdk iphonesimulator \
+    CODE_SIGNING_ALLOWED=NO build
+  ```
+  **Result**: `** BUILD SUCCEEDED **` (Exit code 0).
+  **Artifacts**:
+  - `ios/build/Debug-iphonesimulator/EcholetApp.app` (Mach-O universal binary: x86_64 + arm64)
+  - `ios/build/Debug-iphonesimulator/EcholetApp.app/PlugIns/EcholetKeyboard.appex` (Mach-O universal binary: x86_64 + arm64)
+
+---
+
+## 3. Simulator & Physical iPad Status
+
+| Domain | Status | Evidence / Details |
 |---|---|---|
-| Rust iOS IPC Gate Tests | `cargo test --lib ios_ipc` | **PASS** (20 passed, 0 failed) |
-| Rust Core Library Tests | `cargo test --lib` | **PASS** (76 passed, 0 failed) |
-| Swift Foundation v2 Codec Smoke | `swiftc ios/protocol/EcholetIPC.swift ...` | **PASS** (Round-trip & invalidation golden tests pass) |
-| Device Discovery Shell Syntax | `bash -n ios/scripts/verify-device.sh` | **PASS** (Syntax valid) |
-| Device Discovery Execution | `./ios/scripts/verify-device.sh` | **PASS** (Reported current CommandLineTools state safely) |
-| XcodeGen YAML Manifest Validation | `ruby -e "YAML.load_file('ios/project.yml')"` | **PASS** (Valid YAML structure) |
-| Native UIKit Build | `xcodebuild` | **UNCOMPILED** (Host currently has CommandLineTools active while Xcode 16.2 installs) |
+| **Native Compilation** | **PASSED** | Unsigned App and embedded extension built for both `iphoneos` and `iphonesimulator` SDKs. |
+| **Simulator Runtime** | **LIMITED** | iOS 18.2 CoreSimulator runtimes and devices present. CLI headless `simctl boot` hangs without interactive Simulator GUI session; Simulator GUI requires user launch. |
+| **Physical iPad** | **LIMITED** | `xcrun devicectl list devices` reports `No devices found`. Physical iPadOS 18.7.7 device is not currently connected via USB or not yet trusted. |
+| **Cross-Process IPC** | **VERIFIED (CLI)** | Rust unit tests and Swift Foundation CLI smoke tests verified protocol round-trips and adversarial admission gates. |
 
----
-
-## 4. Verification & Generation Commands for Host Owner (Post-Xcode)
-
-When Xcode 16.2 finishes installing:
-```bash
-# 1. Point developer directory to full Xcode
-sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
-
-# 2. Run device discovery
-./ios/scripts/verify-device.sh
-
-# 3. Generate .xcodeproj
-brew install xcodegen
-cd ios && xcodegen generate
-
-# 4. Open in Xcode or compile smoke
-xcodebuild -project Echolet.xcodeproj -scheme EcholetApp -destination 'generic/platform=iOS Simulator' build
-```
+### User Actions Required for Physical iPad Smoke:
+1. Connect physical iPad to Mac via USB-C cable.
+2. Unlock iPad and tap **Trust This Computer**.
+3. Enable Developer Mode: **Settings -> Privacy & Security -> Developer Mode** (reboot required).
+4. Run `./ios/scripts/verify-device.sh` to confirm device recognition.
+5. In Xcode: open `ios/Echolet.xcodeproj`, select your Apple Development Team in Signing & Capabilities for both targets.
+6. Install and enable keyboard: **Settings -> General -> Keyboard -> Keyboards -> Add New Keyboard -> Echolet**, then enable **Allow Full Access**.

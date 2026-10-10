@@ -190,7 +190,10 @@ class KeyboardViewController: UIInputViewController {
 
         let newSessionId = UUID().uuidString
         let newRequestId = UUID().uuidString
-        let nextIntentSeq = reserveNextIntentSequence(in: defaults)
+        guard let nextIntentSeq = reserveNextIntentSequence(in: defaults) else {
+            statusLabel.text = "Error: Intent sequence counter overflowed. Fail closed."
+            return
+        }
 
         do {
             let request = try EcholetIPC.KeyboardRequest(
@@ -242,9 +245,16 @@ class KeyboardViewController: UIInputViewController {
     }
 
     // MARK: - Monotonic Intent Counter Allocation
-    private func reserveNextIntentSequence(in defaults: UserDefaults) -> UInt64 {
-        // App Group single-writer sequence strategy for keyboard
+    private func reserveNextIntentSequence(in defaults: UserDefaults) -> UInt64? {
+        // App Group single-writer sequence strategy for keyboard.
+        // NOTE: Standard UserDefaults does not provide atomic compare-and-swap across separate
+        // processes or extension instances. Future production builds should use POSIX flock,
+        // file coordination, or an IPC coordinator daemon for strict cross-instance serialization.
         let current = defaults.object(forKey: Self.intentSequenceStorageKey) as? UInt64 ?? 0
+        guard current < UInt64.max else {
+            // Fail-closed on monotonic counter overflow
+            return nil
+        }
         let next = current + 1
         defaults.set(next, forKey: Self.intentSequenceStorageKey)
         defaults.synchronize()
@@ -300,20 +310,22 @@ class KeyboardViewController: UIInputViewController {
             }
 
             // 5. Text insertion into visible editor target
-            if let textToInsert = response.recognizedText, !textToInsert.isEmpty {
-                textDocumentProxy.insertText(textToInsert)
-                statusLabel.text = "Inserted text (rev \(response.revision)): \(textToInsert.prefix(20))..."
-            } else {
-                statusLabel.text = "Response received with empty text (state: \(response.state.rawValue))"
-            }
-
-            // Advance accepted revision watermark
-            self.activeSession?.lastAcceptedRevision = response.revision
-
-            // If final, session completes
+            // NOTE: In this debug mock harness, recognizedText represents the complete final transcript.
+            // Production streaming will introduce partial delta diffing. To prevent repeated text insertion
+            // across multiple revisions, we only insert text when final, or record delta in future iterations.
             if response.isFinal {
+                if let textToInsert = response.recognizedText, !textToInsert.isEmpty {
+                    textDocumentProxy.insertText(textToInsert)
+                    statusLabel.text = "Inserted final text (rev \(response.revision)): \(textToInsert.prefix(20))..."
+                } else {
+                    statusLabel.text = "Response received with empty text (state: \(response.state.rawValue))"
+                }
                 self.activeSession = nil
                 updateStatusDisplay()
+            } else {
+                // Non-final intermediate revision: record watermark without duplicate full insertion
+                self.activeSession?.lastAcceptedRevision = response.revision
+                statusLabel.text = "Received intermediate rev \(response.revision) (waiting for final)"
             }
 
         } catch {
@@ -322,27 +334,46 @@ class KeyboardViewController: UIInputViewController {
     }
 
     private func invalidateSession(reason: String) {
-        if let active = activeSession, let defaults = sharedDefaults {
-            // Write a cancel command into App Group
-            let cancelRequestId = UUID().uuidString
-            let nextIntentSeq = reserveNextIntentSequence(in: defaults)
-            if let cancelReq = try? EcholetIPC.KeyboardRequest(
-                appEpoch: active.epoch,
-                intentSequence: nextIntentSeq,
-                sessionId: active.sessionId,
-                sequence: active.sequence + 1,
-                requestId: cancelRequestId,
-                command: .cancel,
-                clientTimestampMs: UInt64(Date().timeIntervalSince1970 * 1000)
-            ) {
-                if let data = try? EcholetIPC.makeEncoder().encode(cancelReq) {
-                    defaults.set(data, forKey: EcholetIPC.keyboardRequestKey)
-                    defaults.synchronize()
-                }
-            }
+        guard let active = activeSession else {
+            statusLabel.text = "Session invalidated: \(reason)"
+            updateStatusDisplay()
+            return
         }
+
+        // Close local active session FIRST to prevent any concurrent text insertion
         self.activeSession = nil
         statusLabel.text = "Session invalidated: \(reason)"
         updateStatusDisplay()
+
+        // Best-effort cancel notification write into App Group
+        guard let defaults = sharedDefaults,
+              let nextIntentSeq = reserveNextIntentSequence(in: defaults) else {
+            return
+        }
+
+        let cancelRequestId = UUID().uuidString
+        if let cancelReq = try? EcholetIPC.KeyboardRequest(
+            appEpoch: active.epoch,
+            intentSequence: nextIntentSeq,
+            sessionId: active.sessionId,
+            sequence: active.sequence + 1,
+            requestId: cancelRequestId,
+            command: .cancel,
+            clientTimestampMs: UInt64(Date().timeIntervalSince1970 * 1000)
+        ) {
+            if let data = try? EcholetIPC.makeEncoder().encode(cancelReq) {
+                defaults.set(data, forKey: EcholetIPC.keyboardRequestKey)
+                defaults.synchronize()
+
+                let notificationName = CFNotificationName(EcholetIPC.darwinNotificationRequest as CFString)
+                CFNotificationCenterPostNotification(
+                    CFNotificationCenterGetDarwinNotifyCenter(),
+                    notificationName,
+                    nil,
+                    nil,
+                    true
+                )
+            }
+        }
     }
 }
