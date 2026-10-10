@@ -6,7 +6,7 @@
 //! `Java_com_mainstayx_echolet_NativeBridge_nativeOpen` etc.
 
 use jni::objects::{JClass, JFloatArray, JString};
-use jni::sys::{jfloat, jint, jlong};
+use jni::sys::{jboolean, jfloat, jint, jlong, JNI_FALSE, JNI_TRUE};
 use jni::JNIEnv;
 
 use crate::runtime::{AndroidRuntime, BridgeError};
@@ -147,8 +147,17 @@ where
     match outcome {
         Ok(Ok(value)) => value,
         Ok(Err(err)) => {
+            let class = if err.contains("invalid")
+                || err.contains("Unknown")
+                || err.contains("expected PascalCase")
+                || err.contains("must use HTTPS")
+            {
+                "java/lang/IllegalArgumentException"
+            } else {
+                "java/lang/IllegalStateException"
+            };
             env.throw_new(
-                "java/lang/IllegalStateException",
+                class,
                 format!("{} failed: {}", operation, err),
             )
             .ok();
@@ -225,8 +234,8 @@ pub extern "system" fn Java_com_mainstayx_echolet_NativeBridge_nativeSelectModel
     mut env: JNIEnv<'local>,
     _class: JClass<'local>,
     model_id: JString<'local>,
-) {
-    with_locked_model_owner(&mut env, "nativeSelectModel", (), |owner, env| {
+) -> jboolean {
+    with_locked_model_owner(&mut env, "nativeSelectModel", JNI_FALSE, |owner, env| {
         let id_str = env
             .get_string(&model_id)
             .map(|s| s.to_string_lossy().into_owned())
@@ -240,7 +249,8 @@ pub extern "system" fn Java_com_mainstayx_echolet_NativeBridge_nativeSelectModel
             runtime_guard.session_active()
         };
 
-        owner.select_model(&id_str, is_session_active)
+        owner.select_model(&id_str, is_session_active)?;
+        Ok(JNI_TRUE)
     })
 }
 
@@ -250,19 +260,85 @@ pub extern "system" fn Java_com_mainstayx_echolet_NativeBridge_nativeInstallMode
     _class: JClass<'local>,
     model_id: JString<'local>,
     archive_path: JString<'local>,
-) {
-    with_locked_model_owner(&mut env, "nativeInstallModelFromArchive", (), |owner, env| {
+) -> jboolean {
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let id_str = match env.get_string(&model_id) {
+            Ok(s) => s.to_string_lossy().into_owned(),
+            Err(e) => {
+                env.throw_new(
+                    "java/lang/IllegalArgumentException",
+                    format!("invalid modelId argument: {}", e),
+                )
+                .ok();
+                return JNI_FALSE;
+            }
+        };
+        let path_str = match env.get_string(&archive_path) {
+            Ok(s) => s.to_string_lossy().into_owned(),
+            Err(e) => {
+                env.throw_new(
+                    "java/lang/IllegalArgumentException",
+                    format!("invalid archivePath argument: {}", e),
+                )
+                .ok();
+                return JNI_FALSE;
+            }
+        };
+
+        match crate::model_owner::perform_install_from_archive(
+            &id_str,
+            std::path::Path::new(&path_str),
+        ) {
+            Ok(()) => JNI_TRUE,
+            Err(err) => {
+                let class = if err.contains("invalid") || err.contains("Unknown") {
+                    "java/lang/IllegalArgumentException"
+                } else {
+                    "java/lang/IllegalStateException"
+                };
+                env.throw_new(class, format!("nativeInstallModelFromArchive failed: {}", err))
+                    .ok();
+                JNI_FALSE
+            }
+        }
+    }));
+    match outcome {
+        Ok(val) => val,
+        Err(_) => {
+            env.throw_new(
+                "java/lang/IllegalStateException",
+                "nativeInstallModelFromArchive abandoned: native code panicked",
+            )
+            .ok();
+            JNI_FALSE
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_mainstayx_echolet_NativeBridge_nativeGetModelDownloadSpec<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    model_id: JString<'local>,
+) -> JString<'local> {
+    let result = with_locked_model_owner(&mut env, "nativeGetModelDownloadSpec", None, |owner, env| {
         let id_str = env
             .get_string(&model_id)
             .map(|s| s.to_string_lossy().into_owned())
             .map_err(|e| format!("invalid modelId: {}", e))?;
-        let path_str = env
-            .get_string(&archive_path)
-            .map(|s| s.to_string_lossy().into_owned())
-            .map_err(|e| format!("invalid archivePath: {}", e))?;
 
-        owner.install_from_archive(&id_str, std::path::Path::new(&path_str))
-    })
+        let spec = owner.get_download_spec(&id_str)?;
+        let json = serde_json::to_string(&spec)
+            .map_err(|e| format!("Failed to serialize download spec: {}", e))?;
+
+        env.new_string(json)
+            .map(Some)
+            .map_err(|e| format!("Failed to create download spec JString: {}", e))
+    });
+    match result {
+        Some(s) => s,
+        None => unsafe { JString::from_raw(std::ptr::null_mut()) },
+    }
 }
 
 #[no_mangle]
@@ -290,19 +366,15 @@ pub extern "system" fn Java_com_mainstayx_echolet_NativeBridge_nativeSetDownload
             None
         };
 
-        let status = match phase_str.as_str() {
-            "Starting" => echolet::models::progress::DownloadStatus::Starting,
-            "Downloading" => echolet::models::progress::DownloadStatus::Downloading {
-                downloaded_bytes: downloaded_bytes as u64,
-                total_bytes: total_opt,
+        let status = crate::model_owner::parse_download_status(
+            &phase_str,
+            if downloaded_bytes > 0 {
+                downloaded_bytes as u64
+            } else {
+                0
             },
-            "Verifying" => echolet::models::progress::DownloadStatus::Verifying,
-            "Extracting" => echolet::models::progress::DownloadStatus::Extracting,
-            "Installing" => echolet::models::progress::DownloadStatus::Installing,
-            "Completed" => echolet::models::progress::DownloadStatus::Completed,
-            "Failed" => echolet::models::progress::DownloadStatus::Failed,
-            _ => echolet::models::progress::DownloadStatus::NotDownloading,
-        };
+            total_opt,
+        )?;
 
         owner.set_download_progress(&id_str, status);
         Ok(())

@@ -153,6 +153,7 @@ class ImeSessionControllerMediationTest {
 
     private class FakeNativeApi : NativeApi {
         val openedHandles = mutableListOf<Long>()
+        val openedModelDirs = mutableListOf<String>()
         val closedHandles = mutableListOf<Long>()
         /** EVERY close attempt, even for unowned/duplicate handles. */
         val closeAttempts = mutableListOf<Long>()
@@ -182,6 +183,7 @@ class ImeSessionControllerMediationTest {
             synchronized(lock) {
                 val handle = ++counter
                 openedHandles.add(handle)
+                openedModelDirs.add(modelDir)
                 events.add("open:$handle")
                 byHandle[handle] = ArrayDeque(pendingFeeds.removeFirstOrNull() ?: emptyList())
                 return handle
@@ -1487,5 +1489,148 @@ class ImeSessionControllerMediationTest {
         assertFalse(native.closedHandles.contains(handleA)) // NOT claimed released
         assertTrue(harness.mic.allReleasedExactlyOnce())
         assertEquals(listOf("open:$handleA", "close:$handleA"), native.events)
+    }
+
+    /**
+     * When selected model is unavailable, the session fails closed immediately
+     * with status text reporting the error; native.open is NEVER called and no
+     * legacy model is silently used.
+     */
+    @Test
+    fun unavailable_selected_model_fails_closed_and_never_opens_native_or_legacy() {
+        editors.clear()
+        val native = FakeNativeApi()
+        val mic = FakeMic()
+        val model = ImeSessionModel()
+        val lane = SequencedLane()
+        val main = InlineMainRunner()
+        var reportedStatus: String? = null
+
+        val controller = ImeSessionController(
+            dirProvider = { throw IllegalStateException("Selected model directory is unavailable or not installed") },
+            model = model,
+            onState = { _, status ->
+                reportedStatus = status
+            },
+            main = main,
+            native = native,
+            mic = mic,
+            liveEditorProvider = { activeEditorToken },
+            editorAdapterFactory = { token ->
+                editors.getOrPut(token) { FakeEditor(token.toString()) }
+            },
+            lane = lane,
+        )
+        val harness = Harness(model, native, mic, main, lane, controller, null, lane)
+
+        val token = EditorToken("A")
+        startVisibility(harness, token)
+        drainLane(harness)
+
+        assertEquals(0, native.openedHandles.size)
+        assertEquals(0, mic.startCount())
+        assertEquals(ImeSessionModel.ImeState.BLOCKED, model.currentState)
+        assertTrue(reportedStatus!!.contains("Selected model unavailable"))
+    }
+
+    /**
+     * isSessionActive reports true during PREPARING and LISTENING, and false when IDLE or BLOCKED.
+     */
+    @Test
+    fun is_session_active_reports_preparing_and_listening_accurately() {
+        val harness = sequencedHarness()
+        val token = EditorToken("A")
+        val native = harness.native
+        native.planOpen(emptyList())
+
+        assertFalse(harness.controller.isSessionActive())
+
+        // Park open to inspect PREPARING
+        val openGate = CountDownLatch(1)
+        native.openGate = openGate
+        val laneThread = drainLaneInThread(harness)
+
+        startVisibility(harness, token)
+        assertTrue(native.openEntered.await(2, TimeUnit.SECONDS))
+        assertEquals(ImeSessionModel.ImeState.PREPARING, harness.model.currentState)
+        assertTrue(harness.controller.isSessionActive())
+
+        // Complete open -> LISTENING
+        openGate.countDown()
+        awaitCondition("reaches LISTENING") { harness.model.currentState == ImeSessionModel.ImeState.LISTENING }
+        assertTrue(harness.controller.isSessionActive())
+
+        // Stop -> PAUSED
+        harness.controller.stop("test stop")
+        endLane(harness)
+        assertTrue(laneDied(laneThread))
+        drainLane(harness)
+        assertEquals(ImeSessionModel.ImeState.PAUSED, harness.model.currentState)
+        assertFalse(harness.controller.isSessionActive())
+    }
+
+    /**
+     * When model is switched, the new requested model path is authoritatively passed
+     * to native.open across stop and start, never reverting silently to old X-ASR.
+     */
+    @Test
+    fun requested_model_retained_across_stop_then_new_start() {
+        editors.clear()
+        val native = FakeNativeApi()
+        val mic = FakeMic()
+        val model = ImeSessionModel()
+        val lane = SequencedLane()
+        val main = InlineMainRunner()
+        var currentDir = "/models/model-a"
+
+        val controller = ImeSessionController(
+            dirProvider = { currentDir },
+            model = model,
+            onState = { _, _ -> },
+            main = main,
+            native = native,
+            mic = mic,
+            liveEditorProvider = { activeEditorToken },
+            editorAdapterFactory = { token ->
+                editors.getOrPut(token) { FakeEditor(token.toString()) }
+            },
+            lane = lane,
+        )
+        val harness = Harness(model, native, mic, main, lane, controller, null, lane)
+
+        val tokenA = EditorToken("A")
+        native.planOpen(emptyList())
+        val park1 = mic.planReadsThenPark(1)
+        val laneThread1 = drainLaneInThread(harness)
+
+        // Session 1 with model A
+        startVisibility(harness, tokenA)
+        awaitCondition("reader parked in session 1") { mic.parkedInRead }
+        assertEquals(1, native.openedHandles.size)
+        assertEquals(listOf("/models/model-a"), native.openedModelDirs)
+
+        controller.stop("switch model")
+        park1.countDown()
+        endLane(harness)
+        assertTrue(laneDied(laneThread1))
+        drainLane(harness)
+
+        // Switch model to model B
+        currentDir = "/models/model-b"
+        native.planOpen(emptyList())
+        val park2 = mic.planReadsThenPark(1)
+        val laneThread2 = drainLaneInThread(harness)
+
+        // Session 2 with model B
+        controller.onControlTap(ready = true, blockedReason = null, ic = tokenA)
+        awaitCondition("reader parked in session 2") { mic.parkedInRead }
+        assertEquals(2, native.openedHandles.size)
+        assertEquals(listOf("/models/model-a", "/models/model-b"), native.openedModelDirs)
+
+        controller.stop("teardown")
+        park2.countDown()
+        endLane(harness)
+        assertTrue(laneDied(laneThread2))
+        drainLane(harness)
     }
 }

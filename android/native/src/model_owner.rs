@@ -31,6 +31,43 @@ pub fn shared_model_owner() -> &'static Mutex<AndroidModelOwner> {
     MODEL_OWNER.get_or_init(|| Mutex::new(AndroidModelOwner::empty()))
 }
 
+/// Typed download specification returned to Kotlin download transport.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ModelDownloadSpec {
+    pub model_id: String,
+    pub url: String,
+    pub sha256: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub download_size_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub installed_size_bytes: Option<u64>,
+}
+
+/// Parses PascalCase download phase wire string from Android/Kotlin into typed [`DownloadStatus`].
+/// Rejects unknown phase strings strictly instead of resetting silently to NotDownloading.
+pub fn parse_download_status(
+    phase: &str,
+    downloaded_bytes: u64,
+    total_bytes: Option<u64>,
+) -> Result<DownloadStatus, String> {
+    match phase {
+        "Starting" => Ok(DownloadStatus::Starting),
+        "Downloading" => Ok(DownloadStatus::Downloading {
+            downloaded_bytes,
+            total_bytes,
+        }),
+        "Verifying" => Ok(DownloadStatus::Verifying),
+        "Extracting" => Ok(DownloadStatus::Extracting),
+        "Installing" => Ok(DownloadStatus::Installing),
+        "Completed" => Ok(DownloadStatus::Completed),
+        "Failed" => Ok(DownloadStatus::Failed),
+        unknown => Err(format!(
+            "Unknown download phase '{}'; expected PascalCase Starting, Downloading, Verifying, Extracting, Installing, Completed, Failed",
+            unknown
+        )),
+    }
+}
+
 /// Platform-neutral model owner for Android.
 pub struct AndroidModelOwner {
     models_dir: Option<PathBuf>,
@@ -38,6 +75,7 @@ pub struct AndroidModelOwner {
     registry: ModelRegistry,
     selected_model_id: Option<String>,
     progress: HashMap<String, DownloadStatus>,
+    in_flight_installs: HashSet<String>,
 }
 
 impl AndroidModelOwner {
@@ -49,6 +87,7 @@ impl AndroidModelOwner {
             selected_model_id: Some(registry.default_model_id.clone()),
             registry,
             progress: HashMap::new(),
+            in_flight_installs: HashSet::new(),
         }
     }
 
@@ -164,41 +203,108 @@ impl AndroidModelOwner {
         Ok(())
     }
 
-    /// Installs a model from an already-staged archive file.
-    ///
-    /// Verifies SHA256 against catalog, unpacks safely without path traversal,
-    /// validates manifest/model files, and commits atomically.
-    ///
-    /// IMPORTANT: Complete install does NOT auto-select.
-    pub fn install_from_archive(
-        &mut self,
-        model_id: &str,
-        archive_path: &Path,
-    ) -> Result<(), String> {
+    /// Gets canonical download specification for a catalog model.
+    pub fn get_download_spec(&self, model_id: &str) -> Result<ModelDownloadSpec, String> {
         let entry = self
             .registry
             .get_model(model_id)
             .ok_or_else(|| format!("Unknown model ID: {}", model_id))?;
 
+        if entry.source.bundled {
+            return Err(format!("Model {} is bundled and cannot be downloaded", model_id));
+        }
+
+        let url = entry
+            .source
+            .url
+            .as_ref()
+            .ok_or_else(|| format!("Model {} has no download URL configured", model_id))?;
+
+        if !url.starts_with("https://") {
+            return Err(format!("Model {} download URL must use HTTPS: {}", model_id, url));
+        }
+
+        let sha256 = entry
+            .source
+            .sha256
+            .as_ref()
+            .ok_or_else(|| format!("Model {} has no sha256 checksum configured", model_id))?;
+
+        if sha256.trim().is_empty() {
+            return Err(format!("Model {} has empty sha256 checksum", model_id));
+        }
+
+        Ok(ModelDownloadSpec {
+            model_id: model_id.to_string(),
+            url: url.clone(),
+            sha256: sha256.clone(),
+            download_size_bytes: entry.download_size_bytes,
+            installed_size_bytes: entry.installed_size_bytes,
+        })
+    }
+
+    /// Reserves an in-flight install under short lock.
+    pub fn begin_install(
+        &mut self,
+        model_id: &str,
+    ) -> Result<(RegistryModelEntry, PathBuf), String> {
+        if self.in_flight_installs.contains(model_id) {
+            return Err(format!("Install already in flight for model {}", model_id));
+        }
+
+        let entry = self
+            .registry
+            .get_model(model_id)
+            .cloned()
+            .ok_or_else(|| format!("Unknown model ID: {}", model_id))?;
+
         let models_dir = self
             .models_dir
-            .as_ref()
+            .clone()
             .ok_or_else(|| "Models directory not initialized".to_string())?;
 
-        let target_dir = models_dir.join(model_id);
-
+        self.in_flight_installs.insert(model_id.to_string());
         self.progress
             .insert(model_id.to_string(), DownloadStatus::Installing);
 
-        match install_model_from_archive(entry, archive_path, &target_dir) {
+        Ok((entry, models_dir))
+    }
+
+    /// Finishes an in-flight install on success under short lock.
+    pub fn complete_install(&mut self, model_id: &str) {
+        self.in_flight_installs.remove(model_id);
+        self.progress
+            .insert(model_id.to_string(), DownloadStatus::Completed);
+    }
+
+    /// Finishes an in-flight install on failure under short lock.
+    pub fn fail_install(&mut self, model_id: &str) {
+        self.in_flight_installs.remove(model_id);
+        self.progress
+            .insert(model_id.to_string(), DownloadStatus::Failed);
+    }
+
+    pub fn is_install_in_flight(&self, model_id: &str) -> bool {
+        self.in_flight_installs.contains(model_id)
+    }
+
+    /// Installs a model from an already-staged archive file synchronously.
+    pub fn install_from_archive(
+        &mut self,
+        model_id: &str,
+        archive_path: &Path,
+    ) -> Result<(), String> {
+        let (entry, models_dir) = self.begin_install(model_id)?;
+        let target_dir = models_dir.join(model_id);
+
+        let res = install_model_from_archive(&entry, archive_path, &target_dir);
+        match res {
             Ok(_) => {
-                self.progress
-                    .insert(model_id.to_string(), DownloadStatus::Completed);
+                self.complete_install(model_id);
                 Ok(())
             }
             Err(e) => {
-                self.progress
-                    .insert(model_id.to_string(), DownloadStatus::Failed);
+                self.fail_install(model_id);
                 Err(e)
             }
         }
@@ -273,18 +379,29 @@ impl AndroidModelOwner {
         let selected_file = files_dir.join("selected_model.txt");
         if let Ok(content) = fs::read_to_string(&selected_file) {
             let candidate = content.trim();
-            if self.registry.get_model(candidate).is_some()
-                && self.resolve_model_dir(candidate).is_some()
-            {
+            if self.registry.get_model(candidate).is_some() {
                 self.selected_model_id = Some(candidate.to_string());
                 return;
             }
         }
 
-        // Fall back to default model if installed, otherwise keep default model id
-        if self.resolve_model_dir(&self.registry.default_model_id).is_some() {
-            self.selected_model_id = Some(self.registry.default_model_id.clone());
+        // Initial default: default model id
+        self.selected_model_id = Some(self.registry.default_model_id.clone());
+    }
+
+    pub fn list_recoverable_backups(&self) -> Vec<PathBuf> {
+        let mut backups = Vec::new();
+        if let Some(models_dir) = &self.models_dir {
+            if let Ok(entries) = fs::read_dir(models_dir) {
+                for entry in entries.flatten() {
+                    let name_str = entry.file_name().to_string_lossy().into_owned();
+                    if name_str.starts_with(".echolet-old-") && entry.path().is_dir() {
+                        backups.push(entry.path());
+                    }
+                }
+            }
         }
+        backups
     }
 
     fn clean_abandoned_staging(&self, models_dir: &Path) {
@@ -292,8 +409,9 @@ impl AndroidModelOwner {
             for entry in entries.flatten() {
                 let name = entry.file_name();
                 let name_str = name.to_string_lossy();
+                // Never delete .echolet-old-* backups: they represent manual recovery
+                // backups when a previous installation replacement failed.
                 if name_str.starts_with(".echolet-staging-")
-                    || name_str.starts_with(".echolet-old-")
                     || name_str.starts_with(".echolet-commit-")
                     || name_str.ends_with(".part")
                     || name_str.ends_with(".download")
@@ -306,6 +424,82 @@ impl AndroidModelOwner {
                     }
                 }
             }
+        }
+    }
+}
+
+/// RAII guard ensuring in-flight install cleanup even on panic or error.
+pub struct InFlightGuard<'a>(pub &'a str);
+
+impl<'a> Drop for InFlightGuard<'a> {
+    fn drop(&mut self) {
+        let mutex = shared_model_owner();
+        let mut guard = mutex.lock().unwrap_or_else(|p| p.into_inner());
+        guard.in_flight_installs.remove(self.0);
+    }
+}
+
+/// Installs a model from archive outside the global model owner lock.
+/// Short locks are acquired ONLY to reserve the install, update progress,
+/// and commit the final status. Concurrent calls to snapshot/control-surface
+/// are never blocked by SHA256 hashing or extraction.
+pub fn perform_install_from_archive(
+    model_id: &str,
+    archive_path: &Path,
+) -> Result<(), String> {
+    let (entry, models_dir) = {
+        let mutex = shared_model_owner();
+        let mut guard = mutex.lock().unwrap_or_else(|p| p.into_inner());
+        guard.begin_install(model_id)?
+    };
+
+    let _guard = InFlightGuard(model_id);
+    let target_dir = models_dir.join(model_id);
+
+    // Prevent overwriting assets while an active dictation session is using them
+    let session_active_with_model = {
+        let runtime_mutex = crate::runtime::shared_runtime();
+        let runtime_guard = runtime_mutex.lock().unwrap_or_else(|p| p.into_inner());
+        let active = runtime_guard.session_active();
+        drop(runtime_guard);
+
+        let owner_guard = shared_model_owner().lock().unwrap_or_else(|p| p.into_inner());
+        active && owner_guard.current_model_dir() == Some(target_dir.clone())
+    };
+    if session_active_with_model {
+        let mutex = shared_model_owner();
+        let mut guard = mutex.lock().unwrap_or_else(|p| p.into_inner());
+        guard.fail_install(model_id);
+        return Err(format!(
+            "Cannot replace model {} while dictation session is actively using it",
+            model_id
+        ));
+    }
+
+    let mut cb = |phase: echolet::models::progress::InstallPhase| {
+        let mutex = shared_model_owner();
+        let mut guard = mutex.lock().unwrap_or_else(|p| p.into_inner());
+        guard.set_download_progress(model_id, DownloadStatus::from_phase(&phase));
+    };
+    let progress_cb: Option<echolet::models::progress::ProgressCallback<'_>> = Some(&mut cb);
+
+    let result = echolet::models::installer::install_model_from_archive_with_progress(
+        &entry,
+        archive_path,
+        &target_dir,
+        progress_cb,
+    );
+
+    let mutex = shared_model_owner();
+    let mut guard = mutex.lock().unwrap_or_else(|p| p.into_inner());
+    match result {
+        Ok(_) => {
+            guard.complete_install(model_id);
+            Ok(())
+        }
+        Err(e) => {
+            guard.fail_install(model_id);
+            Err(e)
         }
     }
 }
@@ -475,7 +669,7 @@ mod tests {
     }
 
     #[test]
-    fn test_abandoned_staging_cleanup() {
+    fn test_abandoned_staging_cleanup_preserves_old_backups() {
         let (models_dir, files_dir) = temp_test_dirs("clean-staging");
         let registry = ModelRegistry::canonical().unwrap();
         let xasr_entry = registry.get_model(&registry.default_model_id).unwrap();
@@ -486,17 +680,181 @@ mod tests {
         fs::create_dir_all(&stage_dir).unwrap();
         let old_dir = models_dir.join(".echolet-old-12345");
         fs::create_dir_all(&old_dir).unwrap();
+        fs::write(old_dir.join("model.json"), b"{}").unwrap();
         let part_file = models_dir.join("partial.part");
         fs::write(&part_file, b"partial").unwrap();
 
-        let _owner = AndroidModelOwner::new(models_dir.clone(), files_dir);
+        let owner = AndroidModelOwner::new(models_dir.clone(), files_dir);
 
         assert!(!stage_dir.exists(), "Staging dir must be cleaned");
-        assert!(!old_dir.exists(), "Old backup dir must be cleaned");
+        assert!(old_dir.exists(), "Old backup dir must be PRESERVED for manual recovery");
+        assert!(old_dir.join("model.json").exists(), "Backup contents must survive");
         assert!(!part_file.exists(), "Partial file must be cleaned");
         assert!(
             models_dir.join(LEGACY_MODEL_DIR_NAME).exists(),
             "Committed model dir must not be touched"
         );
+        let backups = owner.list_recoverable_backups();
+        assert_eq!(backups.len(), 1);
+        assert_eq!(backups[0], old_dir);
+    }
+
+    #[test]
+    fn test_parse_download_status_wire_contract() {
+        // Valid PascalCase phases
+        assert_eq!(
+            parse_download_status("Starting", 0, None).unwrap(),
+            DownloadStatus::Starting
+        );
+        assert_eq!(
+            parse_download_status("Downloading", 0, Some(100)).unwrap(),
+            DownloadStatus::Downloading {
+                downloaded_bytes: 0,
+                total_bytes: Some(100),
+            }
+        );
+        assert_eq!(
+            parse_download_status("Downloading", 45, Some(100)).unwrap(),
+            DownloadStatus::Downloading {
+                downloaded_bytes: 45,
+                total_bytes: Some(100),
+            }
+        );
+        assert_eq!(
+            parse_download_status("Downloading", 100, Some(100)).unwrap(),
+            DownloadStatus::Downloading {
+                downloaded_bytes: 100,
+                total_bytes: Some(100),
+            }
+        );
+        assert_eq!(
+            parse_download_status("Verifying", 0, None).unwrap(),
+            DownloadStatus::Verifying
+        );
+        assert_eq!(
+            parse_download_status("Extracting", 0, None).unwrap(),
+            DownloadStatus::Extracting
+        );
+        assert_eq!(
+            parse_download_status("Installing", 0, None).unwrap(),
+            DownloadStatus::Installing
+        );
+        assert_eq!(
+            parse_download_status("Completed", 0, None).unwrap(),
+            DownloadStatus::Completed
+        );
+        assert_eq!(
+            parse_download_status("Failed", 0, None).unwrap(),
+            DownloadStatus::Failed
+        );
+
+        // Unknown / lowercase phases MUST fail closed
+        assert!(parse_download_status("starting", 0, None).is_err());
+        assert!(parse_download_status("downloading", 45, Some(100)).is_err());
+        assert!(parse_download_status("verifying", 0, None).is_err());
+        assert!(parse_download_status("extracting", 0, None).is_err());
+        assert!(parse_download_status("installing", 0, None).is_err());
+        assert!(parse_download_status("completed", 0, None).is_err());
+        assert!(parse_download_status("failed", 0, None).is_err());
+        assert!(parse_download_status("bogus", 0, None).is_err());
+
+        // Failed status must yield RetryDownload in UI control surface
+        let (models_dir, files_dir) = temp_test_dirs("retry-action");
+        let mut owner = AndroidModelOwner::new(models_dir, files_dir);
+        let kroko_id = "echolet-kroko-streaming-en-2025-08-06-r1";
+        owner.set_download_progress(kroko_id, DownloadStatus::Failed);
+
+        let surface = owner.build_surface_state(RuntimeState::Ready);
+        let kroko_model = surface
+            .all_models()
+            .find(|m| m.id == kroko_id)
+            .expect("Kroko model must be in surface");
+        assert_eq!(
+            kroko_model.primary_action,
+            ModelPrimaryAction::RetryDownload,
+            "Failed download must produce RetryDownload action"
+        );
+        assert!(kroko_model.enabled, "RetryDownload must be enabled while Ready");
+    }
+
+    #[test]
+    fn test_canonical_download_spec_lookup() {
+        let owner = AndroidModelOwner::empty();
+        let registry = owner.registry();
+
+        // All 4 shipped models have valid HTTPS download URLs and SHA256 checksums
+        for entry in &registry.models {
+            let spec = owner
+                .get_download_spec(&entry.id)
+                .unwrap_or_else(|e| panic!("Model {} must have valid download spec: {}", entry.id, e));
+            assert_eq!(spec.model_id, entry.id);
+            assert!(
+                spec.url.starts_with("https://"),
+                "URL for {} must be HTTPS: {}",
+                entry.id,
+                spec.url
+            );
+            assert_eq!(Some(&spec.url), entry.source.url.as_ref());
+            assert_eq!(Some(&spec.sha256), entry.source.sha256.as_ref());
+            assert!(!spec.sha256.is_empty());
+            assert_eq!(spec.download_size_bytes, entry.download_size_bytes);
+            assert_eq!(spec.installed_size_bytes, entry.installed_size_bytes);
+        }
+
+        // Unknown model ID is strictly rejected
+        let unknown = owner.get_download_spec("non-existent-model-id");
+        assert!(unknown.is_err());
+    }
+
+    #[test]
+    fn test_in_flight_install_reservation_and_duplicate_rejection() {
+        let (models_dir, files_dir) = temp_test_dirs("inflight-dup");
+        let mut owner = AndroidModelOwner::new(models_dir, files_dir);
+        let kroko_id = "echolet-kroko-streaming-en-2025-08-06-r1";
+
+        assert!(!owner.is_install_in_flight(kroko_id));
+        let begin1 = owner.begin_install(kroko_id);
+        assert!(begin1.is_ok(), "First install reservation must succeed");
+        assert!(owner.is_install_in_flight(kroko_id));
+
+        // Duplicate install for same model must be rejected
+        let begin2 = owner.begin_install(kroko_id);
+        assert!(begin2.is_err(), "Duplicate install must be rejected");
+
+        // Failure cleans reservation
+        owner.fail_install(kroko_id);
+        assert!(!owner.is_install_in_flight(kroko_id));
+        assert_eq!(owner.progress.get(kroko_id), Some(&DownloadStatus::Failed));
+
+        // Can reserve again after failure
+        let begin3 = owner.begin_install(kroko_id);
+        assert!(begin3.is_ok(), "Retry install reservation must succeed");
+        owner.complete_install(kroko_id);
+        assert!(!owner.is_install_in_flight(kroko_id));
+        assert_eq!(owner.progress.get(kroko_id), Some(&DownloadStatus::Completed));
+    }
+
+    #[test]
+    fn test_concurrent_snapshot_does_not_block_during_in_flight_install() {
+        let (models_dir, files_dir) = temp_test_dirs("concurrent-snap");
+        let mut owner = AndroidModelOwner::new(models_dir, files_dir);
+        let kroko_id = "echolet-kroko-streaming-en-2025-08-06-r1";
+
+        // Reserve install and set progress
+        owner.begin_install(kroko_id).unwrap();
+        owner.set_download_progress(kroko_id, DownloadStatus::Installing);
+
+        // Building snapshot completes immediately and reflects Installing status
+        let start = std::time::Instant::now();
+        let json = owner.build_snapshot_json(RuntimeState::Ready).unwrap();
+        let duration = start.elapsed();
+        assert!(
+            duration < std::time::Duration::from_millis(50),
+            "Snapshot build took {:?}, must complete within tight bound",
+            duration
+        );
+
+        assert!(json.contains("Installing"));
+        assert!(json.contains(kroko_id));
     }
 }

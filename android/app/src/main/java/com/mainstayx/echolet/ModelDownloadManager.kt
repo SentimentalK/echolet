@@ -13,12 +13,66 @@ import java.util.concurrent.Executor
 import java.util.concurrent.Executors
 
 /**
+ * Seam for native model operations, allowing JVM unit testing without loading .so libraries.
+ */
+interface NativeModelAdapter {
+    fun getDownloadSpec(modelId: String): String?
+    fun setDownloadProgress(modelId: String, downloadedBytes: Long, totalBytes: Long, phase: String)
+    fun installModelFromArchive(modelId: String, archivePath: String): Boolean
+}
+
+object DefaultNativeModelAdapter : NativeModelAdapter {
+    override fun getDownloadSpec(modelId: String): String? =
+        NativeBridge.nativeGetModelDownloadSpec(modelId)
+
+    override fun setDownloadProgress(
+        modelId: String,
+        downloadedBytes: Long,
+        totalBytes: Long,
+        phase: String,
+    ) = NativeBridge.nativeSetDownloadProgress(modelId, downloadedBytes, totalBytes, phase)
+
+    override fun installModelFromArchive(modelId: String, archivePath: String): Boolean =
+        NativeBridge.nativeInstallModelFromArchive(modelId, archivePath)
+}
+
+/**
+ * Canonical PascalCase download phases matching Rust [`echolet::models::progress::DownloadStatus`].
+ */
+enum class DownloadPhase(val wireName: String) {
+    STARTING("Starting"),
+    DOWNLOADING("Downloading"),
+    VERIFYING("Verifying"),
+    EXTRACTING("Extracting"),
+    INSTALLING("Installing"),
+    COMPLETED("Completed"),
+    FAILED("Failed");
+
+    companion object {
+        fun fromWireName(name: String): DownloadPhase? =
+            entries.firstOrNull { it.wireName == name }
+    }
+}
+
+/**
+ * Typed download specification sourced solely from the canonical Rust ModelRegistry.
+ */
+data class ModelDownloadSpec(
+    val modelId: String,
+    val url: String,
+    val sha256: String,
+    val downloadSizeBytes: Long?,
+    val installedSizeBytes: Long?,
+)
+
+/**
  * Android Model Download and Installation Manager (Phase 1-B).
  *
  * Responsibilities:
+ * - Obtains canonical model download URLs & metadata solely from Rust JNI [NativeBridge.nativeGetModelDownloadSpec].
  * - Downloads catalog models via standard HTTPS [HttpURLConnection] into temporary `.part` files.
- * - Enforces HTTPS, connect/read timeouts (30s), and streams download progress.
- * - Periodically updates JNI progress via [NativeBridge.nativeSetDownloadProgress].
+ * - Follows HTTPS redirects safely (rejects non-HTTPS redirect targets).
+ * - Periodically updates JNI progress via [NativeBridge.nativeSetDownloadProgress] using exact PascalCase phases.
  * - On download completion, delegates verification and atomic installation to the Rust core
  *   via [NativeBridge.nativeInstallModelFromArchive].
  * - Cleans up temporary staging files on completion or failure.
@@ -29,6 +83,7 @@ class ModelDownloadManager(
     private val executor: Executor = Executors.newSingleThreadExecutor { r ->
         Thread(r, "echolet-model-dl").apply { isDaemon = true }
     },
+    private val nativeAdapter: NativeModelAdapter = DefaultNativeModelAdapter,
     private val onProgressOrStatusChanged: () -> Unit = {},
 ) {
 
@@ -37,27 +92,33 @@ class ModelDownloadManager(
     fun isDownloading(modelId: String): Boolean = activeDownloads[modelId] == true
 
     /**
-     * Finds model URL from canonical snapshot or catalog metadata.
+     * Resolves typed download specification for [modelId] from the authoritative
+     * canonical registry via JNI. Never uses hardcoded Kotlin when-switches.
      */
-    private fun findModelUrl(modelId: String): String? {
+    fun getDownloadSpec(modelId: String): ModelDownloadSpec? {
         val json = try {
-            NativeBridge.nativeModelSnapshot()
+            nativeAdapter.getDownloadSpec(modelId)
         } catch (t: Throwable) {
-            Log.e(TAG, "Failed to get model snapshot", t)
-            return null
-        }
-        // In our canonical catalog, we can lookup the URL by known model IDs
-        // or parse the URL from registry if exposed.
-        return when (modelId) {
-            "echolet-xasr-zh-en-480ms-689ff18c584d29910da37b6fe904db0c1489c9d1" ->
-                "https://github.com/SentimentalK/echolet/releases/download/model-xasr-zh-en-480ms-r1/model-xasr-zh-en-480ms-r1.tar.zst"
-            "echolet-kroko-streaming-en-2025-08-06-r1" ->
-                "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-en-kroko-2025-08-06.tar.bz2"
-            "echolet-nemotron-speech-streaming-en-0.6b-560ms-int8-2026-04-25-r1" ->
-                "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-nemotron-speech-streaming-en-0.6b-560ms-int8-2026-04-25.tar.bz2"
-            "echolet-parakeet-unified-en-0.6b-560ms-int8-2026-05-12-r1" ->
-                "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-nemo-parakeet-unified-en-0.6b-int8-streaming-560ms.tar.bz2"
-            else -> null
+            Log.e(TAG, "Failed to get model download spec for $modelId", t)
+            null
+        } ?: return null
+
+        return try {
+            val obj = JSONObject(json)
+            ModelDownloadSpec(
+                modelId = obj.getString("model_id"),
+                url = obj.getString("url"),
+                sha256 = obj.getString("sha256"),
+                downloadSizeBytes = if (obj.has("download_size_bytes") && !obj.isNull("download_size_bytes")) {
+                    obj.getLong("download_size_bytes")
+                } else null,
+                installedSizeBytes = if (obj.has("installed_size_bytes") && !obj.isNull("installed_size_bytes")) {
+                    obj.getLong("installed_size_bytes")
+                } else null,
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to parse download spec JSON for $modelId: $json", e)
+            null
         }
     }
 
@@ -70,11 +131,15 @@ class ModelDownloadManager(
             return
         }
 
-        val urlString = findModelUrl(modelId)
-        if (urlString == null) {
-            Log.e(TAG, "Unknown model ID for download: $modelId")
+        val spec = getDownloadSpec(modelId)
+        if (spec == null) {
+            Log.e(TAG, "Unknown or non-downloadable model ID: $modelId")
             activeDownloads.remove(modelId)
-            NativeBridge.nativeSetDownloadProgress(modelId, 0, 0, "failed")
+            try {
+                nativeAdapter.setDownloadProgress(modelId, 0, 0, DownloadPhase.FAILED.wireName)
+            } catch (t: Throwable) {
+                Log.w(TAG, "Failed to report failed progress", t)
+            }
             onProgressOrStatusChanged()
             return
         }
@@ -82,16 +147,20 @@ class ModelDownloadManager(
         executor.execute {
             var tempPartFile: File? = null
             try {
-                NativeBridge.nativeSetDownloadProgress(modelId, 0, 0, "starting")
+                nativeAdapter.setDownloadProgress(modelId, 0, 0, DownloadPhase.STARTING.wireName)
                 onProgressOrStatusChanged()
 
-                val url = URL(urlString)
-                if (!url.protocol.equals("https", ignoreCase = true)) {
-                    throw IllegalArgumentException("Only HTTPS downloads are supported")
+                val initialUrl = spec.url
+                if (!initialUrl.startsWith("https://", ignoreCase = true)) {
+                    throw IllegalArgumentException("Only HTTPS downloads are supported: $initialUrl")
                 }
 
-                val cacheDir = context.cacheDir ?: context.filesDir
-                val ext = if (urlString.endsWith(".tar.zst")) ".tar.zst" else ".tar.bz2"
+                val cacheDir = try {
+                    context.cacheDir ?: context.filesDir
+                } catch (_: Throwable) {
+                    null
+                } ?: File(System.getProperty("java.io.tmpdir"), "echolet-test-cache").apply { mkdirs() }
+                val ext = if (initialUrl.endsWith(".tar.zst")) ".tar.zst" else ".tar.bz2"
                 tempPartFile = File(cacheDir, "echolet-dl-$modelId-$ext.part")
                 if (tempPartFile.exists()) {
                     tempPartFile.delete()
@@ -102,19 +171,49 @@ class ModelDownloadManager(
                 var outputStream: FileOutputStream? = null
 
                 try {
-                    connection = (url.openConnection() as HttpURLConnection).apply {
-                        connectTimeout = CONNECT_TIMEOUT_MS
-                        readTimeout = READ_TIMEOUT_MS
-                        instanceFollowRedirects = true
-                        setRequestProperty("User-Agent", "Echolet-Android/0.1.0")
-                    }
+                    // Safe HTTPS redirect loop (capped at MAX_REDIRECTS)
+                    var currentUrl = initialUrl
+                    var hops = 0
+                    while (true) {
+                        val parsedUrl = URL(currentUrl)
+                        if (!parsedUrl.protocol.equals("https", ignoreCase = true)) {
+                            throw IllegalArgumentException("Refusing non-HTTPS redirect to: $currentUrl")
+                        }
 
-                    val responseCode = connection.responseCode
-                    if (responseCode !in 200..299) {
-                        throw IllegalStateException("HTTP error $responseCode: ${connection.responseMessage}")
+                        val conn = (parsedUrl.openConnection() as HttpURLConnection).apply {
+                            connectTimeout = CONNECT_TIMEOUT_MS
+                            readTimeout = READ_TIMEOUT_MS
+                            instanceFollowRedirects = false
+                            setRequestProperty("User-Agent", "Echolet-Android/0.1.0")
+                        }
+
+                        val responseCode = conn.responseCode
+                        if (responseCode in 300..399) {
+                            conn.disconnect()
+                            hops++
+                            if (hops > MAX_REDIRECTS) {
+                                throw IllegalStateException("Too many HTTP redirects (exceeded $MAX_REDIRECTS)")
+                            }
+                            val location = conn.getHeaderField("Location")
+                                ?: throw IllegalStateException("HTTP redirect $responseCode missing Location header")
+                            currentUrl = URL(parsedUrl, location).toString()
+                            continue
+                        }
+
+                        if (responseCode !in 200..299) {
+                            throw IllegalStateException("HTTP error $responseCode: ${conn.responseMessage}")
+                        }
+
+                        connection = conn
+                        break
                     }
 
                     val totalBytes = connection.contentLengthLong
+                    // Bounded content length check (reject downloads > 2GB)
+                    if (totalBytes > MAX_DOWNLOAD_BYTES) {
+                        throw IllegalStateException("Advertised download size ($totalBytes bytes) exceeds maximum limit")
+                    }
+
                     inputStream = connection.inputStream
                     outputStream = FileOutputStream(tempPartFile)
 
@@ -124,11 +223,11 @@ class ModelDownloadManager(
                     var lastReportTime = System.currentTimeMillis()
                     var lastReportBytes = 0L
 
-                    NativeBridge.nativeSetDownloadProgress(
+                    nativeAdapter.setDownloadProgress(
                         modelId,
                         0L,
                         if (totalBytes > 0) totalBytes else 0L,
-                        "downloading",
+                        DownloadPhase.DOWNLOADING.wireName,
                     )
                     onProgressOrStatusChanged()
 
@@ -136,16 +235,20 @@ class ModelDownloadManager(
                         outputStream.write(buffer, 0, bytesRead)
                         totalDownloaded += bytesRead
 
+                        if (totalDownloaded > MAX_DOWNLOAD_BYTES) {
+                            throw IllegalStateException("Downloaded bytes ($totalDownloaded) exceeded maximum limit")
+                        }
+
                         val now = System.currentTimeMillis()
-                        // Report throttle: at most once per 200ms or 512KB
+                        // Report throttle: at most once per 250ms or 512KB
                         if (now - lastReportTime >= PROGRESS_INTERVAL_MS || totalDownloaded - lastReportBytes >= 512 * 1024) {
                             lastReportTime = now
                             lastReportBytes = totalDownloaded
-                            NativeBridge.nativeSetDownloadProgress(
+                            nativeAdapter.setDownloadProgress(
                                 modelId,
                                 totalDownloaded,
                                 if (totalBytes > 0) totalBytes else 0L,
-                                "downloading",
+                                DownloadPhase.DOWNLOADING.wireName,
                             )
                             onProgressOrStatusChanged()
                         }
@@ -153,11 +256,11 @@ class ModelDownloadManager(
 
                     outputStream.flush()
 
-                    NativeBridge.nativeSetDownloadProgress(
+                    nativeAdapter.setDownloadProgress(
                         modelId,
                         totalDownloaded,
                         if (totalBytes > 0) totalBytes else totalDownloaded,
-                        "verifying",
+                        DownloadPhase.VERIFYING.wireName,
                     )
                     onProgressOrStatusChanged()
 
@@ -168,10 +271,10 @@ class ModelDownloadManager(
                 }
 
                 // Delegate verification & atomic install to Rust
-                NativeBridge.nativeSetDownloadProgress(modelId, 0, 0, "installing")
+                nativeAdapter.setDownloadProgress(modelId, 0, 0, DownloadPhase.INSTALLING.wireName)
                 onProgressOrStatusChanged()
 
-                val installOk = NativeBridge.nativeInstallModelFromArchive(
+                val installOk = nativeAdapter.installModelFromArchive(
                     modelId,
                     tempPartFile.absolutePath,
                 )
@@ -180,12 +283,16 @@ class ModelDownloadManager(
                     throw IllegalStateException("Rust native install failed for $modelId")
                 }
 
-                NativeBridge.nativeSetDownloadProgress(modelId, 0, 0, "completed")
+                nativeAdapter.setDownloadProgress(modelId, 0, 0, DownloadPhase.COMPLETED.wireName)
                 Log.i(TAG, "Model $modelId successfully installed!")
 
             } catch (t: Throwable) {
                 Log.e(TAG, "Failed to download/install model $modelId", t)
-                NativeBridge.nativeSetDownloadProgress(modelId, 0, 0, "failed")
+                try {
+                    nativeAdapter.setDownloadProgress(modelId, 0, 0, DownloadPhase.FAILED.wireName)
+                } catch (reportErr: Throwable) {
+                    Log.w(TAG, "Failed to report failure status", reportErr)
+                }
             } finally {
                 activeDownloads.remove(modelId)
                 try {
@@ -204,5 +311,7 @@ class ModelDownloadManager(
         private const val READ_TIMEOUT_MS = 30_000
         private const val BUFFER_SIZE = 64 * 1024
         private const val PROGRESS_INTERVAL_MS = 250L
+        private const val MAX_REDIRECTS = 5
+        private const val MAX_DOWNLOAD_BYTES = 2L * 1024 * 1024 * 1024 // 2 GB
     }
 }

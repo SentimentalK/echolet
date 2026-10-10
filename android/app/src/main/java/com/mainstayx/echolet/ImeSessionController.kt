@@ -99,9 +99,7 @@ class ImeSessionController internal constructor(
             if (selectedDir != null && java.io.File(selectedDir).isDirectory) {
                 selectedDir
             } else {
-                val base = context.getExternalFilesDir("models")
-                    ?: throw IllegalStateException("app-specific external files dir unavailable")
-                java.io.File(base, "bilingual-zh-en").absolutePath
+                throw IllegalStateException("Selected model directory is unavailable or not installed")
             }
         },
         model = ImeSessionModel(),
@@ -486,8 +484,20 @@ class ImeSessionController internal constructor(
 
     // ------------------------------------------------------- generation task
 
+    /**
+     * Whether a dictation session is currently in flight or preparing.
+     */
+    fun isSessionActive(): Boolean =
+        model.currentState == ImeSessionModel.ImeState.PREPARING ||
+        model.currentState == ImeSessionModel.ImeState.LISTENING
+
     private fun startGeneration(lease: ImeSessionModel.EditorLease) {
-        val modelDir = dirProvider()
+        val modelDir = try {
+            dirProvider()
+        } catch (t: Throwable) {
+            fail(lease, "Selected model unavailable: ${t.message ?: t.javaClass.simpleName}")
+            return
+        }
         executeOnLane { generationTask(lease, modelDir) }
     }
 

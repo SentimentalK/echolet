@@ -95,6 +95,14 @@ object NativeBridge {
     )
 
     /**
+     * Obtains the typed JSON download specification for a catalog model,
+     * including HTTPS URL, SHA256 checksum, and size metadata sourced
+     * directly from the canonical Rust registry. Returns null if the model
+     * is unknown, bundled, or non-downloadable.
+     */
+    external fun nativeGetModelDownloadSpec(modelId: String): String?
+
+    /**
      * Returns the absolute filesystem directory path of the currently selected model,
      * or null if no valid installed model is selected.
      */

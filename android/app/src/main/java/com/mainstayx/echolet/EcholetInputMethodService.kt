@@ -39,6 +39,10 @@ class EcholetInputMethodService : InputMethodService() {
     /** Parses lazily into a memoized flag; re-checked cheaply. */
     private var nativeLibsReady: Boolean? = null
     private val ui = Handler(Looper.getMainLooper())
+    private val modelExecutor = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+        Thread(r, "echolet-ime-model-io").apply { isDaemon = true }
+    }
+    @Volatile private var modelSnapshotGen = 0L
 
     // View references; cleared safely on recreation/destroy so stale click
     // callbacks can never touch a dead view tree.
@@ -89,27 +93,20 @@ class EcholetInputMethodService : InputMethodService() {
             NativeBridge.nativeGetSelectedModelDir()
         } catch (_: Throwable) {
             null
-        }
-        if (selectedDir != null) {
-            val dir = File(selectedDir)
-            if (dir.isDirectory) {
-                val hasModelJson = File(dir, "model.json").let { it.exists() && it.length() > 0L }
-                val hasTokens = File(dir, "tokens.txt").let { it.exists() && it.length() > 0L }
-                if (hasModelJson && hasTokens) return true
-            }
-        }
-        val base = getExternalFilesDir("models") ?: return false
-        val dir = File(base, "bilingual-zh-en")
-        val required =
-            listOf("model.json", "encoder-480ms.onnx", "decoder-480ms.onnx", "joiner-480ms.onnx", "tokens.txt")
-        return required.all { name -> File(dir, name).let { it.exists() && it.length() > 0L } }
+        } ?: return false
+
+        val dir = File(selectedDir)
+        if (!dir.isDirectory) return false
+        val hasModelJson = File(dir, "model.json").let { it.exists() && it.length() > 0L }
+        val hasTokens = File(dir, "tokens.txt").let { it.exists() && it.length() > 0L }
+        return hasModelJson && hasTokens
     }
 
     private fun blockedReason(): String? = when {
         (checkSelfPermission(Manifest.permission.RECORD_AUDIO)
             != PackageManager.PERMISSION_GRANTED) -> "Mic permission missing"
-        !modelStaged() -> "Model not staged (setup in Echolet app)"
         !nativeLibrariesLoadable() -> "Native libraries failed to load"
+        !modelStaged() -> "Selected model not installed (setup in Echolet app)"
         else -> null
     }
 
@@ -124,12 +121,20 @@ class EcholetInputMethodService : InputMethodService() {
     }
 
     private fun refreshModelSnapshot() {
-        try {
-            val json = NativeBridge.nativeModelSnapshot()
-            val parsed = ModelSnapshotUi.parseJson(json)
-            applyPlan(presenter.updateModelSnapshot(parsed))
-        } catch (t: Throwable) {
-            android.util.Log.w("EcholetIme", "Failed to refresh model snapshot", t)
+        val gen = synchronized(this) { ++modelSnapshotGen }
+        modelExecutor.execute {
+            try {
+                val json = NativeBridge.nativeModelSnapshot()
+                val parsed = ModelSnapshotUi.parseJson(json)
+                runOnUi {
+                    synchronized(this) {
+                        if (gen != modelSnapshotGen || root == null) return@runOnUi
+                    }
+                    applyPlan(presenter.updateModelSnapshot(parsed))
+                }
+            } catch (t: Throwable) {
+                android.util.Log.w("EcholetIme", "Failed to refresh model snapshot", t)
+            }
         }
     }
 
@@ -421,15 +426,30 @@ class EcholetInputMethodService : InputMethodService() {
                                 background = roundedFilled(COLOR_CHARCOAL)
                                 isEnabled = model.enabled
                                 setOnClickListener {
-                                    val isListening = controller.model.currentState == ImeSessionModel.ImeState.LISTENING ||
-                                                      controller.model.currentState == ImeSessionModel.ImeState.PREPARING
-                                    if (isListening) {
+                                    if (controller.isSessionActive()) {
                                         android.util.Log.w("EcholetIme", "Model selection rejected: session active")
                                         return@setOnClickListener
                                     }
-                                    NativeBridge.nativeSelectModel(model.id)
-                                    refreshReadiness()
-                                    refreshModelSnapshot()
+                                    modelExecutor.execute {
+                                        if (controller.isSessionActive()) {
+                                            android.util.Log.w("EcholetIme", "Model selection rejected: session became active")
+                                            return@execute
+                                        }
+                                        val ok = try {
+                                            NativeBridge.nativeSelectModel(model.id)
+                                        } catch (t: Throwable) {
+                                            android.util.Log.e("EcholetIme", "Model selection failed for ${model.id}", t)
+                                            false
+                                        }
+                                        if (ok) {
+                                            runOnUi {
+                                                refreshReadiness()
+                                                refreshModelSnapshot()
+                                            }
+                                        } else {
+                                            android.util.Log.w("EcholetIme", "Model selection rejected by core for ${model.id}")
+                                        }
+                                    }
                                 }
                             }
                             model.primaryAction == "Download" || model.primaryAction == "RetryDownload" -> {
@@ -607,6 +627,7 @@ class EcholetInputMethodService : InputMethodService() {
     override fun onDestroy() {
         controller.onDestroyed()
         clearViewRefs()
+        modelExecutor.shutdownNow()
         super.onDestroy()
     }
 
