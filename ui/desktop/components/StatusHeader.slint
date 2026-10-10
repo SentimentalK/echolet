@@ -15,21 +15,11 @@ export component StatusHeader {
             alignment: start;
 
             // Logo mark
-            Rectangle {
+            Image {
+                source: @image-url("../assets/echolet_logo.png");
                 width: 26px;
                 height: 26px;
-                border-radius: 7px;
-                background: #18181b;
                 y: (parent.height - self.height) / 2;
-
-                Text {
-                    text: "E";
-                    color: #fafafa;
-                    font-size: 14px;
-                    font-weight: 900;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
-                }
             }
 
             Text {
