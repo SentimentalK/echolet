@@ -1,0 +1,42 @@
+name: Echolet
+options:
+  bundleIdPrefix: com.mainstayx.echolet
+  deploymentTarget:
+    iOS: "15.0"
+  xcodeVersion: "16.2"
+
+settings:
+  SWIFT_VERSION: "5.10"
+  IPHONEOS_DEPLOYMENT_TARGET: "15.0"
+  TARGETED_DEVICE_FAMILY: "1,2" # 1 = iPhone, 2 = iPad
+
+targets:
+  EcholetApp:
+    type: application
+    platform: iOS
+    deploymentTarget: "15.0"
+    sources:
+      - path: App
+      - path: protocol/EcholetIPC.swift
+    settings:
+      PRODUCT_BUNDLE_IDENTIFIER: com.mainstayx.echolet.app
+      INFOPLIST_FILE: App/Info.plist
+      CODE_SIGN_ENTITLEMENTS: App/EcholetApp.entitlements
+      TARGETED_DEVICE_FAMILY: "1,2"
+      SWIFT_VERSION: "5.10"
+    dependencies:
+      - target: EcholetKeyboard
+
+  EcholetKeyboard:
+    type: app-extension
+    platform: iOS
+    deploymentTarget: "15.0"
+    sources:
+      - path: Keyboard
+      - path: protocol/EcholetIPC.swift
+    settings:
+      PRODUCT_BUNDLE_IDENTIFIER: com.mainstayx.echolet.app.keyboard
+      INFOPLIST_FILE: Keyboard/Info.plist
+      CODE_SIGN_ENTITLEMENTS: Keyboard/EcholetKeyboard.entitlements
+      TARGETED_DEVICE_FAMILY: "1,2"
+      SWIFT_VERSION: "5.10"
