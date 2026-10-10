@@ -6,7 +6,7 @@ This directory contains the native iOS / iPadOS Containing Application and Custo
 
 - **`App/`**: Minimal UIKit containing application (`EcholetApp`).
   - Initializes and displays the per-process launch epoch (`echolet.app.epoch.v2`).
-  - Displays keyboard activation setup instructions.
+  - Contains an in-app editable `UITextView` test harness so the custom keyboard can be tested directly inside Echolet without app-switching or losing keyboard focus.
   - Houses a DEBUG-only test responder button to validate IPC message intake from the keyboard extension without full background audio recording or native ASR inference.
 - **`Keyboard/`**: Custom `UIInputViewController` Keyboard Extension (`EcholetKeyboard`).
   - Provides required Apple keyboard switching (`advanceToNextInputMode()`).

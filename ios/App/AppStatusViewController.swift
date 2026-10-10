@@ -27,6 +27,8 @@ class AppStatusViewController: UIViewController {
     private let appGroupStatusLabel = UILabel()
     private let instructionsLabel = UILabel()
     private let lastRequestLabel = UILabel()
+    private let testTextViewLabel = UILabel()
+    private let testTextView = UITextView()
     private let demoResponseButton = UIButton(type: .system)
     private let refreshButton = UIButton(type: .system)
     private let statusNoteLabel = UILabel()
@@ -92,11 +94,31 @@ class AppStatusViewController: UIViewController {
         instructionsLabel.text = """
         Keyboard Setup Guide:
         1. Open Settings -> General -> Keyboard -> Keyboards -> Add New Keyboard.
-        2. Select "Echolet".
+        2. Select "Echolet", then tap "Echolet" and turn on "Allow Full Access" (needed for local App Group IPC).
         3. Note: If using an Apple Personal Team / Free Account, App Groups entitlement may not be provisioned by Apple. If App Group defaults are unavailable, cross-process IPC will fail-closed.
-        4. Test Flow: Open any typing editor, switch to Echolet keyboard, tap "Start Test". Switch back to this app (must be foreground/warm), tap "Send Mock Transcription", then return to the editor to observe inserted text.
+        4. In-App Contained Test Flow:
+           - Tap the text editor box below so the keyboard appears.
+           - Switch to Echolet keyboard using the Globe (🌐) key.
+           - Tap "Start Test" on the Echolet keyboard.
+           - Tap "DEBUG: Send Mock Transcription" below (editor stays active or tap "Check for Incoming Request").
+           - Tap "Consume Response" on the Echolet keyboard to insert mock text into the editor.
         """
         stackView.addArrangedSubview(instructionsLabel)
+
+        // Contained In-App Editor Target
+        testTextViewLabel.text = "In-App Test Editor (Tap here to summon Echolet keyboard):"
+        testTextViewLabel.font = .boldSystemFont(ofSize: 14)
+        stackView.addArrangedSubview(testTextViewLabel)
+
+        testTextView.font = .systemFont(ofSize: 15)
+        testTextView.layer.borderColor = UIColor.systemGray3.cgColor
+        testTextView.layer.borderWidth = 1.0
+        testTextView.layer.cornerRadius = 8
+        testTextView.layer.masksToBounds = true
+        testTextView.text = "Tap here to test keyboard input..."
+        testTextView.translatesAutoresizingMaskIntoConstraints = false
+        testTextView.heightAnchor.constraint(equalToConstant: 90).isActive = true
+        stackView.addArrangedSubview(testTextView)
 
         // Last Request Display
         lastRequestLabel.numberOfLines = 0
