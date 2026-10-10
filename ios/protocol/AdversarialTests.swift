@@ -151,41 +151,67 @@ func testAdversarialFenceSuite() {
 
     // Test 5: Stop completion arrives after start request => no overlap
     do {
-        var generationToken: UInt64 = 100
-        func stopCapture() -> UInt64 {
-            generationToken += 1
-            return generationToken
+        let lifecycleGate = CaptureLifecycleGate()
+        guard case .success(let gen1) = lifecycleGate.issueStartToken() else {
+            fatalError("Failed to issue token")
         }
-        func startCapture(currentGen: UInt64) -> Bool {
-            return currentGen == generationToken
-        }
+        _ = lifecycleGate.acknowledgeStartSuccess(for: gen1)
+        assertTest(lifecycleGate.state == .recording, "Gen 1 is recording")
 
-        let genAtStop = stopCapture() // 101
-        assertTest(genAtStop == 101, "Stop advances generation")
-        assertTest(!startCapture(currentGen: 100), "Old start with gen 100 rejected")
-        assertTest(startCapture(currentGen: 101), "Start with latest gen 101 accepted")
+        // Stop session 1
+        let genAtStop = lifecycleGate.stop(targetState: .stopped)
+        assertTest(genAtStop == gen1 + 1, "Stop advances generation")
+        assertTest(lifecycleGate.state == .stopped, "Gate is stopped")
+
+        // Delayed ack from gen 1 cannot re-open recording
+        let lateAck = lifecycleGate.acknowledgeStartSuccess(for: gen1)
+        assertTest(lateAck == .failure(.staleGeneration(issued: gen1, active: genAtStop)), "Old start ack rejected")
+        assertTest(lifecycleGate.state == .stopped, "Remains stopped")
+
+        // Fresh start issues next generation and can record
+        guard case .success(let gen2) = lifecycleGate.issueStartToken() else {
+            fatalError("Failed to issue gen2 token")
+        }
+        assertTest(gen2 > genAtStop, "New start advances generation beyond stop")
+        _ = lifecycleGate.acknowledgeStartSuccess(for: gen2)
+        assertTest(lifecycleGate.state == .recording, "New session recording")
     }
 
     // Test 6: Queued meter callback after Stop ignored
     do {
-        var activeGeneration: UInt64 = 1
-        var metricsPublished = 0
-
-        func processBuffer(bufferGen: UInt64) {
-            guard bufferGen == activeGeneration else { return }
-            metricsPublished += 1
+        let lifecycleGate = CaptureLifecycleGate()
+        guard case .success(let gen) = lifecycleGate.issueStartToken() else {
+            fatalError("Failed to issue start token")
         }
+        _ = lifecycleGate.acknowledgeStartSuccess(for: gen)
 
-        // Buffer from gen 1
-        processBuffer(bufferGen: 1)
-        assertTest(metricsPublished == 1, "Buffer from active generation published")
+        let snapshot1 = CaptureLifecycleGate.MetricSnapshot(
+            generation: gen,
+            frameIncrement: 1024,
+            peakPower: -10.0,
+            rmsPower: -15.0,
+            elapsedSeconds: 0.25,
+            sampleRate: 48000,
+            channelCount: 1
+        )
+        assertTest(lifecycleGate.acceptMetricSnapshot(snapshot1), "Active snapshot accepted")
+        assertTest(lifecycleGate.totalFramesRecorded == 1024, "Frames recorded is 1024")
 
-        // Stop advances generation
-        activeGeneration += 1 // 2
+        // Stop session
+        lifecycleGate.stop(targetState: .stopped)
 
-        // Stale queued buffer from gen 1
-        processBuffer(bufferGen: 1)
-        assertTest(metricsPublished == 1, "Queued buffer from stopped generation dropped")
+        // Queued meter callback from pre-stop generation
+        let lateSnapshot = CaptureLifecycleGate.MetricSnapshot(
+            generation: gen,
+            frameIncrement: 1024,
+            peakPower: -8.0,
+            rmsPower: -12.0,
+            elapsedSeconds: 0.5,
+            sampleRate: 48000,
+            channelCount: 1
+        )
+        assertTest(!lifecycleGate.acceptMetricSnapshot(lateSnapshot), "Queued buffer after stop rejected")
+        assertTest(lifecycleGate.totalFramesRecorded == 1024, "Frames frozen at 1024")
     }
 
     // Test 7: No permission/arm and cached old epoch START => no microphone

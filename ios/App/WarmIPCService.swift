@@ -250,7 +250,7 @@ public final class WarmIPCService {
 
                     if granted {
                         // Start real capture and bind generation token
-                        let gen = AudioCaptureController.shared.startCapture { [weak self] result in
+                        AudioCaptureController.shared.startCapture { [weak self] result in
                             guard let self = self else { return }
                             self.ipcQueue.async {
                                 // Fencing: Ensure active session is still this exact token
@@ -298,7 +298,6 @@ public final class WarmIPCService {
                                 }
                             }
                         }
-                        _ = gen
                     } else {
                         // Permission denied
                         self.activeSessionToken = nil

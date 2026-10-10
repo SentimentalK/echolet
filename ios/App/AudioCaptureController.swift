@@ -14,7 +14,7 @@ public protocol AudioCaptureDelegate: AnyObject {
 
 /// Centralized, containing-app-owned real microphone capture controller.
 ///
-/// Complies with Apple audio requirements:
+/// Complies with Apple audio requirements & production concurrency invariants:
 /// - Uses `AVAudioEngine` and `AVAudioSession`.
 /// - Input tap installed on `engine.inputNode`.
 /// - Explicit user permission prompt handled truthfully on iOS 15+.
@@ -22,30 +22,16 @@ public protocol AudioCaptureDelegate: AnyObject {
 /// - Session activated ONLY when capture starts; deactivated on terminal stop.
 /// - Handles audio interruptions and route changes cleanly.
 /// - Fail-closed on all hardware/audio exceptions; no orphaned taps or active mics.
-/// - Generation fences prevent stale permission, engine starts, route changes, or old taps from mutating state.
+/// - All native engine/session state transitions, generation fencing, and counters are serialized
+///   on `stateQueue` and governed by production `CaptureLifecycleGate`.
+/// - Nonblocking, allocation-free audio tap metering uses dedicated `MeterContext` with immutable
+///   session tokens; rate-limited (~4Hz / 250ms) immutable snapshots dispatched to `stateQueue`.
 public final class AudioCaptureController: NSObject {
 
     public static let shared = AudioCaptureController()
 
-    public enum Status: String, Equatable {
-        case idle
-        case requestingPermission
-        case ready
-        case recording
-        case interrupted
-        case stopped
-        case blocked
-        case failed
-    }
-
-    public struct Metrics: Equatable {
-        public let frameCount: UInt64
-        public let peakPower: Float
-        public let rmsPower: Float
-        public let elapsedSeconds: Double
-        public let sampleRate: Double
-        public let channelCount: UInt32
-    }
+    public typealias Status = CaptureLifecycleGate.State
+    public typealias Metrics = CaptureLifecycleGate.CumulativeMetrics
 
     public enum CaptureError: LocalizedError, Equatable {
         case permissionDenied
@@ -55,6 +41,7 @@ public final class AudioCaptureController: NSObject {
         case alreadyRecording
         case cancelledBeforeStart
         case sessionInterrupted
+        case generationOverflow
 
         public var errorDescription: String? {
             switch self {
@@ -72,42 +59,100 @@ public final class AudioCaptureController: NSObject {
                 return "Audio capture request was cancelled before start completion."
             case .sessionInterrupted:
                 return "Audio session was interrupted by the system."
+            case .generationOverflow:
+                return "Capture generation counter reached maximum value; failing closed."
             }
+        }
+
+        init(from lifecycleError: CaptureLifecycleGate.LifecycleError) {
+            switch lifecycleError {
+            case .permissionDenied:
+                self = .permissionDenied
+            case .hardwareUnavailable:
+                self = .hardwareUnavailable
+            case .engineConfigurationFailed(let msg):
+                self = .engineConfigurationFailed(msg)
+            case .audioSessionActivationFailed(let msg):
+                self = .audioSessionActivationFailed(msg)
+            case .alreadyRecording:
+                self = .alreadyRecording
+            case .cancelledBeforeStart, .staleGeneration:
+                self = .cancelledBeforeStart
+            case .sessionInterrupted:
+                self = .sessionInterrupted
+            case .generationOverflow:
+                self = .generationOverflow
+            case .invalidStateTransition(_, let action):
+                self = .engineConfigurationFailed(action)
+            }
+        }
+    }
+
+    /// Dedicated per-tap metering context owned by the tap closure.
+    ///
+    /// Invariants:
+    /// 1. Holds immutable session token `generation`.
+    /// 2. Accumulators (`accumulatedFrames`, `lastDispatchUptimeNanoseconds`) are mutated ONLY
+    ///    on the realtime audio render thread within the tap callback.
+    /// 3. NEVER reads or mutates mutable `AudioCaptureController` fields.
+    /// 4. Does zero heap allocations, zero locks, zero sleeps, zero Foundation or disk/network I/O.
+    /// 5. Rate-limits dispatches to `stateQueue` to ~4Hz (250ms), avoiding ~47 tasks/sec dispatch flood.
+    private final class MeterContext {
+        let generation: UInt64
+        let sampleRate: Double
+        let channelCount: UInt32
+        let startUptimeNanoseconds: UInt64
+
+        var accumulatedFrames: UInt64 = 0
+        var lastDispatchUptimeNanoseconds: UInt64 = 0
+
+        init(generation: UInt64, sampleRate: Double, channelCount: UInt32, startUptimeNanoseconds: UInt64) {
+            self.generation = generation
+            self.sampleRate = sampleRate
+            self.channelCount = channelCount
+            self.startUptimeNanoseconds = startUptimeNanoseconds
         }
     }
 
     public weak var delegate: AudioCaptureDelegate?
 
-    public private(set) var status: Status = .idle {
-        didSet {
-            guard oldValue != status else { return }
-            DispatchQueue.main.async { [weak self] in
-                guard let self = self else { return }
-                self.delegate?.audioCaptureController(self, didUpdateStatus: self.status)
-            }
+    public var status: Status {
+        if Thread.isMainThread {
+            return _publishedStatus
+        } else {
+            return stateQueue.sync { lifecycleGate.state }
         }
     }
 
-    public private(set) var currentMetrics = Metrics(
-        frameCount: 0,
-        peakPower: -160.0,
-        rmsPower: -160.0,
-        elapsedSeconds: 0.0,
-        sampleRate: 0.0,
-        channelCount: 0
-    )
+    public var currentMetrics: Metrics {
+        if Thread.isMainThread {
+            return _publishedMetrics
+        } else {
+            return stateQueue.sync { lifecycleGate.currentMetrics }
+        }
+    }
+
+    public var activeGeneration: UInt64 {
+        if Thread.isMainThread {
+            return _publishedGeneration
+        } else {
+            return stateQueue.sync { lifecycleGate.activeGeneration }
+        }
+    }
+
+    // Published values cached for main thread reads
+    private var _publishedStatus: Status = .idle
+    private var _publishedMetrics: Metrics = Metrics()
+    private var _publishedGeneration: UInt64 = 0
+
+    // Serial executor for all native engine, session, tap, and lifecycle gate mutations
+    public let stateQueue = DispatchQueue(label: "com.echolet.audiocapture.state", qos: .userInitiated)
+
+    // Production lifecycle gate state machine (accessed ONLY on stateQueue)
+    private let lifecycleGate = CaptureLifecycleGate()
 
     private var audioEngine: AVAudioEngine?
     private var isTapInstalled = false
-    public let stateQueue = DispatchQueue(label: "com.echolet.audiocapture.state", qos: .userInitiated)
-
-    // Rate-limiting for audio tap UI updates (~4Hz / 250ms interval)
-    private var lastMetricsDispatchTime: UInt64 = 0
-    private var totalFramesRecorded: UInt64 = 0
-    private var recordingStartTime: DispatchTime?
-
-    // Active generation token to reject stale asynchronous callbacks across all state transitions
-    public private(set) var activeGeneration: UInt64 = 0
 
     override init() {
         super.init()
@@ -116,7 +161,11 @@ public final class AudioCaptureController: NSObject {
 
     deinit {
         NotificationCenter.default.removeObserver(self)
-        stopInternal(targetStatus: .stopped)
+        // Ensure cleanup runs on serial executor
+        stateQueue.sync { [weak self] in
+            guard let self = self else { return }
+            self.stopInternal(targetStatus: .stopped)
+        }
     }
 
     // MARK: - Notification Observers
@@ -146,14 +195,15 @@ public final class AudioCaptureController: NSObject {
 
             switch type {
             case .began:
-                if self.status == .recording {
+                if self.lifecycleGate.state == .recording || self.lifecycleGate.state == .starting {
                     self.stopInternal(targetStatus: .interrupted)
                 }
             case .ended:
                 // Apple HIG / Security: Require affirmative user interaction to resume recording after interruption.
                 // Never auto-restart recording.
-                if self.status == .interrupted {
-                    self.status = .ready
+                if self.lifecycleGate.state == .interrupted {
+                    self.lifecycleGate.setPermissionStatus(granted: true)
+                    self.publishStateChange()
                 }
             @unknown default:
                 break
@@ -170,7 +220,7 @@ public final class AudioCaptureController: NSObject {
                 return
             }
 
-            if reason == .oldDeviceUnavailable && self.status == .recording {
+            if reason == .oldDeviceUnavailable && (self.lifecycleGate.state == .recording || self.lifecycleGate.state == .starting) {
                 // Audio route pulled (e.g. headset unplugged / bluetooth disconnected)
                 self.stopInternal(targetStatus: .interrupted)
             }
@@ -184,22 +234,26 @@ public final class AudioCaptureController: NSObject {
         case .granted:
             stateQueue.async { [weak self] in
                 guard let self = self else { return }
-                self.status = (self.status == .recording) ? .recording : .ready
+                self.lifecycleGate.setPermissionStatus(granted: true)
+                self.publishStateChange()
                 DispatchQueue.main.async { completion(true) }
             }
         case .denied:
             stateQueue.async { [weak self] in
                 guard let self = self else { return }
-                self.status = .blocked
+                self.lifecycleGate.setPermissionStatus(granted: false)
+                self.publishStateChange()
                 DispatchQueue.main.async { completion(false) }
             }
         case .undetermined:
             stateQueue.async { [weak self] in
                 guard let self = self else { return }
-                self.status = .requestingPermission
+                self.lifecycleGate.markRequestingPermission()
+                self.publishStateChange()
                 session.requestRecordPermission { granted in
                     self.stateQueue.async {
-                        self.status = granted ? .ready : .blocked
+                        self.lifecycleGate.setPermissionStatus(granted: granted)
+                        self.publishStateChange()
                         DispatchQueue.main.async { completion(granted) }
                     }
                 }
@@ -207,7 +261,8 @@ public final class AudioCaptureController: NSObject {
         @unknown default:
             stateQueue.async { [weak self] in
                 guard let self = self else { return }
-                self.status = .blocked
+                self.lifecycleGate.setPermissionStatus(granted: false)
+                self.publishStateChange()
                 DispatchQueue.main.async { completion(false) }
             }
         }
@@ -215,53 +270,48 @@ public final class AudioCaptureController: NSObject {
 
     // MARK: - Start Recording with Generation & Completion
     /// Begins native audio capture under a strictly serialized monotonic generation token.
+    /// Entire initiation, configuration, and engine start executes on `stateQueue` asynchronously.
+    /// Returns immediately without synchronous caller re-entry or deadlock.
+    ///
     /// - Parameters:
     ///   - expectedGeneration: Optional generation to fence against stale caller triggers.
-    ///   - completion: Callback executed on stateQueue (or main) indicating whether hardware start succeeded.
-    @discardableResult
+    ///   - completion: Callback executed on stateQueue indicating whether hardware start succeeded.
     public func startCapture(
         expectedGeneration: UInt64? = nil,
         completion: ((Result<UInt64, CaptureError>) -> Void)? = nil
-    ) -> UInt64 {
-        var issuedGen: UInt64 = 0
-        stateQueue.sync {
-            self.activeGeneration += 1
-            issuedGen = self.activeGeneration
-        }
-
+    ) {
         stateQueue.async { [weak self] in
             guard let self = self else {
                 completion?(.failure(.cancelledBeforeStart))
                 return
             }
 
-            // Check if caller expected an earlier generation that was already superseded
-            if let expected = expectedGeneration, expected != issuedGen {
-                completion?(.failure(.cancelledBeforeStart))
+            // Issue unique monotonic generation token via production lifecycle gate
+            let tokenResult = self.lifecycleGate.issueStartToken(expectedGeneration: expectedGeneration)
+            let issuedGen: UInt64
+            switch tokenResult {
+            case .success(let gen):
+                issuedGen = gen
+            case .failure(let err):
+                let captureErr = CaptureError(from: err)
+                if captureErr != .alreadyRecording {
+                    self.notifyError(captureErr)
+                }
+                self.publishStateChange()
+                completion?(.failure(captureErr))
                 return
             }
 
-            // Generation fence: check if another action invalidated us while queued
-            guard self.activeGeneration == issuedGen else {
-                completion?(.failure(.cancelledBeforeStart))
-                return
-            }
-
-            guard self.status != .recording else {
-                self.notifyError(.alreadyRecording)
-                completion?(.failure(.alreadyRecording))
-                return
-            }
+            self.publishStateChange()
 
             let audioSession = AVAudioSession.sharedInstance()
             guard audioSession.recordPermission == .granted else {
-                self.status = .blocked
+                _ = self.lifecycleGate.acknowledgeStartFailure(for: issuedGen, error: .permissionDenied)
+                self.publishStateChange()
                 self.notifyError(.permissionDenied)
                 completion?(.failure(.permissionDenied))
                 return
             }
-
-            let currentGen = issuedGen
 
             // 1. Configure and activate AVAudioSession
             do {
@@ -272,14 +322,15 @@ public final class AudioCaptureController: NSObject {
                 )
                 try audioSession.setActive(true, options: .notifyOthersOnDeactivation)
             } catch {
-                self.status = .failed
+                _ = self.lifecycleGate.acknowledgeStartFailure(for: issuedGen, error: .audioSessionActivationFailed(error.localizedDescription))
+                self.publishStateChange()
                 self.notifyError(.audioSessionActivationFailed(error.localizedDescription))
                 completion?(.failure(.audioSessionActivationFailed(error.localizedDescription)))
                 return
             }
 
-            // Check generation fence again after audioSession activation
-            guard self.activeGeneration == currentGen else {
+            // Check generation fence after audioSession activation (e.g. stop occurred in flight)
+            guard self.lifecycleGate.activeGeneration == issuedGen && self.lifecycleGate.state == .starting else {
                 _ = try? audioSession.setActive(false, options: .notifyOthersOnDeactivation)
                 completion?(.failure(.cancelledBeforeStart))
                 return
@@ -291,52 +342,69 @@ public final class AudioCaptureController: NSObject {
             let inputFormat = inputNode.outputFormat(forBus: 0)
 
             guard inputFormat.sampleRate > 0 && inputFormat.channelCount > 0 else {
-                self.status = .failed
                 self.stopInternal(targetStatus: .failed)
                 self.notifyError(.hardwareUnavailable)
                 completion?(.failure(.hardwareUnavailable))
                 return
             }
 
-            // 3. Reset metering counters for this generation
-            self.totalFramesRecorded = 0
-            self.recordingStartTime = DispatchTime.now()
-            self.lastMetricsDispatchTime = 0
+            // 3. Preallocate per-tap MeterContext with immutable session token
             let sampleRate = inputFormat.sampleRate
-            let channels = inputFormat.channelCount
+            let channelCount = inputFormat.channelCount
+            let startUptime = DispatchTime.now().uptimeNanoseconds
+
+            let meterContext = MeterContext(
+                generation: issuedGen,
+                sampleRate: sampleRate,
+                channelCount: channelCount,
+                startUptimeNanoseconds: startUptime
+            )
 
             // 4. Install input tap (buffer size 1024 frames)
             let bufferSize: AVAudioFrameCount = 1024
             inputNode.removeTap(onBus: 0) // Defensive cleanup
-            inputNode.installTap(onBus: 0, bufferSize: bufferSize, format: inputFormat) { [weak self] buffer, _ in
-                guard let self = self else { return }
-                self.processAudioBuffer(buffer, generation: currentGen, sampleRate: sampleRate, channelCount: channels)
+
+            // Closure captures ONLY meterContext and unowned/weak self, NEVER reads mutable controller fields
+            let stateQ = self.stateQueue
+            inputNode.installTap(onBus: 0, bufferSize: bufferSize, format: inputFormat) { [weak self, weak meterContext] buffer, _ in
+                guard let self = self, let context = meterContext else { return }
+                AudioCaptureController.processAudioBuffer(
+                    buffer: buffer,
+                    context: context,
+                    controller: self,
+                    stateQueue: stateQ
+                )
             }
+
             self.isTapInstalled = true
             self.audioEngine = engine
 
             // 5. Start engine
             do {
                 try engine.start()
-                // Verify generation fence one last time before declaring recording
-                guard self.activeGeneration == currentGen else {
+
+                // Acknowledge start success on gate
+                let ackResult = self.lifecycleGate.acknowledgeStartSuccess(for: issuedGen)
+                switch ackResult {
+                case .success(let activeGen):
+                    self.publishStateChange()
+                    completion?(.success(activeGen))
+                case .failure(let err):
+                    // Stopped or superseded while engine.start was executing
                     self.stopInternal(targetStatus: .stopped)
-                    completion?(.failure(.cancelledBeforeStart))
-                    return
+                    completion?(.failure(CaptureError(from: err)))
                 }
-                self.status = .recording
-                completion?(.success(currentGen))
             } catch {
                 self.stopInternal(targetStatus: .failed)
-                self.notifyError(.engineConfigurationFailed(error.localizedDescription))
-                completion?(.failure(.engineConfigurationFailed(error.localizedDescription)))
+                let errorDesc = error.localizedDescription
+                self.notifyError(.engineConfigurationFailed(errorDesc))
+                completion?(.failure(.engineConfigurationFailed(errorDesc)))
             }
         }
-
-        return issuedGen
     }
 
     // MARK: - Stop Recording with Completion
+    /// Hardware stop completion only after tap removed, engine stopped, and session deactivate attempted.
     public func stopCapture(completion: (() -> Void)? = nil) {
         stateQueue.async { [weak self] in
             guard let self = self else {
@@ -348,11 +416,12 @@ public final class AudioCaptureController: NSObject {
         }
     }
 
-    /// Synchronously stops native engine if called from stateQueue, or executes on stateQueue.
+    /// Internal synchronous stop executed exclusively on `stateQueue`.
     private func stopInternal(targetStatus: Status) {
-        // Monotonically advance activeGeneration so all in-flight buffers and callbacks are fenced
-        activeGeneration += 1
+        // Advance generation on lifecycle gate first so any in-flight callbacks/snapshots are instantly fenced
+        _ = self.lifecycleGate.stop(targetState: targetStatus)
 
+        // Halt native engine and remove tap
         if let engine = audioEngine {
             if isTapInstalled {
                 engine.inputNode.removeTap(onBus: 0)
@@ -372,35 +441,23 @@ public final class AudioCaptureController: NSObject {
             // Non-fatal deactivation error
         }
 
-        self.status = targetStatus
-
-        // Reset real-time power levels, preserve total recorded frame count
-        let finalMetrics = Metrics(
-            frameCount: self.totalFramesRecorded,
-            peakPower: -160.0,
-            rmsPower: -160.0,
-            elapsedSeconds: self.currentMetrics.elapsedSeconds,
-            sampleRate: self.currentMetrics.sampleRate,
-            channelCount: self.currentMetrics.channelCount
-        )
-        self.currentMetrics = finalMetrics
-
-        DispatchQueue.main.async { [weak self] in
-            guard let self = self else { return }
-            self.delegate?.audioCaptureController(self, didUpdateMetrics: finalMetrics)
-        }
+        publishStateChange()
     }
 
-    // MARK: - Allocation-Free Metering (Audio Thread Context)
-    private func processAudioBuffer(
-        _ buffer: AVAudioPCMBuffer,
-        generation: UInt64,
-        sampleRate: Double,
-        channelCount: UInt32
+    // MARK: - Allocation-Free Metering (Audio Render Context)
+    /// Real-time audio render callback processing.
+    ///
+    /// Rules:
+    /// - Mutates ONLY `context.accumulatedFrames` and `context.lastDispatchUptimeNanoseconds`.
+    /// - Reads ZERO mutable fields on `controller`.
+    /// - Rate-limits before dispatching: dispatches snapshot to `stateQueue` only when >= 250ms elapsed.
+    /// - Performs zero heap allocations, zero locks, zero sleeps, zero Foundation/disk/network I/O.
+    private static func processAudioBuffer(
+        buffer: AVAudioPCMBuffer,
+        context: MeterContext,
+        controller: AudioCaptureController,
+        stateQueue: DispatchQueue
     ) {
-        // Fast generation fence rejection without locks
-        guard generation == self.activeGeneration else { return }
-
         let frameLength = UInt64(buffer.frameLength)
         guard frameLength > 0 else { return }
 
@@ -410,7 +467,8 @@ public final class AudioCaptureController: NSObject {
         var maxSample: Float = 0.0
         var sumSquares: Float = 0.0
 
-        for i in 0..<Int(buffer.frameLength) {
+        let count = Int(buffer.frameLength)
+        for i in 0..<count {
             let sample = channelSamples[i]
             let absSample = abs(sample)
             if absSample > maxSample {
@@ -422,45 +480,80 @@ public final class AudioCaptureController: NSObject {
         let meanSquare = sumSquares / Float(buffer.frameLength)
         let rms = sqrt(meanSquare)
 
-        // Convert to dBFS
+        // Convert to dBFS (fast floating-point math)
         let peakDb: Float = (maxSample > 0.0000001) ? 20.0 * log10(maxSample) : -160.0
         let rmsDb: Float = (rms > 0.0000001) ? 20.0 * log10(rms) : -160.0
 
+        // Increment tap-local accumulator
+        let (newAccum, overflow) = context.accumulatedFrames.addingReportingOverflow(frameLength)
+        context.accumulatedFrames = overflow ? UInt64.max : newAccum
+
         let now = DispatchTime.now().uptimeNanoseconds
 
-        // Dispatch snapshot update to stateQueue to update counters and rate-limited UI
-        stateQueue.async { [weak self] in
-            guard let self = self else { return }
-            guard generation == self.activeGeneration else { return }
+        // Rate-limit check: ~4Hz (250ms = 250_000_000 ns)
+        // Eliminates dispatching ~47 tasks/sec to stateQueue
+        if now - context.lastDispatchUptimeNanoseconds >= 250_000_000 {
+            context.lastDispatchUptimeNanoseconds = now
 
-            self.totalFramesRecorded += frameLength
+            let elapsedSeconds = Double(now - context.startUptimeNanoseconds) / 1_000_000_000.0
 
-            // Rate-limit UI dispatch to ~4Hz (every 250_000_000 ns)
-            if now - self.lastMetricsDispatchTime > 250_000_000 {
-                self.lastMetricsDispatchTime = now
+            // Create immutable snapshot with this tap's immutable generation token
+            let snapshot = CaptureLifecycleGate.MetricSnapshot(
+                generation: context.generation,
+                frameIncrement: context.accumulatedFrames,
+                peakPower: max(peakDb, -160.0),
+                rmsPower: max(rmsDb, -160.0),
+                elapsedSeconds: elapsedSeconds,
+                sampleRate: context.sampleRate,
+                channelCount: context.channelCount
+            )
 
-                var elapsed: Double = 0.0
-                if let start = self.recordingStartTime {
-                    elapsed = Double(now - start.uptimeNanoseconds) / 1_000_000_000.0
-                }
+            // Reset tap accumulator since these frames are now handed over in snapshot
+            context.accumulatedFrames = 0
 
-                let metrics = Metrics(
-                    frameCount: self.totalFramesRecorded,
-                    peakPower: max(peakDb, -160.0),
-                    rmsPower: max(rmsDb, -160.0),
-                    elapsedSeconds: elapsed,
-                    sampleRate: sampleRate,
-                    channelCount: channelCount
-                )
-                self.currentMetrics = metrics
-
-                DispatchQueue.main.async { [weak self] in
-                    guard let self = self else { return }
-                    // UI check against activeGeneration before publishing
-                    guard generation == self.activeGeneration else { return }
-                    self.delegate?.audioCaptureController(self, didUpdateMetrics: metrics)
-                }
+            // Dispatch immutable snapshot to serial executor
+            stateQueue.async { [weak controller] in
+                guard let controller = controller else { return }
+                controller.handleMetricSnapshot(snapshot)
             }
+        }
+    }
+
+    /// Executed exclusively on `stateQueue` to accept snapshot and update UI
+    private func handleMetricSnapshot(_ snapshot: CaptureLifecycleGate.MetricSnapshot) {
+        let accepted = lifecycleGate.acceptMetricSnapshot(snapshot)
+        guard accepted else { return }
+
+        let latestMetrics = lifecycleGate.currentMetrics
+        let currentGen = lifecycleGate.activeGeneration
+
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            // Verify generation hasn't changed before updating published metrics & UI
+            guard self._publishedGeneration == currentGen else { return }
+            self._publishedMetrics = latestMetrics
+            self.delegate?.audioCaptureController(self, didUpdateMetrics: latestMetrics)
+        }
+    }
+
+    /// Updates main-thread published values and notifies delegate
+    /// MUST be called on `stateQueue`.
+    private func publishStateChange() {
+        let newState = lifecycleGate.state
+        let newMetrics = lifecycleGate.currentMetrics
+        let newGen = lifecycleGate.activeGeneration
+
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            let stateChanged = (self._publishedStatus != newState)
+            self._publishedStatus = newState
+            self._publishedMetrics = newMetrics
+            self._publishedGeneration = newGen
+
+            if stateChanged {
+                self.delegate?.audioCaptureController(self, didUpdateStatus: newState)
+            }
+            self.delegate?.audioCaptureController(self, didUpdateMetrics: newMetrics)
         }
     }
 

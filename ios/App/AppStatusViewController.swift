@@ -349,6 +349,11 @@ class AppStatusViewController: UIViewController, AudioCaptureDelegate, WarmIPCSe
             micStatusLabel.textColor = .systemOrange
             startMicButton.isEnabled = false
             stopMicButton.isEnabled = false
+        case .starting:
+            micStatusLabel.text = "Microphone Status: STARTING ENGINE..."
+            micStatusLabel.textColor = .systemOrange
+            startMicButton.isEnabled = false
+            stopMicButton.isEnabled = true
         }
     }
 
