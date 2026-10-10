@@ -317,6 +317,52 @@ func testCaptureLifecycleGateSuite() {
         }
     }
 
+    // Scenario 9: Generation-bound conditional stop semantics (AudioCaptureController.stopCaptureIfGeneration backing decision).
+    // The conditional stop compares the REAL CaptureLifecycleGate.activeGeneration and
+    // state on the serialized state queue; mismatched or already-stopped generations no-op.
+    do {
+        let gate = CaptureLifecycleGate()
+
+        // Nothing active: no-op for any generation
+        assertTest(!gate.stopIfGeneration(expectedGeneration: 1), "Conditional stop no-ops when idle")
+
+        // Session A start: gate generation 1 starting
+        guard case .success(let genA) = gate.issueStartToken() else { fatalError("Failed to issue genA") }
+        assertTest(genA == 1, "Session A generation 1")
+        assertTest(gate.isCaptureActiveAtGeneration(genA), "Generation 1 active during starting")
+        _ = gate.acknowledgeStartSuccess(for: genA)
+        assertTest(gate.state == .recording, "Session A genuinely recording")
+
+        // Stale-success cleanup targets exactly generation 1: stops only A
+        assertTest(gate.stopIfGeneration(expectedGeneration: genA), "Conditional stop executes for the exact active generation")
+        assertTest(gate.state == .stopped, "Generation A stopped by conditional stop")
+
+        // Already-stopped generation: repeat conditional stop is a strict no-op (no generation replay)
+        assertTest(!gate.stopIfGeneration(expectedGeneration: genA), "Repeated conditional stop for stopped generation no-ops")
+
+        // Session B start: gate generation 2
+        guard case .success(let genB) = gate.issueStartToken() else { fatalError("Failed to issue genB") }
+        _ = gate.acknowledgeStartSuccess(for: genB)
+        assertTest(gate.state == .recording, "Session B genuinely recording")
+
+        // Late stale conditional stop for A's generation must NOT touch B
+        assertTest(!gate.stopIfGeneration(expectedGeneration: genA), "Conditional stop for stale A generation no-ops while B active")
+        assertTest(gate.state == .recording && gate.activeGeneration == genB, "Session B untouched by stale A conditional stop")
+
+        // Conditional stop for B's own generation stops exactly B
+        assertTest(gate.stopIfGeneration(expectedGeneration: genB), "Conditional stop executes for B's exact generation")
+        assertTest(gate.state == .stopped, "Session B stopped by its own conditional stop")
+
+        // Mid-start (starting) generation is also genuinely active for conditional stop
+        guard case .success(let genC) = gate.issueStartToken() else { fatalError("Failed to issue genC") }
+        assertTest(gate.isCaptureActiveAtGeneration(genC), "Starting-state generation counts as genuine active")
+        assertTest(gate.stopIfGeneration(expectedGeneration: genC), "Conditional stop can abort an in-flight starting generation")
+        assertTest(gate.state == .stopped, "Starting generation aborted")
+
+        // Future generation never matches
+        assertTest(!gate.stopIfGeneration(expectedGeneration: genC + 1), "Never-stopped future generation no-ops")
+    }
+
     print("[TEST] All CaptureLifecycleGate unit tests PASSED successfully.")
 }
 

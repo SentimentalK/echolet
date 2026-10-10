@@ -121,15 +121,15 @@ public final class WarmIPCService {
     }
 
     // MARK: - Manual Audio Capture Ownership Bridge
-    public func registerManualStartCapture(completion: @escaping (Bool) -> Void) {
+    public func registerManualStartCapture(completion: @escaping (Bool, String?) -> Void) {
         ipcQueue.async { [weak self] in
             guard let self = self else {
-                completion(false)
+                completion(false, "warm ipc unavailable")
                 return
             }
-            let (shouldProceed, effects) = self.flowCoordinator.handleManualStartCaptureInitiated()
+            let (shouldProceed, busyReason, effects) = self.flowCoordinator.handleManualStartCaptureInitiated()
             self.executeFlowEffects(effects, triggeringRequestId: nil, triggeringSessionId: nil, triggeringSequence: nil)
-            completion(shouldProceed)
+            completion(shouldProceed, shouldProceed ? nil : busyReason)
         }
     }
 
@@ -239,12 +239,18 @@ public final class WarmIPCService {
                 AudioCaptureController.shared.startCapture { [weak self] result in
                     guard let self = self else { return }
                     self.ipcQueue.async {
-                        let (startEffects, cleanupNeeded) = self.flowCoordinator.handleHardwareStartCompletion(
+                        let (startEffects, startCleanup) = self.flowCoordinator.handleHardwareStartCompletion(
                             token: token,
                             result: result.mapError { $0 as Error }
                         )
-                        if cleanupNeeded {
-                            AudioCaptureController.shared.stopCapture()
+                        if let cleanup = startCleanup {
+                            // Generation-bound conditional cleanup: stops ONLY the
+                            // stale start's native capture generation. A newer
+                            // keyboard/manual generation (or an already-stopped
+                            // generation) is never touched.
+                            AudioCaptureController.shared.stopCaptureIfGeneration(
+                                expectedGeneration: cleanup.nativeGeneration
+                            )
                         }
                         self.executeFlowEffects(
                             startEffects,
@@ -255,21 +261,18 @@ public final class WarmIPCService {
                     }
                 }
 
-            case .stopHardwareKeyboard:
-                // Hardware stop completion callback reenters ipcQueue
+            case .stopHardwareKeyboard(let directive):
+                // Hardware stop completion callback reenters ipcQueue carrying the
+                // exact stop directive identity for ACK correlation.
                 AudioCaptureController.shared.stopCapture { [weak self] in
                     guard let self = self else { return }
                     self.ipcQueue.async {
-                        let stopEffects = self.flowCoordinator.handleHardwareStopCompletion(
-                            stoppedRequestId: triggeringRequestId,
-                            stoppedSessionId: triggeringSessionId,
-                            stoppedSequence: triggeringSequence
-                        )
+                        let stopEffects = self.flowCoordinator.handleHardwareStopCompletion(directive: directive)
                         self.executeFlowEffects(
                             stopEffects,
-                            triggeringRequestId: triggeringRequestId,
-                            triggeringSessionId: triggeringSessionId,
-                            triggeringSequence: triggeringSequence
+                            triggeringRequestId: directive.requestId,
+                            triggeringSessionId: directive.sessionId,
+                            triggeringSequence: directive.sequence
                         )
                     }
                 }

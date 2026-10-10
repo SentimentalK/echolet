@@ -306,9 +306,16 @@ class AppStatusViewController: UIViewController, AudioCaptureDelegate, WarmIPCSe
                     self.micArmSwitch.isOn = true
                     WarmIPCService.shared.setUserArmMicrophone(true)
                     // Register manual capture owner with WarmIPCService
-                    WarmIPCService.shared.registerManualStartCapture { shouldProceed in
+                    WarmIPCService.shared.registerManualStartCapture { shouldProceed, busyReason in
                         if shouldProceed {
                             AudioCaptureController.shared.startCapture()
+                        } else {
+                            if let reason = busyReason {
+                                self.micStatusLabel.text = "Microphone Status: BUSY — \(reason). Retry after the keyboard session stops."
+                            } else {
+                                self.micStatusLabel.text = "Microphone Status: BUSY — keyboard capture is active. Retry after it stops."
+                            }
+                            self.micStatusLabel.textColor = .systemOrange
                         }
                     }
                 } else {

@@ -415,6 +415,33 @@ public final class AudioCaptureController: NSObject {
         }
     }
 
+    // MARK: - Generation-Bound Conditional Stop
+    /// Conditional cleanup for stale start completions.
+    ///
+    /// Decides against the REAL `CaptureLifecycleGate.activeGeneration` and state on
+    /// the SAME serialized `stateQueue` that owns all stop/start mutations — never
+    /// against the main-thread published generation. The compare-and-stop is atomic
+    /// with respect to any newer engine start or stop:
+    /// - If the gate is genuinely active (starting/recording) at exactly
+    ///   `expectedGeneration`, the hardware stops (tap removed, engine stopped,
+    ///   session deactivated) and completion(true) fires.
+    /// - If a newer generation (session B, manual) now owns the hardware, or the
+    ///   expected capture already stopped (generation advanced past expectation),
+    ///   this is a strict NO-OP and completion(false) fires.
+    public func stopCaptureIfGeneration(expectedGeneration: UInt64, completion: ((Bool) -> Void)? = nil) {
+        stateQueue.async { [weak self] in
+            guard let self = self else {
+                completion?(false)
+                return
+            }
+            let stopped = self.lifecycleGate.stopIfGeneration(expectedGeneration: expectedGeneration)
+            if stopped {
+                self.stopInternal(targetStatus: .stopped)
+            }
+            completion?(stopped)
+        }
+    }
+
     /// Internal synchronous stop executed exclusively on `stateQueue`.
     private func stopInternal(targetStatus: Status) {
         // Advance generation on lifecycle gate first so any in-flight callbacks/snapshots are instantly fenced

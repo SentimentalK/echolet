@@ -7,6 +7,13 @@ func assertFlow(_ condition: Bool, _ message: String) {
     }
 }
 
+func firstStopDirective(_ effects: [WarmCaptureFlowCoordinator.FlowEffect]) -> WarmCaptureFlowCoordinator.HardwareStopDirective? {
+    for effect in effects {
+        if case .stopHardwareKeyboard(let directive) = effect { return directive }
+    }
+    return nil
+}
+
 func testWarmCaptureFlowSuite() {
     print("[TEST] Running pure Swift WarmCaptureFlowCoordinator unit tests...")
 
@@ -105,11 +112,19 @@ func testWarmCaptureFlowSuite() {
         assertFlow(coordinator.activeSessionToken == nil, "Active session cleared")
 
         // Now delayed hardware start success arrives for tokenA
-        struct DummyError: Error {}
-        let (staleEffects, cleanupNeeded) = coordinator.handleHardwareStartCompletion(token: tokenA, result: .success(10))
+        let (staleEffects, staleCleanup) = coordinator.handleHardwareStartCompletion(token: tokenA, result: .success(10))
         assertFlow(staleEffects.isEmpty, "Stale hardware start callback produces NO response or admission effects")
-        assertFlow(cleanupNeeded == true, "Cleanup needed to ensure hardware engine is halted")
+        assertFlow(staleCleanup != nil && staleCleanup!.nativeGeneration == 10, "Cleanup directive carries the stale start's exact native generation")
+        assertFlow(staleCleanup?.token == tokenA, "Cleanup directive carries the exact stale session token")
         assertFlow(coordinator.activeSessionToken == nil, "Active session stays nil")
+        assertFlow(coordinator.pendingStopAcknowledgmentDirective != nil, "Admitted STOP still awaits its exact ACK")
+
+        // Stop completion carries exact stop directive; valid current STOP still ACKs completed
+        let stopDirective = firstStopDirective(stopEffects)
+        assertFlow(stopDirective != nil, "Admitted stop issued an exact directive")
+        let ackEffects = coordinator.handleHardwareStopCompletion(directive: stopDirective!)
+        assertFlow(ackEffects.contains { if case .writeResponse(_, let rq, _, let st, _, _, _) = $0, rq == "req-stop-A", st == .completed { return true } else { return false } }, "Valid current STOP ACK acknowledges its own request after hardware stop")
+        assertFlow(coordinator.pendingStopAcknowledgmentDirective == nil, "Pending stop ACK consumed exactly once")
     } catch {
         assertFlow(false, "Case 3 threw: \(error)")
     }
@@ -145,15 +160,28 @@ func testWarmCaptureFlowSuite() {
         )
         let replaceEffects = coordinator.handleIncomingRequest(reqStartB)
         assertFlow(coordinator.isWaitingForHardwareStopToStartReplacement == true, "Waiting for hardware stop of A")
-        assertFlow(replaceEffects.contains { if case .stopHardwareKeyboard = $0 { return true } else { return false } }, "Hardware stop requested for A")
+        let replaceDirective = firstStopDirective(replaceEffects)
+        assertFlow(replaceDirective != nil, "Hardware stop requested for A")
+        assertFlow(replaceEffects.contains { if case .stopHardwareKeyboard = $0 { return true } else { return false } }, "Hardware stop effect present for A")
         assertFlow(coordinator.pendingStartToken == nil, "B not yet pending start until Stop(A) finishes")
 
-        // Hardware stop of A finishes
-        let stopAEffects = coordinator.handleHardwareStopCompletion(
-            stoppedRequestId: "req-start-A",
-            stoppedSessionId: "session-A",
-            stoppedSequence: 1
+        // Forged stale stop completion (same session A identity, wrong operation id)
+        // must NOT release the replacement barrier or ACK A.
+        let forgedDirective = WarmCaptureFlowCoordinator.HardwareStopDirective(
+            appEpoch: epoch,
+            sessionId: "session-A",
+            intentSequence: 1,
+            requestId: "req-start-A",
+            sequence: 1,
+            operationId: replaceDirective!.operationId &+ 7,
+            reason: "stale_stop_cannot_release_barrier"
         )
+        let forgedEffects = coordinator.handleHardwareStopCompletion(directive: forgedDirective)
+        assertFlow(forgedEffects.isEmpty, "Forged stale stop directive produces ZERO effects")
+        assertFlow(coordinator.isWaitingForHardwareStopToStartReplacement == true, "Barrier still held for forged completion")
+
+        // Hardware stop of A finishes with the EXACT directive issued
+        let stopAEffects = coordinator.handleHardwareStopCompletion(directive: replaceDirective!)
         assertFlow(coordinator.isWaitingForHardwareStopToStartReplacement == false, "Wait complete")
         assertFlow(stopAEffects.contains { if case .requestPermission(let t) = $0, t.sessionId == "session-B" { return true } else { return false } }, "Now B permission is initiated")
         assertFlow(!stopAEffects.contains { if case .writeResponse(let s, _, _, let st, _, _, _) = $0, s == "session-A", st == .completed { return true } else { return false } }, "Old stop A cannot emit completed response when B is pending/active")
@@ -192,8 +220,9 @@ func testWarmCaptureFlowSuite() {
         _ = coordinator.setUserArmMicrophone(true)
 
         // Manual test started in App
-        let (proceed, _) = coordinator.handleManualStartCaptureInitiated()
+        let (proceed, proceedReason, _) = coordinator.handleManualStartCaptureInitiated()
         assertFlow(proceed == true, "Manual start allowed")
+        assertFlow(proceedReason == nil, "No busy reason when keyboard idle")
         assertFlow(coordinator.captureOwner == .manualTest, "Owner is manualTest")
 
         // Keyboard sends START while manual recording active
@@ -265,7 +294,206 @@ func testWarmCaptureFlowSuite() {
         assertFlow(false, "Case 8 threw: \(error)")
     }
 
+    // Case 9: A async Start succeeds late AFTER B is already recording => no Stop B, no response overwrite.
+    do {
+        let gate = try EcholetAdmission.Gate(appEpoch: epoch, coldBootArmed: false)
+        let coordinator = WarmCaptureFlowCoordinator(appEpoch: epoch, admissionGate: gate)
+        _ = coordinator.setUserArmMicrophone(true)
+
+        // Session A start admitted; permission granted; hardware start in flight
+        let reqA = try EcholetIPC.KeyboardRequest(appEpoch: epoch, intentSequence: 1, sessionId: "session-A", sequence: 1, requestId: "req-A", command: .start)
+        _ = coordinator.handleIncomingRequest(reqA)
+        let tokenA = coordinator.pendingStartToken!
+        _ = coordinator.handlePermissionCallback(token: tokenA, granted: true)
+
+        // B replaces A: native Stop(A) barrier before B starts
+        let reqB = try EcholetIPC.KeyboardRequest(appEpoch: epoch, intentSequence: 2, sessionId: "session-B", sequence: 1, requestId: "req-B", command: .start)
+        let replaceEffects = coordinator.handleIncomingRequest(reqB)
+        let barrierDirective = firstStopDirective(replaceEffects)
+        assertFlow(barrierDirective != nil, "Replacement barrier stop issued for A")
+        _ = coordinator.handleHardwareStopCompletion(directive: barrierDirective!)
+
+        // B permission + start success => B recording (native generation 7)
+        let tokenB = coordinator.pendingStartToken!
+        assertFlow(tokenB.sessionId == "session-B", "B now pending")
+        _ = coordinator.handlePermissionCallback(token: tokenB, granted: true)
+        let _ = coordinator.handleHardwareStartCompletion(token: tokenB, result: .success(7))
+        assertFlow(coordinator.activeSessionToken?.sessionId == "session-B", "B is active/recording")
+
+        // A's hardware start completes LATE with success (native generation 1):
+        // stale A must not stop B's engine and must not write any response.
+        let (staleEffects, staleCleanup) = coordinator.handleHardwareStartCompletion(token: tokenA, result: .success(1))
+        assertFlow(!staleEffects.contains { if case .stopHardwareKeyboard = $0 { return true } else { return false } }, "Stale A success emits NO keyboard hardware stop effect")
+        assertFlow(!staleEffects.contains { if case .writeResponse = $0 { return true } else { return false } }, "Stale A success writes NO snapshot")
+        assertFlow(!staleEffects.contains { if case .stopHardwareManual = $0 { return true } else { return false } }, "Stale A success must not stop manual capture")
+        assertFlow(staleCleanup != nil && staleCleanup!.nativeGeneration == 1, "Cleanup directive bound to stale A generation 1")
+        assertFlow(staleCleanup?.token == tokenA, "Cleanup directive bound to stale A token")
+        assertFlow(coordinator.activeSessionToken?.sessionId == "session-B", "B remains the active session")
+        _ = consumeCleanupGeneration(staleCleanup) // bounds native generation to conditional stop in executor
+    } catch {
+        assertFlow(false, "Case 9 threw: \(error)")
+    }
+
+    // Case 10: manual App Start while keyboard hardware is active / permission pending => BUSY, no owner transfer.
+    do {
+        let gate = try EcholetAdmission.Gate(appEpoch: epoch, coldBootArmed: false)
+        let coordinator = WarmCaptureFlowCoordinator(appEpoch: epoch, admissionGate: gate)
+        _ = coordinator.setUserArmMicrophone(true)
+
+        // Keyboard permission pending
+        let reqK = try EcholetIPC.KeyboardRequest(appEpoch: epoch, intentSequence: 1, sessionId: "session-K", sequence: 1, requestId: "req-K", command: .start)
+        _ = coordinator.handleIncomingRequest(reqK)
+        let tokenK = coordinator.pendingStartToken!
+        assertFlow(coordinator.captureOwner.captureOwnerSessionId == "session-K", "Keyboard owns pending capture")
+
+        let (proceed1, busy1, effects1) = coordinator.handleManualStartCaptureInitiated()
+        assertFlow(proceed1 == false, "Manual start rejected while keyboard start pending")
+        assertFlow(busy1 != nil, "BUSY reason surfaced")
+        assertFlow(effects1.contains { if case .notifyBlocked = $0 { return true } else { return false } }, "User-visible BUSY notification emitted")
+        assertFlow(!effects1.contains { if case .stopHardwareKeyboard = $0 { return true } else { return false } }, "BUSY rejection must NOT stop keyboard hardware")
+        assertFlow(!effects1.contains { if case .stopHardwareManual = $0 { return true } else { return false } }, "BUSY rejection must NOT stop anything manual")
+        assertFlow(coordinator.captureOwner.captureOwnerSessionId == "session-K", "No owner transfer: keyboard still owns pending capture")
+        assertFlow(coordinator.pendingStartToken == tokenK, "Keyboard pending token untouched")
+
+        // Keyboard hardware now actively recording
+        _ = coordinator.handlePermissionCallback(token: tokenK, granted: true)
+        let (_, _) = coordinator.handleHardwareStartCompletion(token: tokenK, result: .success(3))
+        assertFlow(coordinator.activeSessionToken?.sessionId == "session-K", "Keyboard K actively recording")
+
+        let (proceed2, busy2, _) = coordinator.handleManualStartCaptureInitiated()
+        assertFlow(proceed2 == false, "Manual start rejected while keyboard actively recording")
+        assertFlow(busy2 != nil, "BUSY reason surfaced while recording")
+        assertFlow(coordinator.captureOwner.captureOwnerSessionId == "session-K", "Owner transfer refused during recording")
+
+        // Keyboard STOP truly completes; then manual retry succeeds
+        let reqStopK = try EcholetIPC.KeyboardRequest(appEpoch: epoch, intentSequence: 2, sessionId: "session-K", sequence: 2, requestId: "req-stop-K", command: .stop)
+        let stopEffects = coordinator.handleIncomingRequest(reqStopK)
+        let stopDirective = firstStopDirective(stopEffects)
+        assertFlow(stopDirective != nil, "Keyboard stop directive issued")
+        let ackEffects = coordinator.handleHardwareStopCompletion(directive: stopDirective!)
+        assertFlow(ackEffects.contains { if case .writeResponse(_, _, _, let st, _, _, _) = $0, st == .completed { return true } else { return false } }, "Keyboard stop ACK completed")
+
+        let (proceed3, busy3, _) = coordinator.handleManualStartCaptureInitiated()
+        assertFlow(proceed3 == true, "Manual retry allowed after keyboard STOP truly completed")
+        assertFlow(busy3 == nil, "No BUSY after keyboard stop")
+    } catch {
+        assertFlow(false, "Case 10 threw: \(error)")
+    }
+
+    // Case 11: stale STOP completion (exact-ACK + intent fencing) cannot overwrite latest response.
+    do {
+        let gate = try EcholetAdmission.Gate(appEpoch: epoch, coldBootArmed: false)
+        let coordinator = WarmCaptureFlowCoordinator(appEpoch: epoch, admissionGate: gate)
+        _ = coordinator.setUserArmMicrophone(true)
+
+        // Session A admission + recording
+        let reqA = try EcholetIPC.KeyboardRequest(appEpoch: epoch, intentSequence: 1, sessionId: "session-A", sequence: 1, requestId: "req-A", command: .start)
+        _ = coordinator.handleIncomingRequest(reqA)
+        let tokenA = coordinator.pendingStartToken!
+        _ = coordinator.handlePermissionCallback(token: tokenA, granted: true)
+        _ = coordinator.handleHardwareStartCompletion(token: tokenA, result: .success(5))
+        assertFlow(coordinator.activeSessionToken?.sessionId == "session-A", "A recording")
+
+        // Legit STOP(A, intent 2) admitted; stop ACK awaits hardware completion
+        let reqStopOld = try EcholetIPC.KeyboardRequest(appEpoch: epoch, intentSequence: 2, sessionId: "session-A", sequence: 2, requestId: "req-stop-old", command: .stop)
+        let stopOldEffects = coordinator.handleIncomingRequest(reqStopOld)
+        let stopOldDirective = firstStopDirective(stopOldEffects)
+        assertFlow(stopOldDirective != nil, "Old stop directive registered")
+        assertFlow(coordinator.pendingStopAcknowledgmentDirective == stopOldDirective, "Old stop ACK directive is pending")
+
+        // A NEW intent (session B, intent 3) replaces A: replacement barrier stop pending
+        let reqB = try EcholetIPC.KeyboardRequest(appEpoch: epoch, intentSequence: 3, sessionId: "session-B", sequence: 1, requestId: "req-B", command: .start)
+        let replaceEffects = coordinator.handleIncomingRequest(reqB)
+        let barrierDirective = firstStopDirective(replaceEffects)
+        assertFlow(barrierDirective != nil, "Replacement barrier stop issued for A")
+        assertFlow(coordinator.pendingReplacementStartToken?.sessionId == "session-B", "B pending behind barrier")
+
+        // The old STOP(A) completes while B is pending: must NOT ACK/overwrite the
+        // newer intent's response slot (intent fence: B intent 3 > stop intent 2).
+        let oldStopLateEffects = coordinator.handleHardwareStopCompletion(directive: stopOldDirective!)
+        assertFlow(oldStopLateEffects.isEmpty, "Late STOP(A) completion cannot write completed while newer intent pending")
+        assertFlow(coordinator.pendingStopAcknowledgmentDirective == stopOldDirective, "Old stop ACK directive NOT consumed by fenced completion")
+
+        // Forged completion reusing the SAME sessionId with a higher intent and unknown opId => no ACK
+        let forgedReuse = WarmCaptureFlowCoordinator.HardwareStopDirective(
+            appEpoch: epoch,
+            sessionId: "session-A",
+            intentSequence: 9,
+            requestId: "req-forged-s",
+            sequence: 3,
+            operationId: (stopOldDirective?.operationId ?? 0) &+ 9,
+            reason: "forged_same_session_reuse"
+        )
+        let forgedReuseEffects = coordinator.handleHardwareStopCompletion(directive: forgedReuse)
+        assertFlow(forgedReuseEffects.isEmpty, "Forged same-session higher-intent STOP completion cannot ACK")
+        assertFlow(coordinator.pendingStopAcknowledgmentDirective == stopOldDirective, "Old stop ACK directive only consumed by exact identity")
+
+        // Releasing the barrier requires the EXACT replacement stop directive
+        let barrierEffects = coordinator.handleHardwareStopCompletion(directive: barrierDirective!)
+        assertFlow(barrierEffects.contains { if case .requestPermission(let t) = $0, t.sessionId == "session-B" { return true } else { return false } }, "B permission starts only after exact barrier directive")
+        assertFlow(coordinator.pendingReplacementStopDirective == nil, "Barrier directive consumed")
+    } catch {
+        assertFlow(false, "Case 11 threw: \(error)")
+    }
+
+    // Case 12: cancellation generation overflow is terminal fail-closed (no new starts, no old token replay).
+    do {
+        let gate = try EcholetAdmission.Gate(appEpoch: epoch, coldBootArmed: false)
+        let coordinator = WarmCaptureFlowCoordinator(appEpoch: epoch, admissionGate: gate)
+        _ = coordinator.setUserArmMicrophone(true)
+
+        coordinator.debugForceCancellationGenerationOverflowForCLITests()
+        assertFlow(coordinator.monotonicCancelGeneration == UInt64.max, "Generation counter pinned at UInt64.max")
+        assertFlow(coordinator.isCancellationGenerationFailClosed == true, "Overflow latched terminal fail-closed")
+
+        // No further mic starts
+        let reqStart = try EcholetIPC.KeyboardRequest(appEpoch: epoch, intentSequence: 1, sessionId: "session-O", sequence: 1, requestId: "req-O", command: .start)
+        let startEffects = coordinator.handleIncomingRequest(reqStart)
+        assertFlow(coordinator.pendingStartToken == nil, "No start token minted after overflow")
+        assertFlow(startEffects.contains { if case .requestPermission = $0 { return true } else { return false } } == false, "No permission request after overflow")
+        assertFlow(startEffects.contains { if case .writeResponse(_, _, _, let st, _, _, let err) = $0, st == .blocked, err == "capture_generation_overflow_fail_closed" { return true } else { return false } }, "Start answered blocked with fail-closed error")
+
+        // Old token replay fenced: an old/equal generation token can never start the mic
+        replayTokenGuarded(coordinator)
+        assertFlow(coordinator.isCancellationGenerationFailClosed == true, "Fail-closed state persists (terminal)")
+    } catch {
+        assertFlow(false, "Case 12 threw: \(error)")
+    }
+
     print("[TEST] All WarmCaptureFlowCoordinator unit tests PASSED successfully.")
+}
+
+// Stale-cleanup executor binding: the coordinator halts nothing natively; the executor
+// performs a generation-bound conditional stop with the directive's native generation.
+func consumeCleanupGeneration(_ cleanup: WarmCaptureFlowCoordinator.HardwareStartCleanupDirective?) -> UInt64? {
+    return cleanup?.nativeGeneration
+}
+
+extension WarmCaptureFlowCoordinator.CaptureOwner {
+    var captureOwnerSessionId: String? {
+        switch self {
+        case .none: return nil
+        case .manualTest: return "manualTest"
+        case .keyboard(let sessionId, _): return sessionId
+        }
+    }
+}
+
+func replayTokenGuarded(_ coordinator: WarmCaptureFlowCoordinator) {
+    // Permission & start-completion fences refuse everything while fail-closed.
+    let token = WarmCaptureFlowCoordinator.SessionToken(
+        appEpoch: coordinator.appEpoch,
+        sessionId: "session-old",
+        intentSequence: 1,
+        requestId: "req-old",
+        sequence: 1,
+        cancelGeneration: coordinator.monotonicCancelGeneration
+    )
+    let permEffects = coordinator.handlePermissionCallback(token: token, granted: true)
+    assertFlow(permEffects.isEmpty, "No token replay: permission callback fenced fail-closed")
+    let (startEffects, cleanup) = coordinator.handleHardwareStartCompletion(token: token, result: .success(42))
+    assertFlow(startEffects.isEmpty, "No token replay: start completion fenced fail-closed")
+    assertFlow(cleanup != nil, "Stale success under fail-closed still resolves via generation-bound cleanup directive")
 }
 
 @main

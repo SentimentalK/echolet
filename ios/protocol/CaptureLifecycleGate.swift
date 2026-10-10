@@ -144,6 +144,33 @@ public final class CaptureLifecycleGate {
         return .success(activeGeneration)
     }
 
+    // MARK: - Generation-Bound Conditional Stop Decision
+    /// Pure decision backing `AudioCaptureController.stopCaptureIfGeneration`.
+    /// TRUE only when the gate holds a genuinely active capture (starting or
+    /// recording) at exactly `expectedGeneration`. Any generation mismatch or
+    /// idle/stopped/failed/interrupted state returns false (caller no-op). This is
+    /// evaluated on the same serialized state queue that owns stop/start mutations,
+    /// so the comparison and the resulting stop are atomic with respect to newer
+    /// session starts and stops.
+    public func isCaptureActiveAtGeneration(_ expectedGeneration: UInt64) -> Bool {
+        guard activeGeneration == expectedGeneration else {
+            return false
+        }
+        return state == .starting || state == .recording
+    }
+
+    /// Performs the condition'd stop: stops only if `isCaptureActiveAtGeneration`
+    /// holds for `expectedGeneration`, otherwise no-ops without advancing the
+    /// generation. Returns true when the stop actually executed on this generation.
+    @discardableResult
+    public func stopIfGeneration(expectedGeneration: UInt64, targetState: State = .stopped) -> Bool {
+        guard isCaptureActiveAtGeneration(expectedGeneration) else {
+            return false
+        }
+        stop(targetState: targetState)
+        return true
+    }
+
     // MARK: - Hardware Acknowledgment & Activation
     /// Called when native engine/session start returns successfully for the given generation token.
     public func acknowledgeStartSuccess(for generation: UInt64) -> Result<UInt64, LifecycleError> {
