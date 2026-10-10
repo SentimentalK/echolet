@@ -8,11 +8,14 @@
 //! They render immutable projected [`ControlSurfaceState`] and emit explicit [`SurfaceAction`].
 
 pub mod control_surface;
+#[cfg(not(target_os = "android"))]
 pub mod desktop;
 
 pub use control_surface::{
-    build_control_surface_state, dispatch_surface_action, format_bytes, project_runtime_state,
+    build_control_surface_state, format_bytes, project_runtime_state,
     ControlSurfaceState, DownloadPhase, DownloadPresentation, LanguageOptionPresentation,
     ModelGroupPresentation, ModelLanguagePresentation, ModelPresentation, ModelPrimaryAction,
     RuntimeState, SurfaceAction,
 };
+#[cfg(not(target_os = "android"))]
+pub use control_surface::dispatch_surface_action;

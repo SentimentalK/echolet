@@ -1,10 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- Phase 0-B: microphone for the IME voice keyboard. No INTERNET and no
-         foreground-service permission: audio stays on-device, mic is held only
-         while the Echolet keyboard is visible and Listening. -->
+    <!-- Phase 0-B: microphone for the IME voice keyboard. Mic is held only
+         while the Echolet keyboard is visible and Listening.
+         Phase 1-B: INTERNET permission solely for user-requested model downloads
+         from the Expanded keyboard browser. Audio and ASR dictation stay strictly
+         on-device and offline. -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.INTERNET" />
 
     <application
         android:allowBackup="false"

@@ -54,4 +54,49 @@ object NativeBridge {
      * final text is appended and history stays off in this slice.
      */
     external fun nativeClose(handle: Long)
+
+    // -------------------------------------------------------------------------
+    // Phase 1-B: Model Management & Switching Surface
+    // -------------------------------------------------------------------------
+
+    /**
+     * Initializes the Android model owner with the app's models directory and
+     * files directory (for selected_model.txt persistence).
+     */
+    external fun nativeInitModelManager(modelsDir: String, filesDir: String)
+
+    /**
+     * Obtains the JSON representation of [ModelSnapshot] containing the 4 catalog
+     * models grouped by language/capability with their installation and download
+     * statuses.
+     */
+    external fun nativeModelSnapshot(): String
+
+    /**
+     * Selects a model by ID. Returns true if selection changed/persisted, false if rejected.
+     */
+    external fun nativeSelectModel(modelId: String): Boolean
+
+    /**
+     * Installs a model from an archive (.tar.zst or .tar.bz2) downloaded by Kotlin.
+     * Verifies SHA256 integrity, extracts atomically, and validates model files.
+     */
+    external fun nativeInstallModelFromArchive(modelId: String, archivePath: String): Boolean
+
+    /**
+     * Updates download progress in the model manager so nativeModelSnapshot
+     * accurately reflects in-flight download bytes and phase.
+     */
+    external fun nativeSetDownloadProgress(
+        modelId: String,
+        downloadedBytes: Long,
+        totalBytes: Long,
+        phase: String,
+    )
+
+    /**
+     * Returns the absolute filesystem directory path of the currently selected model,
+     * or null if no valid installed model is selected.
+     */
+    external fun nativeGetSelectedModelDir(): String?
 }

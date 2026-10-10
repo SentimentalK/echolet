@@ -91,9 +91,18 @@ class ImeSessionController internal constructor(
         icProvider: () -> InputConnection?,
     ) : this(
         dirProvider = {
-            val base = context.getExternalFilesDir("models")
-                ?: throw IllegalStateException("app-specific external files dir unavailable")
-            java.io.File(base, "bilingual-zh-en").absolutePath
+            val selectedDir = try {
+                NativeBridge.nativeGetSelectedModelDir()
+            } catch (_: Throwable) {
+                null
+            }
+            if (selectedDir != null && java.io.File(selectedDir).isDirectory) {
+                selectedDir
+            } else {
+                val base = context.getExternalFilesDir("models")
+                    ?: throw IllegalStateException("app-specific external files dir unavailable")
+                java.io.File(base, "bilingual-zh-en").absolutePath
+            }
         },
         model = ImeSessionModel(),
         onState = onState,
@@ -105,7 +114,18 @@ class ImeSessionController internal constructor(
         lane = Executors.newSingleThreadExecutor { r ->
             Thread(r, "echolet-ime-lane").apply { isDaemon = true }
         },
-    )
+    ) {
+        // Initialize Rust ModelOwner on creation
+        try {
+            val base = context.getExternalFilesDir("models")
+            val filesDir = context.filesDir
+            if (base != null && filesDir != null) {
+                NativeBridge.nativeInitModelManager(base.absolutePath, filesDir.absolutePath)
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "Failed to initialize NativeBridge model manager", t)
+        }
+    }
 
     /** The lease-owned generation's InputConnection + composition owner. */
     private class ActiveLease(

@@ -30,6 +30,7 @@ import java.io.File
 class EcholetInputMethodService : InputMethodService() {
 
     private lateinit var controller: ImeSessionController
+    private lateinit var downloadManager: ModelDownloadManager
     private val presenter = ImeKeyboardPresenter(onSetupRequested = ::openSetupActivity)
 
     /** Readiness snapshot, NEVER re-derived on render/toggle (Design D). */
@@ -56,6 +57,15 @@ class EcholetInputMethodService : InputMethodService() {
             onState = { state, text -> render(state, text) },
             icProvider = { currentInputConnection },
         )
+        downloadManager = ModelDownloadManager(
+            applicationContext,
+            onProgressOrStatusChanged = {
+                runOnUi {
+                    refreshReadiness()
+                    refreshModelSnapshot()
+                }
+            },
+        )
         controller.onServiceCreated()
     }
 
@@ -75,6 +85,19 @@ class EcholetInputMethodService : InputMethodService() {
     }
 
     private fun modelStaged(): Boolean {
+        val selectedDir = try {
+            NativeBridge.nativeGetSelectedModelDir()
+        } catch (_: Throwable) {
+            null
+        }
+        if (selectedDir != null) {
+            val dir = File(selectedDir)
+            if (dir.isDirectory) {
+                val hasModelJson = File(dir, "model.json").let { it.exists() && it.length() > 0L }
+                val hasTokens = File(dir, "tokens.txt").let { it.exists() && it.length() > 0L }
+                if (hasModelJson && hasTokens) return true
+            }
+        }
         val base = getExternalFilesDir("models") ?: return false
         val dir = File(base, "bilingual-zh-en")
         val required =
@@ -98,6 +121,16 @@ class EcholetInputMethodService : InputMethodService() {
             modelStaged = modelStaged(),
             nativeReady = nativeLibrariesLoadable(),
         )
+    }
+
+    private fun refreshModelSnapshot() {
+        try {
+            val json = NativeBridge.nativeModelSnapshot()
+            val parsed = ModelSnapshotUi.parseJson(json)
+            applyPlan(presenter.updateModelSnapshot(parsed))
+        } catch (t: Throwable) {
+            android.util.Log.w("EcholetIme", "Failed to refresh model snapshot", t)
+        }
     }
 
     // ------------------------------------------------------------- input view
@@ -288,6 +321,146 @@ class EcholetInputMethodService : InputMethodService() {
             prereqCard.addView(textView(line.body, 13f, COLOR_MUTED))
         }
         body.addView(prereqCard)
+
+        // Phase 1-B: Model Catalog Browser
+        val snapshot = panel.modelSnapshot
+        if (snapshot != null && snapshot.groups.isNotEmpty()) {
+            val modelsCard = roundedCard()
+            modelsCard.addView(textView("Available Voice Models", 15f, COLOR_TEXT, bold = true))
+
+            snapshot.groups.forEach { group ->
+                modelsCard.addView(
+                    textView(group.label, 13f, COLOR_MUTED, bold = true).apply {
+                        setPadding(0, dp(6), 0, dp(2))
+                    }
+                )
+
+                group.models.forEach { model ->
+                    val row = LinearLayout(this).apply {
+                        orientation = LinearLayout.HORIZONTAL
+                        gravity = Gravity.CENTER_VERTICAL
+                        setPadding(0, dp(6), 0, dp(6))
+                    }
+
+                    val infoLayout = LinearLayout(this).apply {
+                        orientation = LinearLayout.VERTICAL
+                        layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+                    }
+
+                    val nameRow = LinearLayout(this).apply {
+                        orientation = LinearLayout.HORIZONTAL
+                        gravity = Gravity.CENTER_VERTICAL
+                    }
+
+                    val nameText = textView(
+                        if (model.selected) "✓ ${model.label}" else model.label,
+                        14f,
+                        COLOR_TEXT,
+                        bold = model.selected,
+                    )
+                    nameRow.addView(nameText)
+
+                    val badge = TextView(this).apply {
+                        text = " ${model.verificationLabel} "
+                        textSize = 10f
+                        setTextColor(if (model.isVerified) 0xFF059669.toInt() else 0xFFD97706.toInt())
+                        background = GradientDrawable().apply {
+                            cornerRadius = 4 * resources.displayMetrics.density
+                            setColor(if (model.isVerified) 0x1A059669 else 0x1AD97706)
+                        }
+                    }
+                    val badgeParams = LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ).apply { marginStart = dp(6) }
+                    nameRow.addView(badge, badgeParams)
+
+                    infoLayout.addView(nameRow)
+
+                    val statusSubtitle = when {
+                        model.downloadPhase != "NotDownloading" && model.downloadPhase != "Completed" ->
+                            model.downloadLabel ?: model.downloadPhase
+                        model.installed -> "Installed · ${model.releaseDate}"
+                        else -> "Available for download · ${model.releaseDate}"
+                    }
+                    infoLayout.addView(textView(statusSubtitle, 12f, COLOR_MUTED))
+
+                    row.addView(infoLayout)
+
+                    // Action button (>=48dp touch target)
+                    val actionButton = TextView(this).apply {
+                        textSize = 13f
+                        typeface = Typeface.DEFAULT_BOLD
+                        gravity = Gravity.CENTER
+                        minHeight = dp(48)
+                        minWidth = dp(48)
+                        setPadding(dp(12), dp(8), dp(12), dp(8))
+                        isClickable = true
+                        isFocusable = true
+
+                        when {
+                            model.selected -> {
+                                text = "Selected"
+                                setTextColor(COLOR_MUTED)
+                                background = roundedOutline()
+                                isEnabled = false
+                            }
+                            model.downloadPhase == "Starting" ||
+                            model.downloadPhase == "Downloading" ||
+                            model.downloadPhase == "Verifying" ||
+                            model.downloadPhase == "Extracting" ||
+                            model.downloadPhase == "Installing" -> {
+                                text = model.progressPercent?.let { "$it%" } ?: "..."
+                                setTextColor(Color.WHITE)
+                                background = roundedFilled(0xFF2563EB.toInt())
+                                isEnabled = false
+                            }
+                            model.primaryAction == "Select" -> {
+                                text = "Select"
+                                setTextColor(Color.WHITE)
+                                background = roundedFilled(COLOR_CHARCOAL)
+                                isEnabled = model.enabled
+                                setOnClickListener {
+                                    val isListening = controller.model.currentState == ImeSessionModel.ImeState.LISTENING ||
+                                                      controller.model.currentState == ImeSessionModel.ImeState.PREPARING
+                                    if (isListening) {
+                                        android.util.Log.w("EcholetIme", "Model selection rejected: session active")
+                                        return@setOnClickListener
+                                    }
+                                    NativeBridge.nativeSelectModel(model.id)
+                                    refreshReadiness()
+                                    refreshModelSnapshot()
+                                }
+                            }
+                            model.primaryAction == "Download" || model.primaryAction == "RetryDownload" -> {
+                                text = if (model.primaryAction == "RetryDownload") "Retry" else "Download"
+                                setTextColor(Color.WHITE)
+                                background = roundedFilled(0xFF2563EB.toInt())
+                                isEnabled = model.enabled
+                                setOnClickListener {
+                                    downloadManager.startDownload(model.id)
+                                    refreshModelSnapshot()
+                                }
+                            }
+                            else -> {
+                                visibility = View.GONE
+                            }
+                        }
+                    }
+
+                    val btnParams = LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ).apply { marginStart = dp(8) }
+                    row.addView(actionButton, btnParams)
+
+                    modelsCard.addView(row)
+                }
+            }
+
+            body.addView(modelsCard)
+        }
+
         body.addView(
             textView(panel.offlineNote, 13f, COLOR_MUTED).apply {
                 setPadding(dp(8), dp(6), dp(8), dp(2))
@@ -391,6 +564,7 @@ class EcholetInputMethodService : InputMethodService() {
             return
         }
         refreshReadiness()
+        refreshModelSnapshot()
         applyPlan(presenter.onFreshVisibility(readiness))
         val reason = blockedReason()
         controller.onCurrentInputConnection(currentInputConnection)
@@ -417,6 +591,7 @@ class EcholetInputMethodService : InputMethodService() {
     override fun onWindowShown() {
         super.onWindowShown()
         refreshReadiness()
+        refreshModelSnapshot()
         applyPlan(presenter.onFreshVisibility(readiness))
         controller.onWindowShown()
     }

@@ -49,6 +49,8 @@ data class ImeExpandedPanel(
     val offlineNote: String,
     /** Open Echolet Setup action is offered ONLY while BLOCKED. */
     val setupVisible: Boolean,
+    /** Phase 1-B: catalog models and download/selection presentation. */
+    val modelSnapshot: ModelSnapshotUi? = null,
 )
 
 /** Everything the view binder needs to paint one frame of the shell. */
@@ -77,8 +79,17 @@ class ImeKeyboardPresenter(private val onSetupRequested: () -> Unit) {
     )
     private var lastState = ImeSessionModel.ImeState.HIDDEN
     private var lastStatus = ""
+    private var modelSnapshot: ModelSnapshotUi? = null
 
     // -------------------------------------------------------------- lifecycle
+
+    /**
+     * Updates model snapshot for the Expanded browser.
+     */
+    fun updateModelSnapshot(snapshot: ModelSnapshotUi?): ImeKeyboardPlan {
+        modelSnapshot = snapshot
+        return plan()
+    }
 
     /**
      * A fresh visibility (new keyboard activation): re-derive the readiness
@@ -204,9 +215,10 @@ class ImeKeyboardPresenter(private val onSetupRequested: () -> Unit) {
             },
             statusBody = lastStatus,
             prerequisiteLines = listOf(permissionLine, modelLine, nativeLine),
-            offlineNote = "Voice typing stays on-device: Echolet has no network " +
-                "permission and audio is processed locally.",
+            offlineNote = "Voice typing stays on-device: audio is processed locally. " +
+                "Model downloads use Internet solely when requested by you.",
             setupVisible = lastState == ImeSessionModel.ImeState.BLOCKED,
+            modelSnapshot = modelSnapshot,
         )
     }
 }

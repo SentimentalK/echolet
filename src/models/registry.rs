@@ -476,4 +476,20 @@ impl ModelRegistry {
         self.get_model(&self.default_model_id)
             .or_else(|| self.models.first())
     }
+
+    /// Loads the immutable canonical registry embedded at compile time.
+    /// Rejects non-canonical schema versions strictly.
+    pub fn canonical() -> Result<Self, String> {
+        let registry = Self::from_str(CANONICAL_REGISTRY_JSON)?;
+        if registry.schema_version != CURRENT_SCHEMA_VERSION {
+            return Err(format!(
+                "Canonical embedded registry schema mismatch: expected {}, got {}",
+                CURRENT_SCHEMA_VERSION, registry.schema_version
+            ));
+        }
+        Ok(registry)
+    }
 }
+
+pub const CANONICAL_REGISTRY_JSON: &str = include_str!("../../models/registry.json");
+

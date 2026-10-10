@@ -28,10 +28,14 @@
 #[cfg(target_os = "android")]
 mod jni;
 
+pub mod model_owner;
 mod runtime;
 #[cfg(test)]
 mod tests;
 
+pub use model_owner::{
+    shared_model_owner, AndroidModelOwner, ModelSnapshot, LEGACY_MODEL_DIR_NAME,
+};
 pub use runtime::{
     shared_runtime, AndroidRuntime, BridgeError, MAX_CHUNK_SAMPLES, REQUIRED_SAMPLE_RATE,
 };

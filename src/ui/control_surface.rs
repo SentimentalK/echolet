@@ -25,12 +25,15 @@
 //!   product behavior. They render immutable projected [`ControlSurfaceState`]
 //!   and emit explicit [`SurfaceAction`] variants.
 
+#[cfg(not(target_os = "android"))]
 use crate::actions::AppAction;
 use crate::config::EcholetConfig;
-use crate::models::download::DownloadStatus;
+use crate::models::DownloadStatus;
 use crate::models::language::language_code_label;
 use crate::models::registry::{LanguageTier, ModelRegistry, RegistryModelEntry};
+#[cfg(not(target_os = "android"))]
 use crossbeam_channel::Sender;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
 /// Platform-neutral runtime residency/activity state projected from `App`.
@@ -38,7 +41,7 @@ use std::collections::{HashMap, HashSet};
 /// There is exactly one authority for this state (derived from the app's
 /// recognizer residency and listening flag); platform UIs must not maintain a
 /// second divergent state machine.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RuntimeState {
     /// No active installed model exists.
     NoModel,
@@ -96,7 +99,7 @@ pub fn project_runtime_state(
 }
 
 /// Canonical platform-neutral UI action emitted by renderers/hosts.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SurfaceAction {
     ToggleListening,
     DownloadModel(String),
@@ -113,6 +116,7 @@ pub enum SurfaceAction {
     Quit,
 }
 
+#[cfg(not(target_os = "android"))]
 impl From<SurfaceAction> for AppAction {
     fn from(action: SurfaceAction) -> Self {
         match action {
@@ -138,6 +142,7 @@ impl From<SurfaceAction> for AppAction {
 
 /// Dispatches a platform-neutral [`SurfaceAction`] to the application event channel
 /// through the canonical mapping boundary.
+#[cfg(not(target_os = "android"))]
 pub fn dispatch_surface_action(tx: &Sender<AppAction>, action: SurfaceAction) {
     let _ = tx.send(action.into());
 }
@@ -146,7 +151,7 @@ pub fn dispatch_surface_action(tx: &Sender<AppAction>, action: SurfaceAction) {
 ///
 /// A renderer MUST NOT contain inference logic like `if installed => Select else Download`.
 /// The shared presentation layer dictates the exact actionable primary action.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ModelPrimaryAction {
     /// No actionable primary action (e.g. model is already active or in-progress download).
     None,
@@ -177,7 +182,7 @@ impl ModelPrimaryAction {
 }
 
 /// Normalized download phase for UI presentation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DownloadPhase {
     NotDownloading,
     Starting,
@@ -190,7 +195,7 @@ pub enum DownloadPhase {
 }
 
 /// Shared presentation representation for a model's download/install state.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DownloadPresentation {
     pub phase: DownloadPhase,
     /// Concise, user-facing label (e.g. `Downloading 45%`, `Starting download…`, `Download failed — Retry`).
@@ -298,7 +303,7 @@ impl DownloadPresentation {
 }
 
 /// A selectable language option in the platform UI.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LanguageOptionPresentation {
     /// BCP-47 locale identifier, e.g. `ja-JP`.
     pub locale: String,
@@ -310,7 +315,7 @@ pub struct LanguageOptionPresentation {
 }
 
 /// Per-model language UI presentation.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct ModelLanguagePresentation {
     pub options: Vec<LanguageOptionPresentation>,
     /// Selected BCP-47 locale; `None` means Auto-detect.
@@ -340,7 +345,7 @@ impl ModelLanguagePresentation {
 }
 
 /// Projected presentation state for a single model in the UI.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelPresentation {
     pub id: String,
     /// Short / display label from registry metadata.
@@ -401,7 +406,7 @@ impl ModelPresentation {
 }
 
 /// A presentation group of models with shared capability (e.g. Chinese + English, Multilingual).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelGroupPresentation {
     pub id: String,
     pub label: String,
@@ -409,7 +414,7 @@ pub struct ModelGroupPresentation {
 }
 
 /// Complete canonical UI projection of model, runtime, and settings state.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ControlSurfaceState {
     pub runtime_state: RuntimeState,
     pub model_groups: Vec<ModelGroupPresentation>,

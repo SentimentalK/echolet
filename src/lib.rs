@@ -28,5 +28,4 @@ pub mod log;
 pub mod platform;
 #[cfg(not(target_os = "android"))]
 pub mod state;
-#[cfg(not(target_os = "android"))]
 pub mod ui;
