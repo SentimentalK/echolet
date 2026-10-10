@@ -205,6 +205,118 @@ func testCaptureLifecycleGateSuite() {
         assertTest(gate.totalFramesRecorded == UInt64.max, "Frame count clamped to UInt64.max on overflow")
     }
 
+    // Scenario 8: AudioCaptureTapContext lifecycle ownership, callback retention, and non-leaking weak controller
+    do {
+        class FakeTapRegistrar {
+            var installedTapHandler: ((UInt64, Float, Float, UInt64) -> Void)?
+
+            func installTap(handler: @escaping (UInt64, Float, Float, UInt64) -> Void) {
+                self.installedTapHandler = handler
+            }
+
+            func removeTap() {
+                self.installedTapHandler = nil
+            }
+        }
+
+        class MockCaptureController {
+            var receivedSnapshots: [CaptureLifecycleGate.MetricSnapshot] = []
+            var isDeallocated: Bool = false
+            let stateQueue = DispatchQueue(label: "test.stateQueue")
+
+            func handleMetricSnapshot(_ snapshot: CaptureLifecycleGate.MetricSnapshot) {
+                receivedSnapshots.append(snapshot)
+            }
+        }
+
+        let registrar = FakeTapRegistrar()
+        weak var weakContext: AudioCaptureTapContext?
+        weak var weakController: MockCaptureController?
+        let activeController: MockCaptureController? = MockCaptureController()
+        weakController = activeController
+
+        // Setup scope: setup tap and exit scope
+        func setupTapScope(controller: MockCaptureController) {
+            let context = AudioCaptureTapContext(
+                generation: 42,
+                sampleRate: 48000.0,
+                channelCount: 1,
+                startUptimeNanoseconds: 1_000_000_000
+            )
+            weakContext = context
+
+            // Tap closure captures context strongly, controller weakly
+            let tapHandler = AudioCaptureTapContext.makeTapHandler(
+                context: context,
+                owner: controller,
+                stateQueue: controller.stateQueue,
+                dispatchAction: { owner, snapshot in
+                    owner.handleMetricSnapshot(snapshot)
+                }
+            )
+
+            registrar.installTap(handler: tapHandler)
+        }
+
+        setupTapScope(controller: activeController!)
+
+        // 1. After setupTapScope returns, context MUST be retained by registrar's installedTapHandler!
+        assertTest(weakContext != nil, "Context is strongly retained by installed tap handler after local setup scope ends")
+
+
+        // 2. Simulate tap execution: feed frames at t = 1.0s and t = 1.3s (300ms later, triggering ~4Hz flush)
+        assertTest(registrar.installedTapHandler != nil, "Installed tap handler exists")
+
+        // First buffer arrives shortly after start (10ms after start; < 250ms elapsed) -> accumulated, not flushed
+        registrar.installedTapHandler?(1024, 0.5, 0.25, 1_010_000_000)
+        assertTest(weakContext?.accumulatedFrames == 1024, "Accumulated 1024 frames in tap context")
+        assertTest(weakController?.receivedSnapshots.isEmpty == true, "No dispatch before rate limit threshold")
+
+        // Second buffer arrives 300ms later -> exceeds 250ms threshold -> triggers flush of all 2048 frames
+        registrar.installedTapHandler?(1024, 0.8, 0.4, 1_310_000_000)
+        assertTest(weakContext?.accumulatedFrames == 0, "Accumulated frames reset after snapshot flush")
+
+        // Wait for serial queue dispatch
+        weakController?.stateQueue.sync {}
+
+        assertTest(weakController?.receivedSnapshots.count == 1, "Snapshot was dispatched and received by controller")
+        let snapshot = weakController!.receivedSnapshots[0]
+        assertTest(snapshot.generation == 42, "Snapshot holds token 42")
+        assertTest(snapshot.frameIncrement == 2048, "Snapshot accumulated frameIncrement is 2048")
+        assertTest(snapshot.sampleRate == 48000.0, "Snapshot sampleRate is 48000")
+
+        // 3. Unregister tap (removeTap): releases context
+        registrar.removeTap()
+        assertTest(registrar.installedTapHandler == nil, "Tap removed from registrar")
+        assertTest(weakContext == nil, "Context is deallocated after removeTap releases closure")
+
+
+        // 4. Verify weak controller can deallocate cleanly without reference cycle leaks
+        // If we clear any external reference to controller, it deallocates
+        do {
+            var tempController: MockCaptureController? = MockCaptureController()
+            weakController = tempController
+
+            let ctx = AudioCaptureTapContext(
+                generation: 1,
+                sampleRate: 44100,
+                channelCount: 1,
+                startUptimeNanoseconds: 0
+            )
+            let handler = AudioCaptureTapContext.makeTapHandler(
+                context: ctx,
+                owner: tempController!,
+                stateQueue: tempController!.stateQueue,
+                dispatchAction: { owner, snap in owner.handleMetricSnapshot(snap) }
+            )
+            registrar.installTap(handler: handler)
+
+            tempController = nil
+            assertTest(weakController == nil, "Controller deallocates cleanly despite installed tap (no reference cycle)")
+            registrar.removeTap()
+        }
+    }
+
     print("[TEST] All CaptureLifecycleGate unit tests PASSED successfully.")
 }
 

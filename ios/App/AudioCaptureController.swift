@@ -97,22 +97,9 @@ public final class AudioCaptureController: NSObject {
     /// 3. NEVER reads or mutates mutable `AudioCaptureController` fields.
     /// 4. Does zero heap allocations, zero locks, zero sleeps, zero Foundation or disk/network I/O.
     /// 5. Rate-limits dispatches to `stateQueue` to ~4Hz (250ms), avoiding ~47 tasks/sec dispatch flood.
-    private final class MeterContext {
-        let generation: UInt64
-        let sampleRate: Double
-        let channelCount: UInt32
-        let startUptimeNanoseconds: UInt64
+    /// MeterContext aliases the pure Foundation AudioCaptureTapContext.
+    public typealias MeterContext = AudioCaptureTapContext
 
-        var accumulatedFrames: UInt64 = 0
-        var lastDispatchUptimeNanoseconds: UInt64 = 0
-
-        init(generation: UInt64, sampleRate: Double, channelCount: UInt32, startUptimeNanoseconds: UInt64) {
-            self.generation = generation
-            self.sampleRate = sampleRate
-            self.channelCount = channelCount
-            self.startUptimeNanoseconds = startUptimeNanoseconds
-        }
-    }
 
     public weak var delegate: AudioCaptureDelegate?
 
@@ -145,6 +132,9 @@ public final class AudioCaptureController: NSObject {
     private var _publishedMetrics: Metrics = Metrics()
     private var _publishedGeneration: UInt64 = 0
 
+    // Specific key to detect execution on stateQueue and prevent deinit deadlock
+    private static let stateQueueSpecificKey = DispatchSpecificKey<Void>()
+
     // Serial executor for all native engine, session, tap, and lifecycle gate mutations
     public let stateQueue = DispatchQueue(label: "com.echolet.audiocapture.state", qos: .userInitiated)
 
@@ -156,15 +146,20 @@ public final class AudioCaptureController: NSObject {
 
     override init() {
         super.init()
+        stateQueue.setSpecific(key: Self.stateQueueSpecificKey, value: ())
         setupNotificationObservers()
     }
 
     deinit {
         NotificationCenter.default.removeObserver(self)
-        // Ensure cleanup runs on serial executor
-        stateQueue.sync { [weak self] in
-            guard let self = self else { return }
+        // Ensure cleanup runs on serial executor without reentrant deadlock
+        if DispatchQueue.getSpecific(key: Self.stateQueueSpecificKey) != nil {
             self.stopInternal(targetStatus: .stopped)
+        } else {
+            stateQueue.sync { [weak self] in
+                guard let self = self else { return }
+                self.stopInternal(targetStatus: .stopped)
+            }
         }
     }
 
@@ -364,15 +359,19 @@ public final class AudioCaptureController: NSObject {
             let bufferSize: AVAudioFrameCount = 1024
             inputNode.removeTap(onBus: 0) // Defensive cleanup
 
-            // Closure captures ONLY meterContext and unowned/weak self, NEVER reads mutable controller fields
-            let stateQ = self.stateQueue
-            inputNode.installTap(onBus: 0, bufferSize: bufferSize, format: inputFormat) { [weak self, weak meterContext] buffer, _ in
-                guard let self = self, let context = meterContext else { return }
+            // Closure captures dedicated meterContext strongly for the tap lifetime and weak self, NEVER reads mutable controller fields
+            let tapHandler = MeterContext.makeTapHandler(
+                context: meterContext,
+                owner: self,
+                stateQueue: self.stateQueue,
+                dispatchAction: { controller, snapshot in
+                    controller.handleMetricSnapshot(snapshot)
+                }
+            )
+            inputNode.installTap(onBus: 0, bufferSize: bufferSize, format: inputFormat) { buffer, _ in
                 AudioCaptureController.processAudioBuffer(
                     buffer: buffer,
-                    context: context,
-                    controller: self,
-                    stateQueue: stateQ
+                    tapHandler: tapHandler
                 )
             }
 
@@ -454,9 +453,7 @@ public final class AudioCaptureController: NSObject {
     /// - Performs zero heap allocations, zero locks, zero sleeps, zero Foundation/disk/network I/O.
     private static func processAudioBuffer(
         buffer: AVAudioPCMBuffer,
-        context: MeterContext,
-        controller: AudioCaptureController,
-        stateQueue: DispatchQueue
+        tapHandler: (_ frameLength: UInt64, _ maxSample: Float, _ rms: Float, _ nowUptimeNanoseconds: UInt64) -> Void
     ) {
         let frameLength = UInt64(buffer.frameLength)
         guard frameLength > 0 else { return }
@@ -479,44 +476,9 @@ public final class AudioCaptureController: NSObject {
 
         let meanSquare = sumSquares / Float(buffer.frameLength)
         let rms = sqrt(meanSquare)
-
-        // Convert to dBFS (fast floating-point math)
-        let peakDb: Float = (maxSample > 0.0000001) ? 20.0 * log10(maxSample) : -160.0
-        let rmsDb: Float = (rms > 0.0000001) ? 20.0 * log10(rms) : -160.0
-
-        // Increment tap-local accumulator
-        let (newAccum, overflow) = context.accumulatedFrames.addingReportingOverflow(frameLength)
-        context.accumulatedFrames = overflow ? UInt64.max : newAccum
-
         let now = DispatchTime.now().uptimeNanoseconds
 
-        // Rate-limit check: ~4Hz (250ms = 250_000_000 ns)
-        // Eliminates dispatching ~47 tasks/sec to stateQueue
-        if now - context.lastDispatchUptimeNanoseconds >= 250_000_000 {
-            context.lastDispatchUptimeNanoseconds = now
-
-            let elapsedSeconds = Double(now - context.startUptimeNanoseconds) / 1_000_000_000.0
-
-            // Create immutable snapshot with this tap's immutable generation token
-            let snapshot = CaptureLifecycleGate.MetricSnapshot(
-                generation: context.generation,
-                frameIncrement: context.accumulatedFrames,
-                peakPower: max(peakDb, -160.0),
-                rmsPower: max(rmsDb, -160.0),
-                elapsedSeconds: elapsedSeconds,
-                sampleRate: context.sampleRate,
-                channelCount: context.channelCount
-            )
-
-            // Reset tap accumulator since these frames are now handed over in snapshot
-            context.accumulatedFrames = 0
-
-            // Dispatch immutable snapshot to serial executor
-            stateQueue.async { [weak controller] in
-                guard let controller = controller else { return }
-                controller.handleMetricSnapshot(snapshot)
-            }
-        }
+        tapHandler(frameLength, maxSample, rms, now)
     }
 
     /// Executed exclusively on `stateQueue` to accept snapshot and update UI

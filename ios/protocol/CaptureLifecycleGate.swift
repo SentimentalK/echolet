@@ -246,3 +246,100 @@ public final class CaptureLifecycleGate {
         }
     }
 }
+
+/// Dedicated pure Foundation audio tap meter context owned strongly by the installed tap closure.
+///
+/// Invariants:
+/// 1. Holds immutable session token `generation`.
+/// 2. Accumulators (`accumulatedFrames`, `lastDispatchUptimeNanoseconds`) are mutated ONLY
+///    on the realtime audio render thread within the tap callback.
+/// 3. NEVER reads or mutates mutable controller fields.
+/// 4. Does zero heap allocations, zero locks, zero sleeps, zero Foundation or disk/network I/O.
+/// 5. Rate-limits dispatches to `stateQueue` to ~4Hz (250ms), avoiding ~47 tasks/sec dispatch flood.
+public final class AudioCaptureTapContext {
+    public let generation: UInt64
+    public let sampleRate: Double
+    public let channelCount: UInt32
+    public let startUptimeNanoseconds: UInt64
+
+    public var accumulatedFrames: UInt64 = 0
+    public var lastDispatchUptimeNanoseconds: UInt64 = 0
+
+    public init(generation: UInt64, sampleRate: Double, channelCount: UInt32, startUptimeNanoseconds: UInt64) {
+        self.generation = generation
+        self.sampleRate = sampleRate
+        self.channelCount = channelCount
+        self.startUptimeNanoseconds = startUptimeNanoseconds
+        self.lastDispatchUptimeNanoseconds = startUptimeNanoseconds
+    }
+
+
+    /// Pure metric processor called directly from realtime audio tap buffer callback.
+    public func processAudioMetrics<Owner: AnyObject>(
+        frameLength: UInt64,
+        maxSample: Float,
+        rms: Float,
+        nowUptimeNanoseconds: UInt64,
+        owner: Owner?,
+        stateQueue: DispatchQueue,
+        dispatchAction: @escaping (Owner, CaptureLifecycleGate.MetricSnapshot) -> Void
+    ) {
+        guard frameLength > 0 else { return }
+
+        // Convert to dBFS (fast floating-point math)
+        let peakDb: Float = (maxSample > 0.0000001) ? 20.0 * log10(maxSample) : -160.0
+        let rmsDb: Float = (rms > 0.0000001) ? 20.0 * log10(rms) : -160.0
+
+        // Increment tap-local accumulator
+        let (newAccum, overflow) = accumulatedFrames.addingReportingOverflow(frameLength)
+        accumulatedFrames = overflow ? UInt64.max : newAccum
+
+        // Rate-limit check: ~4Hz (250ms = 250_000_000 ns)
+        // Eliminates dispatching ~47 tasks/sec to stateQueue
+        if nowUptimeNanoseconds - lastDispatchUptimeNanoseconds >= 250_000_000 {
+            lastDispatchUptimeNanoseconds = nowUptimeNanoseconds
+
+            let elapsedSeconds = Double(nowUptimeNanoseconds - startUptimeNanoseconds) / 1_000_000_000.0
+
+            // Create immutable snapshot with this tap's immutable generation token
+            let snapshot = CaptureLifecycleGate.MetricSnapshot(
+                generation: generation,
+                frameIncrement: accumulatedFrames,
+                peakPower: max(peakDb, -160.0),
+                rmsPower: max(rmsDb, -160.0),
+                elapsedSeconds: elapsedSeconds,
+                sampleRate: sampleRate,
+                channelCount: channelCount
+            )
+
+            // Reset tap accumulator since these frames are now handed over in snapshot
+            accumulatedFrames = 0
+
+            // Dispatch immutable snapshot to serial executor
+            stateQueue.async { [weak owner] in
+                guard let owner = owner else { return }
+                dispatchAction(owner, snapshot)
+            }
+        }
+    }
+
+    /// Closure factory: captures context strongly and owner weakly for the installed tap lifetime.
+    public static func makeTapHandler<Owner: AnyObject>(
+        context: AudioCaptureTapContext,
+        owner: Owner,
+        stateQueue: DispatchQueue,
+        dispatchAction: @escaping (Owner, CaptureLifecycleGate.MetricSnapshot) -> Void
+    ) -> (_ frameLength: UInt64, _ maxSample: Float, _ rms: Float, _ nowUptimeNanoseconds: UInt64) -> Void {
+        return { [weak owner, context] frameLength, maxSample, rms, now in
+            context.processAudioMetrics(
+                frameLength: frameLength,
+                maxSample: maxSample,
+                rms: rms,
+                nowUptimeNanoseconds: now,
+                owner: owner,
+                stateQueue: stateQueue,
+                dispatchAction: dispatchAction
+            )
+        }
+    }
+}
