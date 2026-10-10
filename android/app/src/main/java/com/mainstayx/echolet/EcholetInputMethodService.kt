@@ -185,10 +185,11 @@ class EcholetInputMethodService : InputMethodService() {
         refreshReadiness()
         applyNavBarAppearance()
 
-        // Desktop-panel look: white strip on top, soft gray body below.
+        // Styled matching the Android keyboard in voice project:
+        // uniform #F3F4F6 background with clean 16dp rounded buttons.
         val container = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(COLOR_CARD)
+            setBackgroundColor(COLOR_BG)
             setPadding(0, 0, 0, dp(16))
         }
 
@@ -204,11 +205,6 @@ class EcholetInputMethodService : InputMethodService() {
             }
             container.requestApplyInsets()
         }
-
-        container.addView(
-            View(this).apply { setBackgroundColor(COLOR_BORDER) },
-            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(1)),
-        )
 
         val header = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -366,9 +362,9 @@ class EcholetInputMethodService : InputMethodService() {
     private fun icon(kind: KeyIconDrawable.Kind): KeyIconDrawable =
         KeyIconDrawable(kind, dp(24), 2f * resources.displayMetrics.density, COLOR_TEXT_PRIMARY)
 
-    /** White outlined key with a subtle press ripple. */
+    /** White key with 16dp rounded corners matching the voice keyboard style. */
     private fun keyBackground(): RippleDrawable =
-        RippleDrawable(ColorStateList.valueOf(0x1A000000), roundedOutline(12), null)
+        RippleDrawable(ColorStateList.valueOf(0x1A000000), roundedOutline(16), null)
 
     /**
      * Not a fullscreen IME: the bounded Compact/Expanded shell overlays the
@@ -403,7 +399,7 @@ class EcholetInputMethodService : InputMethodService() {
         primaryView.text = plan.primaryLabel
         primaryView.background = RippleDrawable(
             ColorStateList.valueOf(0x33FFFFFF),
-            roundedFilled(if (stop) COLOR_STOP_RED else COLOR_PRIMARY_BUTTON, 12),
+            roundedFilled(if (stop) COLOR_STOP_RED else COLOR_PRIMARY_BUTTON, 16),
             null,
         )
         // Compact: arrow points up (the panel opens upward). Expanded: down.
@@ -845,23 +841,23 @@ class EcholetInputMethodService : InputMethodService() {
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
 
     private companion object {
-        const val COLOR_BG = 0xFFF9FAFB.toInt()
-        const val COLOR_CARD = 0xFFFFFFFF.toInt()
-        const val COLOR_BORDER = 0xFFE5E7EB.toInt()
-        const val COLOR_TEXT_PRIMARY = 0xFF111827.toInt()
-        const val COLOR_TEXT_MUTED = 0xFF6B7280.toInt()
-        const val COLOR_PRIMARY_BUTTON = 0xFF1F2937.toInt()
-        const val COLOR_STOP_RED = 0xFFDC2626.toInt()
-        const val COLOR_DANGER = 0xFFDC2626.toInt()
-        const val COLOR_SUCCESS = 0xFF059669.toInt()
+        const val COLOR_BG = 0xFFF3F4F6.toInt()          // Uniform keyboard background in voice app
+        const val COLOR_CARD = 0xFFFFFFFF.toInt()        // White keys and cards
+        const val COLOR_BORDER = 0xFFE2E8F0.toInt()      // Slate border in voice app
+        const val COLOR_TEXT_PRIMARY = 0xFF0F172A.toInt() // Slate 900 / Primary foreground
+        const val COLOR_TEXT_MUTED = 0xFF64748B.toInt()   // Slate 500
+        const val COLOR_PRIMARY_BUTTON = 0xFF0F172A.toInt() // Deep Slate primary button (#0F172A)
+        const val COLOR_STOP_RED = 0xFFEF4444.toInt()       // Destructive red (#EF4444)
+        const val COLOR_DANGER = 0xFFEF4444.toInt()
+        const val COLOR_SUCCESS = 0xFF16A34A.toInt()      // Green 600
         const val COLOR_WARNING = 0xFFD97706.toInt()
         const val COLOR_NOTICE_BG = 0xFFFEF3C7.toInt()
         const val COLOR_NOTICE_BORDER = 0xFFFDE68A.toInt()
         const val COLOR_NOTICE_TEXT = 0xFF92400E.toInt()
-        const val COLOR_TEXT_SECONDARY = 0xFF4B5563.toInt()
-        const val COLOR_TEXT_SUBTLE = 0xFF9CA3AF.toInt()
-        const val COLOR_ROW_SELECTED = 0xFFF3F4F6.toInt()
-        const val COLOR_BORDER_STRONG = 0xFFD1D5DB.toInt()
+        const val COLOR_TEXT_SECONDARY = 0xFF475569.toInt() // Slate 600
+        const val COLOR_TEXT_SUBTLE = 0xFF94A3B8.toInt()   // Slate 400
+        const val COLOR_ROW_SELECTED = 0xFFF1F5F9.toInt()  // Light Slate (#F1F5F9)
+        const val COLOR_BORDER_STRONG = 0xFFCBD5E1.toInt() // Slate 300 (#CBD5E1)
 
         val IN_PROGRESS_PHASES = setOf(
             "Starting",
