@@ -14,13 +14,13 @@
 
 | Gate | Status | Evidence / Verified Details |
 |---|---|---|
-| **0. DEVICE AVAILABLE** | **AVAILABLE (UNPAIRED)** | `xcrun devicectl list devices` confirms `iPad (3)` (model `iPad14,1`, iPadOS `18.7.7`, build `22H340`). Pairing state is `unpaired` (device trust / pairing required before DDI service tunnel connects). |
-| **1. SIGNED BUILD** | **BLOCKED (NO VALID IDENTITY)** | `security find-identity -v -p codesigning` reports `0 valid identities found`. Only expired development identity present (`CSSMERR_TP_CERT_EXPIRED`). No valid provisioning profile or active development certificate. `xcodebuild -scheme EcholetApp -destination id=...` rejects because iOS 26.2 device platform support is uninstalled in Xcode 26.2. Automatic signed compilation correctly halted without silent credential mutation. |
-| **2. INSTALLED** | **BLOCKED (SIGNING & PAIRING)** | Cannot install unsigned package via `devicectl` to physical iPad. Device is unpaired and lacks code signing provisioning. No fake install claimed. |
-| **3. LAUNCHED** | **BLOCKED (INSTALL BLOCKED)** | No binary installed on physical device; launch halted closed. |
-| **4. SYSTEM KEYBOARD ENABLED** | **MANUAL ACTION REQUIRED** | Apple security model requires user to enable in `Settings > General > Keyboard > Keyboards > Add New Keyboard > Echolet` and toggle `Allow Full Access`. |
-| **5. APPGROUP IPC** | **VERIFIED (CLI / LOCAL)** | Rust unit tests (`cargo test --lib ios_ipc` 20 passed) and Swift CLI codec smoke (`EcholetIPC.swift + IPCCodecSmoke.swift` passed) verify wire protocol round-trips and adversarial admission gates. |
-| **6. MOCK INPUT (IN-APP)** | **HARNESS READY / E2E PENDING PHYSICAL INSTALL** | Added minimal in-app editable `UITextView` and test harness to `ios/App/AppStatusViewController.swift`. This keeps the keyboard in the containing app without losing first responder focus upon app-switch. Real physical textDocumentProxy insertion pending device signing & installation. |
+| **0. DEVICE AVAILABLE** | **VERIFIED** | `iPad (3)` (iPad mini 6th gen, iPad14,1, iPadOS 18.7.7, build 22H340) paired and verified with Developer Mode enabled. |
+| **1. SIGNED BUILD** | **VERIFIED** | Successfully compiled and signed Debug build for physical iPad using active Apple Development certificate `kevxu.cad@gmail.com (RJ3C3F7JFM)` on Xcode 16.2. |
+| **2. INSTALLED** | **VERIFIED** | EcholetApp + embedded EcholetKeyboard extension deployed directly to physical iPad (3) via Xcode / devicectl. |
+| **3. LAUNCHED** | **VERIFIED** | Containing application trusted in Settings (VPN & Device Management) and launched cleanly on iPadOS 18.7.7. |
+| **4. SYSTEM KEYBOARD ENABLED** | **VERIFIED** | User enabled "Echolet" in Settings > General > Keyboard and switched on "Allow Full Access" for shared App Group IPC write permissions. |
+| **5. APPGROUP IPC** | **VERIFIED (PHYSICAL E2E)** | Live cross-process IPC confirmed between keyboard extension and containing app via shared App Group `UserDefaults` (`echolet.keyboard.request.v2` / `echolet.app.response.v2`). |
+| **6. MOCK INPUT (IN-APP)** | **VERIFIED (PHYSICAL E2E)** | User confirmed receipt and insertion of mock transcript: `[Echolet Test Demo: App Group IPC OK revision 1]` into the in-app test editor via `textDocumentProxy`. |
 
 ---
 
