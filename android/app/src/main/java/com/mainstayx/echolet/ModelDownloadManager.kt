@@ -84,8 +84,32 @@ class ModelDownloadManager(
         Thread(r, "echolet-model-dl").apply { isDaemon = true }
     },
     private val nativeAdapter: NativeModelAdapter = DefaultNativeModelAdapter,
-    private val onProgressOrStatusChanged: () -> Unit = {},
+    onProgressOrStatusChanged: () -> Unit = {},
 ) {
+
+    private val observer = java.util.concurrent.atomic.AtomicReference<(() -> Unit)?>(onProgressOrStatusChanged)
+
+    fun setObserver(callback: (() -> Unit)?) {
+        observer.set(callback)
+    }
+
+    fun detachObserver() {
+        observer.set(null)
+    }
+
+    fun clearObserver() {
+        detachObserver()
+    }
+
+    fun hasObserver(): Boolean = observer.get() != null
+
+    private fun notifyObserver() {
+        try {
+            observer.get()?.invoke()
+        } catch (t: Throwable) {
+            Log.w(TAG, "Observer callback threw exception", t)
+        }
+    }
 
     private val activeDownloads = ConcurrentHashMap<String, Boolean>()
 
@@ -140,7 +164,7 @@ class ModelDownloadManager(
             } catch (t: Throwable) {
                 Log.w(TAG, "Failed to report failed progress", t)
             }
-            onProgressOrStatusChanged()
+            notifyObserver()
             return
         }
 
@@ -148,7 +172,7 @@ class ModelDownloadManager(
             var tempPartFile: File? = null
             try {
                 nativeAdapter.setDownloadProgress(modelId, 0, 0, DownloadPhase.STARTING.wireName)
-                onProgressOrStatusChanged()
+                notifyObserver()
 
                 val initialUrl = spec.url
                 if (!initialUrl.startsWith("https://", ignoreCase = true)) {
@@ -229,7 +253,7 @@ class ModelDownloadManager(
                         if (totalBytes > 0) totalBytes else 0L,
                         DownloadPhase.DOWNLOADING.wireName,
                     )
-                    onProgressOrStatusChanged()
+                    notifyObserver()
 
                     while (inputStream.read(buffer).also { bytesRead = it } != -1) {
                         outputStream.write(buffer, 0, bytesRead)
@@ -250,7 +274,7 @@ class ModelDownloadManager(
                                 if (totalBytes > 0) totalBytes else 0L,
                                 DownloadPhase.DOWNLOADING.wireName,
                             )
-                            onProgressOrStatusChanged()
+                            notifyObserver()
                         }
                     }
 
@@ -262,7 +286,7 @@ class ModelDownloadManager(
                         if (totalBytes > 0) totalBytes else totalDownloaded,
                         DownloadPhase.VERIFYING.wireName,
                     )
-                    onProgressOrStatusChanged()
+                    notifyObserver()
 
                 } finally {
                     try { outputStream?.close() } catch (_: Throwable) {}
@@ -272,7 +296,7 @@ class ModelDownloadManager(
 
                 // Delegate verification & atomic install to Rust
                 nativeAdapter.setDownloadProgress(modelId, 0, 0, DownloadPhase.INSTALLING.wireName)
-                onProgressOrStatusChanged()
+                notifyObserver()
 
                 val installOk = nativeAdapter.installModelFromArchive(
                     modelId,
@@ -300,7 +324,7 @@ class ModelDownloadManager(
                 } catch (t: Throwable) {
                     Log.w(TAG, "Failed to clean up temp file $tempPartFile", t)
                 }
-                onProgressOrStatusChanged()
+                notifyObserver()
             }
         }
     }

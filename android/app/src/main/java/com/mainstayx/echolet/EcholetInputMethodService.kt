@@ -43,6 +43,7 @@ class EcholetInputMethodService : InputMethodService() {
         Thread(r, "echolet-ime-model-io").apply { isDaemon = true }
     }
     @Volatile private var modelSnapshotGen = 0L
+    @Volatile private var isDestroyed = false
 
     // View references; cleared safely on recreation/destroy so stale click
     // callbacks can never touch a dead view tree.
@@ -112,6 +113,7 @@ class EcholetInputMethodService : InputMethodService() {
 
     /** Refresh the readiness snapshot; called only at visibility boundaries. */
     private fun refreshReadiness() {
+        if (isDestroyed) return
         readiness = ImePrerequisites(
             permissionGranted = checkSelfPermission(Manifest.permission.RECORD_AUDIO)
                 == PackageManager.PERMISSION_GRANTED,
@@ -121,20 +123,29 @@ class EcholetInputMethodService : InputMethodService() {
     }
 
     private fun refreshModelSnapshot() {
-        val gen = synchronized(this) { ++modelSnapshotGen }
-        modelExecutor.execute {
-            try {
-                val json = NativeBridge.nativeModelSnapshot()
-                val parsed = ModelSnapshotUi.parseJson(json)
-                runOnUi {
-                    synchronized(this) {
-                        if (gen != modelSnapshotGen || root == null) return@runOnUi
+        if (isDestroyed) return
+        val gen = synchronized(this) {
+            if (isDestroyed) return
+            ++modelSnapshotGen
+        }
+        try {
+            modelExecutor.execute {
+                if (isDestroyed) return@execute
+                try {
+                    val json = NativeBridge.nativeModelSnapshot()
+                    val parsed = ModelSnapshotUi.parseJson(json)
+                    runOnUi {
+                        synchronized(this) {
+                            if (isDestroyed || gen != modelSnapshotGen || root == null) return@runOnUi
+                        }
+                        applyPlan(presenter.updateModelSnapshot(parsed))
                     }
-                    applyPlan(presenter.updateModelSnapshot(parsed))
+                } catch (t: Throwable) {
+                    android.util.Log.w("EcholetIme", "Failed to refresh model snapshot", t)
                 }
-            } catch (t: Throwable) {
-                android.util.Log.w("EcholetIme", "Failed to refresh model snapshot", t)
             }
+        } catch (_: java.util.concurrent.RejectedExecutionException) {
+            // Fail closed if modelExecutor is shut down or rejects
         }
     }
 
@@ -426,29 +437,36 @@ class EcholetInputMethodService : InputMethodService() {
                                 background = roundedFilled(COLOR_CHARCOAL)
                                 isEnabled = model.enabled
                                 setOnClickListener {
+                                    if (isDestroyed) return@setOnClickListener
                                     if (controller.isSessionActive()) {
                                         android.util.Log.w("EcholetIme", "Model selection rejected: session active")
                                         return@setOnClickListener
                                     }
-                                    modelExecutor.execute {
-                                        if (controller.isSessionActive()) {
-                                            android.util.Log.w("EcholetIme", "Model selection rejected: session became active")
-                                            return@execute
-                                        }
-                                        val ok = try {
-                                            NativeBridge.nativeSelectModel(model.id)
-                                        } catch (t: Throwable) {
-                                            android.util.Log.e("EcholetIme", "Model selection failed for ${model.id}", t)
-                                            false
-                                        }
-                                        if (ok) {
-                                            runOnUi {
-                                                refreshReadiness()
-                                                refreshModelSnapshot()
+                                    try {
+                                        modelExecutor.execute {
+                                            if (isDestroyed) return@execute
+                                            if (controller.isSessionActive()) {
+                                                android.util.Log.w("EcholetIme", "Model selection rejected: session became active")
+                                                return@execute
                                             }
-                                        } else {
-                                            android.util.Log.w("EcholetIme", "Model selection rejected by core for ${model.id}")
+                                            val ok = try {
+                                                NativeBridge.nativeSelectModel(model.id)
+                                            } catch (t: Throwable) {
+                                                android.util.Log.e("EcholetIme", "Model selection failed for ${model.id}", t)
+                                                false
+                                            }
+                                            if (ok) {
+                                                runOnUi {
+                                                    if (isDestroyed) return@runOnUi
+                                                    refreshReadiness()
+                                                    refreshModelSnapshot()
+                                                }
+                                            } else {
+                                                android.util.Log.w("EcholetIme", "Model selection rejected by core for ${model.id}")
+                                            }
                                         }
+                                    } catch (_: java.util.concurrent.RejectedExecutionException) {
+                                        // Fail closed
                                     }
                                 }
                             }
@@ -625,6 +643,13 @@ class EcholetInputMethodService : InputMethodService() {
     }
 
     override fun onDestroy() {
+        synchronized(this) {
+            isDestroyed = true
+            modelSnapshotGen++
+        }
+        if (::downloadManager.isInitialized) {
+            downloadManager.detachObserver()
+        }
         controller.onDestroyed()
         clearViewRefs()
         modelExecutor.shutdownNow()
@@ -643,7 +668,12 @@ class EcholetInputMethodService : InputMethodService() {
     }
 
     private fun runOnUi(body: () -> Unit) {
-        if (Looper.myLooper() == Looper.getMainLooper()) body() else ui.post(body)
+        if (isDestroyed) return
+        val action = Runnable {
+            if (isDestroyed) return@Runnable
+            body()
+        }
+        if (Looper.myLooper() == Looper.getMainLooper()) action.run() else ui.post(action)
     }
 
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()

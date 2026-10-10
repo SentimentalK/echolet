@@ -103,8 +103,10 @@ impl AndroidModelOwner {
         self.models_dir = Some(models_dir.clone());
         self.files_dir = Some(files_dir.clone());
 
-        // Clean up any abandoned staging residue from killed processes
-        self.clean_abandoned_staging(&models_dir);
+        // Clean up any abandoned staging residue from killed processes when no install is active
+        if self.in_flight_installs.is_empty() {
+            self.clean_abandoned_staging(&models_dir);
+        }
 
         // Restore persisted selected model if valid
         self.restore_selected_model(&files_dir);
@@ -385,8 +387,10 @@ impl AndroidModelOwner {
             }
         }
 
-        // Initial default: default model id
-        self.selected_model_id = Some(self.registry.default_model_id.clone());
+        // Initial default: default model id if not already selected
+        if self.selected_model_id.is_none() {
+            self.selected_model_id = Some(self.registry.default_model_id.clone());
+        }
     }
 
     pub fn list_recoverable_backups(&self) -> Vec<PathBuf> {
@@ -405,6 +409,9 @@ impl AndroidModelOwner {
     }
 
     fn clean_abandoned_staging(&self, models_dir: &Path) {
+        if !self.in_flight_installs.is_empty() {
+            return;
+        }
         if let Ok(entries) = fs::read_dir(models_dir) {
             for entry in entries.flatten() {
                 let name = entry.file_name();
@@ -856,5 +863,53 @@ mod tests {
 
         assert!(json.contains("Installing"));
         assert!(json.contains(kroko_id));
+    }
+
+    #[test]
+    fn test_service_recreation_during_in_flight_install_preserves_staging_and_cleans_afterwards() {
+        let (models_dir, files_dir) = temp_test_dirs("recreate-staging");
+        let registry = ModelRegistry::canonical().unwrap();
+        let xasr_entry = registry.get_model(&registry.default_model_id).unwrap();
+        create_valid_model_dir(&models_dir.join(LEGACY_MODEL_DIR_NAME), xasr_entry);
+
+        let mut owner = AndroidModelOwner::new(models_dir.clone(), files_dir.clone());
+        assert_eq!(owner.selected_model_id(), xasr_entry.id);
+
+        let kroko_id = "echolet-kroko-streaming-en-2025-08-06-r1";
+        // 1. Reserve install
+        owner.begin_install(kroko_id).expect("begin_install should succeed");
+        assert!(owner.is_install_in_flight(kroko_id));
+
+        // 2. Create .echolet-staging-X, .echolet-commit-X, and .echolet-old-X under models
+        let staging_dir = models_dir.join(".echolet-staging-active-123");
+        let commit_dir = models_dir.join(".echolet-commit-active-123");
+        let old_dir = models_dir.join(".echolet-old-backup-123");
+        fs::create_dir_all(&staging_dir).unwrap();
+        fs::write(staging_dir.join("temp.bin"), b"staging-data").unwrap();
+        fs::create_dir_all(&commit_dir).unwrap();
+        fs::write(commit_dir.join("temp.bin"), b"commit-data").unwrap();
+        fs::create_dir_all(&old_dir).unwrap();
+        fs::write(old_dir.join("model.json"), b"{}").unwrap();
+
+        // 3. Call owner.initialize on same instance (simulating IME service recreation)
+        owner.initialize(models_dir.clone(), files_dir.clone());
+
+        // 4. Assert both staging and commit survive, and selected model persists
+        assert!(staging_dir.exists(), "Active staging must survive service recreation");
+        assert!(commit_dir.exists(), "Active commit must survive service recreation");
+        assert!(old_dir.exists(), "Recovery backup must survive");
+        assert_eq!(owner.selected_model_id(), xasr_entry.id, "Selected model must persist");
+        assert!(owner.is_install_in_flight(kroko_id), "In-flight reservation must be retained");
+
+        // 5. Finish / release reservation
+        owner.complete_install(kroko_id);
+        assert!(!owner.is_install_in_flight(kroko_id));
+
+        // 6. Next init cleans abandoned staging but still preserves .echolet-old backup
+        owner.initialize(models_dir.clone(), files_dir.clone());
+        assert!(!staging_dir.exists(), "Staging must now be cleaned once install completes");
+        assert!(!commit_dir.exists(), "Commit dir must now be cleaned once install completes");
+        assert!(old_dir.exists(), "Recovery backup must still be preserved");
+        assert_eq!(owner.selected_model_id(), xasr_entry.id);
     }
 }

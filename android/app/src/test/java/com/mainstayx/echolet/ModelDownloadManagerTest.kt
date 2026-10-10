@@ -211,4 +211,112 @@ class ModelDownloadManagerTest {
         val finalReport = adapter.progressReports.last()
         assertEquals(DownloadPhase.FAILED.wireName, finalReport.phase)
     }
+
+    @Test
+    fun observer_detachment_stops_callbacks() {
+        val adapter = RecordingNativeModelAdapter()
+        val callbackCount = AtomicInteger(0)
+        val manager = ModelDownloadManager(
+            context = dummyContext(),
+            executor = DirectExecutor(),
+            nativeAdapter = adapter,
+            onProgressOrStatusChanged = { callbackCount.incrementAndGet() },
+        )
+
+        assertTrue(manager.hasObserver())
+
+        // Unknown model triggers failure callback to observer
+        manager.startDownload("unknown-model-1")
+        val countBeforeDetach = callbackCount.get()
+        assertTrue("Observer should have been called at least once", countBeforeDetach > 0)
+
+        // Detach observer
+        manager.detachObserver()
+        assertFalse(manager.hasObserver())
+
+        // Another trigger must not call detached observer
+        manager.startDownload("unknown-model-2")
+        assertEquals("Callback count must not change after detach", countBeforeDetach, callbackCount.get())
+    }
+
+    @Test
+    fun repeated_detach_is_idempotent() {
+        val manager = ModelDownloadManager(
+            context = dummyContext(),
+            executor = DirectExecutor(),
+            nativeAdapter = RecordingNativeModelAdapter(),
+            onProgressOrStatusChanged = {},
+        )
+
+        assertTrue(manager.hasObserver())
+        manager.detachObserver()
+        assertFalse(manager.hasObserver())
+        // Repeated calls must be idempotent and not throw
+        manager.detachObserver()
+        manager.clearObserver()
+        assertFalse(manager.hasObserver())
+
+        // Re-attaching via setObserver works
+        val invoked = AtomicBoolean(false)
+        manager.setObserver { invoked.set(true) }
+        assertTrue(manager.hasObserver())
+        manager.startDownload("unknown-model")
+        assertTrue(invoked.get())
+
+        manager.clearObserver()
+        assertFalse(manager.hasObserver())
+    }
+
+    @Test
+    fun in_flight_callback_racing_detach_is_handled_safely() {
+        val adapter = RecordingNativeModelAdapter()
+        val modelId = "echolet-kroko-streaming-en-2025-08-06-r1"
+        adapter.specs[modelId] = """
+            {
+              "model_id": "$modelId",
+              "url": "https://example.com/kroko.tar.bz2",
+              "sha256": "abcdef",
+              "download_size_bytes": 1000,
+              "installed_size_bytes": 2000
+            }
+        """.trimIndent()
+
+        val callbackCount = AtomicInteger(0)
+        val readyGate = CountDownLatch(1)
+        val pauseGate = CountDownLatch(1)
+
+        val executor = Executor { command ->
+            Thread {
+                readyGate.countDown()
+                pauseGate.await()
+                command.run()
+            }.start()
+        }
+
+        val manager = ModelDownloadManager(
+            context = dummyContext(),
+            executor = executor,
+            nativeAdapter = adapter,
+            onProgressOrStatusChanged = { callbackCount.incrementAndGet() },
+        )
+
+        manager.startDownload(modelId)
+        assertTrue(readyGate.await(5, TimeUnit.SECONDS))
+
+        // Race detachObserver with the worker executing and finishing
+        manager.detachObserver()
+        assertFalse(manager.hasObserver())
+
+        // Release the worker
+        pauseGate.countDown()
+
+        // Wait a short moment for worker to finish
+        var attempts = 0
+        while (manager.isDownloading(modelId) && attempts++ < 50) {
+            Thread.sleep(20)
+        }
+
+        // Observer should not receive post-detach events
+        assertEquals(0, callbackCount.get())
+    }
 }
