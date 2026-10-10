@@ -15,8 +15,11 @@ This directory contains the native iOS / iPadOS Containing Application and Custo
   - Houses `WarmIPCService.swift`:
     - Process-owned lifecycle wired directly to `AppDelegate` and `UISceneDelegate`, running independently of UIViewController appearance.
     - Reads latest App Group state at launch/reactivation, polls at a bounded cadence (0.3s) while foreground/active, and listens for Darwin notification hints (`com.echolet.ipc.request.v2`).
-    - Distinguishes receipt of START from affirmative user arming; emits `preparing` while asynchronous audio engine start is in flight, and `listening` only after confirmed hardware start.
-    - Synchronously invalidates active session tokens on STOP/CANCEL and writes `completed` only after native hardware stops.
+    - Drives pure Foundation `WarmCaptureFlowCoordinator`: bridges wire admission outcomes from `EcholetAdmission.Gate` with native audio capture lifecycle.
+    - Ownership separation: distinguishes keyboard-owned capture from manual in-app test capture; if manual test is active, incoming keyboard START commands are rejected as busy without disrupting manual recording; keyboard STOP never stops manual audio.
+    - Async cancellation fencing: disarming mic invalidates pending start before permission or native start callbacks complete; delayed permission callbacks cannot hot-mic after ARM OFF.
+    - Session replacement: when B replaces A, hardware stop of A is awaited before starting B; late Stop(A) completion cannot overwrite B's response snapshot.
+    - Monotonic checked revisions and single-writer response synchronization for App Group responses.
     - Manages background command intake as long as iOS genuinely schedules the app under `UIBackgroundModes audio`; avoids busy loops and makes no false claims about cold wake or background scheduling guarantees when suspended.
 - **`Keyboard/`**: Custom `UIInputViewController` Keyboard Extension (`EcholetKeyboard`).
   - Note: Per Apple custom keyboard security requirements, custom keyboards have **no microphone access**. Containing `EcholetApp` exclusively owns audio capture.
@@ -25,7 +28,7 @@ This directory contains the native iOS / iPadOS Containing Application and Custo
   - Gated response consumer: safely correlates session ID, app epoch, sequence, and strictly monotonic response revision before invoking `textDocumentProxy.insertText`.
   - Honestly surfaces preparing, listening, and blocked microphone states without inserting fabricated transcripts.
   - Automatically fences and invalidates active session on input focus change (`textWillChange`).
-- **`protocol/`**: Pure Foundation Swift wire protocol codec (`EcholetIPC.swift`), admission gate port (`EcholetAdmission.swift`), and capture lifecycle gate (`CaptureLifecycleGate.swift`), mirroring canonical Rust `src/ios_ipc.rs`. Includes pure Swift CLI tests (`AdmissionTests.swift`, `AdversarialTests.swift`, `CaptureLifecycleTests.swift`, `IPCCodecSmoke.swift`).
+- **`protocol/`**: Pure Foundation Swift wire protocol codec (`EcholetIPC.swift`), admission gate port (`EcholetAdmission.swift`), capture lifecycle gate (`CaptureLifecycleGate.swift`), and warm capture flow coordinator (`WarmCaptureFlow.swift`), mirroring canonical Rust `src/ios_ipc.rs`. Includes pure Swift CLI tests (`AdmissionTests.swift`, `AdversarialTests.swift`, `CaptureLifecycleTests.swift`, `IPCCodecSmoke.swift`, `WarmCaptureFlowTests.swift`).
 - **`project.yml`**: Declarative XcodeGen project specification generating `Echolet.xcodeproj`.
 - **`scripts/`**: Safe device discovery and automation scripts (`verify-device.sh`).
 

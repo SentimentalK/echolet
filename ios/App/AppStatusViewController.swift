@@ -267,43 +267,61 @@ class AppStatusViewController: UIViewController, AudioCaptureDelegate, WarmIPCSe
         }
     }
 
+    // Monotonic generation for local UI permission checks
+    private var uiPermissionGeneration: UInt64 = 0
+
     // MARK: - Real Microphone Controls (J3A)
     @objc private func didToggleArmSwitch(_ sender: UISwitch) {
+        uiPermissionGeneration &+= 1
+        let currentUIGen = uiPermissionGeneration
+
         WarmIPCService.shared.setUserArmMicrophone(sender.isOn)
         if sender.isOn {
             AudioCaptureController.shared.requestMicrophonePermission { [weak self] granted in
                 DispatchQueue.main.async {
+                    guard let self = self, self.uiPermissionGeneration == currentUIGen else { return }
                     if !granted {
                         sender.isOn = false
                         WarmIPCService.shared.setUserArmMicrophone(false)
-                        self?.micStatusLabel.text = "Microphone Status: PERMISSION DENIED (Blocked)"
-                        self?.micStatusLabel.textColor = .systemRed
+                        self.micStatusLabel.text = "Microphone Status: PERMISSION DENIED (Blocked)"
+                        self.micStatusLabel.textColor = .systemRed
                     }
                 }
             }
         } else {
-            if AudioCaptureController.shared.status == .recording {
-                AudioCaptureController.shared.stopCapture()
-            }
+            // Disarming mic: stop capture if actively recording
+            WarmIPCService.shared.registerManualCaptureStopped()
         }
     }
 
     @objc private func didTapStartMic() {
+        uiPermissionGeneration &+= 1
+        let currentUIGen = uiPermissionGeneration
+
         AudioCaptureController.shared.requestMicrophonePermission { [weak self] granted in
             guard let self = self else { return }
-            if granted {
-                self.micArmSwitch.isOn = true
-                WarmIPCService.shared.setUserArmMicrophone(true)
-                AudioCaptureController.shared.startCapture()
-            } else {
-                self.micStatusLabel.text = "Microphone Status: PERMISSION DENIED"
-                self.micStatusLabel.textColor = .systemRed
+            DispatchQueue.main.async {
+                guard self.uiPermissionGeneration == currentUIGen else { return }
+                if granted {
+                    self.micArmSwitch.isOn = true
+                    WarmIPCService.shared.setUserArmMicrophone(true)
+                    // Register manual capture owner with WarmIPCService
+                    WarmIPCService.shared.registerManualStartCapture { shouldProceed in
+                        if shouldProceed {
+                            AudioCaptureController.shared.startCapture()
+                        }
+                    }
+                } else {
+                    self.micStatusLabel.text = "Microphone Status: PERMISSION DENIED"
+                    self.micStatusLabel.textColor = .systemRed
+                }
             }
         }
     }
 
     @objc private func didTapStopMic() {
-        AudioCaptureController.shared.stopCapture()
+        uiPermissionGeneration &+= 1
+        WarmIPCService.shared.registerManualCaptureStopped()
     }
 
     // MARK: - AudioCaptureDelegate
@@ -467,42 +485,22 @@ class AppStatusViewController: UIViewController, AudioCaptureDelegate, WarmIPCSe
                 return
             }
 
-            responseRevision += 1
-            let mockText = "[Echolet Test Demo: App Group IPC OK revision \(responseRevision)]"
+            let mockText = "[Echolet Test Demo: App Group IPC OK]"
 
-            let response = try EcholetIPC.AppResponse(
-                appEpoch: currentEpoch,
+            WarmIPCService.shared.writeResponseSnapshot(
                 sessionId: request.sessionId,
                 acknowledgedRequestId: request.requestId,
                 acknowledgedSequence: request.sequence,
-                revision: responseRevision,
                 state: .completed,
                 recognizedText: mockText,
                 isFinal: true,
-                errorCode: nil,
-                serverTimestampMs: UInt64(Date().timeIntervalSince1970 * 1000)
-            )
-
-            let encoder = EcholetIPC.makeEncoder()
-            let encodedData = try encoder.encode(response)
-            defaults.set(encodedData, forKey: EcholetIPC.appResponseKey)
-            defaults.synchronize()
-
-            // Optional Darwin notification hint
-            let notificationName = CFNotificationName(EcholetIPC.darwinNotificationResponse as CFString)
-            CFNotificationCenterPostNotification(
-                CFNotificationCenterGetDarwinNotifyCenter(),
-                notificationName,
-                nil,
-                nil,
-                true
+                errorCode: nil
             )
 
             lastRequestLabel.text = """
-            Mock Response Written:
+            Mock Response Written via WarmIPCService:
             Session: \(request.sessionId)
             Ack Request: \(request.requestId)
-            Revision: \(responseRevision)
             Text: \(mockText)
             State: completed (final)
             """

@@ -17,6 +17,7 @@
 | **C. RUST IPC SUITE** | **PASS** | `cargo test --lib ios_ipc` passed all 20 tests; full `cargo test --lib` passed. |
 | **D. APP DEPLOYED TO IPAD** | **PASS (HISTORICAL)** | Installed via `xcrun devicectl device install app` to `iPad (3)` (`com.mainstayx.echolet.app`, databaseSequenceNumber 6484) and launched via `devicectl device process launch`. Post-repair physical mic/background marked unverified pending batch E2E. |
 | **E. REAL AUDIO COMPONENT** | **PASS (REPAIRED J3A-R2a)** | `AudioCaptureController.swift` threading and lifecycle repaired: single serial `stateQueue` executor for all mutations, pure Foundation `CaptureLifecycleGate` production state machine. Dedicated `AudioCaptureTapContext` / `MeterContext` strongly retained by installed native tap closure (`[weak self, meterContext]`) ensuring context persists throughout tap lifetime without leaking controller, eliminating silent deallocation bug. Added behavioral closure retention and rate-limiting test (Scenario 8) in `CaptureLifecycleTests.swift`. |
+| **E2. WARM IPC CANCELLATION & OWNERSHIP** | **PASS (REPAIRED J3A-R2b)** | `WarmIPCService.swift` and pure Foundation `WarmCaptureFlowCoordinator` (`ios/protocol/WarmCaptureFlow.swift`): eliminates hot-mic race on late permission callback after user disarm, ensures session replacement Stop(A) completes before B starts, fences stale Stop completions from overwriting newer response snapshots, and prevents keyboard STOP/START from interrupting manual in-app audio test. Verified by comprehensive CLI behavioral test suite (`WarmCaptureFlowTests.swift`). |
 
 | **F. PRIVACY & BACKGROUND MODES** | **PASS** | `NSMicrophoneUsageDescription` and `UIBackgroundModes` [`audio`] configured in `ios/App/Info.plist`. Validated with `plutil -p`. |
 | **G. KEYBOARD ISOLATION (APPLE SEC)**| **PASS** | Keyboard extension contains ZERO audio/recording code. Apple security constraint satisfied: microphone owned exclusively by containing app. Keyboard surfaces preparing, listening, and blocked states honestly. |
@@ -41,26 +42,32 @@
    - Pure Foundation production state machine managing monotonic generation issuance, start ack/failure, cancellation, stop, and immutable meter snapshots.
    - CLI tests driving delayed hardware acknowledgments, post-stop stale queued meter dropping, duplicate start prevention, caller expectedGeneration fencing, and overflow fail-closed behavior.
 
-3. **`ios/App/WarmIPCService.swift`**:
+3. **`ios/protocol/WarmCaptureFlow.swift` & `ios/protocol/WarmCaptureFlowTests.swift`**:
+   - Pure Foundation flow coordinator state machine bridging wire admission (`EcholetAdmission.Gate`) and native capture lifecycle.
+   - Explicit capture ownership: differentiates keyboard session capture from in-app manual testing capture. Rejects keyboard START as busy if manual capture active; prevents keyboard STOP from stopping manual capture.
+   - Monotonic cancellation generations fence against late permission callbacks after disarm and late hardware start success callbacks.
+   - Serialized session replacement: awaits native stop completion of session A before initiating permission and start for session B.
+   - Prevents stale stop completions from overwriting newer session responses in App Group.
+   - Strict monotonic response revision with fail-closed overflow handling.
+
+4. **`ios/App/WarmIPCService.swift`**:
    - App-process-owned lifecycle coordinated via `AppDelegate` and `UISceneDelegate` (independent of VC presentation).
    - Manages foreground polling of `echolet.keyboard.request.v2` and Darwin notification observer hints.
-   - Emits `preparing` state while asynchronous start is underway, and `listening` only after verified native engine start.
-   - Requires explicit user arming in the containing app before initiating audio capture from incoming `START` requests.
-   - On `STOP`/`CANCEL`, halts engine cleanly and writes `completed` response only after hardware stop confirmation.
+   - Drives production `WarmCaptureFlowCoordinator` on dedicated `ipcQueue`.
+   - Single-writer App Group response publisher with Darwin notification signaling.
    - Preserves honest background command intake during active recording without promising cold wake or background scheduling when idle.
-   - Note: Known asynchronous permission Arm-OFF and replaced-session Stop order bugs in WarmIPCService are scoped for J3A-R2b.
 
-4. **`ios/App/AppStatusViewController.swift`**:
+5. **`ios/App/AppStatusViewController.swift`**:
    - Interactive "Enable / Arm Microphone Test" switch and "Start/Stop Audio Test" buttons.
    - Live RMS level progress meter, dB level display, and frame counter.
-   - Added support for `.starting` state in capture delegate status listener.
-   - In-app test editor and mock transcription button.
+   - Local UI permission generation fencing and manual capture ownership registration with `WarmIPCService`.
+   - In-app test editor and mock transcription button routed through `WarmIPCService.writeResponseSnapshot`.
 
-5. **`ios/protocol/EcholetAdmission.swift`, `ios/protocol/AdmissionTests.swift`, `ios/protocol/AdversarialTests.swift`**:
+6. **`ios/protocol/EcholetAdmission.swift`, `ios/protocol/AdmissionTests.swift`, `ios/protocol/AdversarialTests.swift`**:
    - Pure Foundation Swift port of Rust `src/ios_ipc.rs` admission gate.
    - Unit tests verifying wire admission, monotonic intent sequencing, stale STOP protection, duplicate rejection, tombstone advancement, and asynchronous cancellation/fencing. Adversarial tests updated to drive real `CaptureLifecycleGate`.
 
-6. **`ios/App/Info.plist`**:
+7. **`ios/App/Info.plist`**:
    - Configured `NSMicrophoneUsageDescription`: "Echolet requires microphone access to capture real audio for on-device speech-to-text recognition test."
    - Configured `UIBackgroundModes` array with `audio`.
 

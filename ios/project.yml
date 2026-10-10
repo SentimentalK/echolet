@@ -20,6 +20,7 @@ targets:
       - path: protocol/EcholetIPC.swift
       - path: protocol/EcholetAdmission.swift
       - path: protocol/CaptureLifecycleGate.swift
+      - path: protocol/WarmCaptureFlow.swift
     settings:
       PRODUCT_BUNDLE_IDENTIFIER: com.mainstayx.echolet.app
       INFOPLIST_FILE: App/Info.plist

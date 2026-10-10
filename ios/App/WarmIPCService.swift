@@ -15,13 +15,16 @@ public protocol WarmIPCServiceDelegate: AnyObject {
 /// 1. Lifecycle retained by the app process (AppDelegate / SceneDelegate), independent of UIViewController appearance.
 /// 2. Reads latest App Group request on launch/activation and polls at a bounded cadence (e.g. 0.3s) while foreground/active.
 /// 3. Darwin notification `com.echolet.ipc.request.v2` observer triggers an immediate re-read hint.
-/// 4. Integrates `EcholetAdmission.Gate` with the containing app process epoch.
-/// 5. Async fences:
-///    - On START: checks permission and user arming. Emits `preparing` while asynchronous engine start is in flight.
+/// 4. Integrates pure Foundation `EcholetAdmission.Gate` and `WarmCaptureFlowCoordinator` with the containing app process epoch.
+/// 5. Async fences & Ownership:
+///    - On START: checks user arming and permission. Emits `preparing` while asynchronous engine start is in flight.
 ///    - Emits `listening` ONLY AFTER `AudioCaptureController.startCapture` confirms engine start succeeded for this exact session token.
 ///    - If user has NOT armed mic or permission is denied, emits `blocked`.
-///    - On STOP/CANCEL: synchronously ends gate session, calls `AudioCaptureController.stopCapture` and writes `completed` ACK ONLY AFTER hardware stops.
-///    - Fences monotonic response revision and matching sequence/request_id.
+///    - Differentiates manual audio test capture from keyboard-owned capture. If manual audio test is active, keyboard START is rejected as busy.
+///    - On STOP/CANCEL: cancels pending token synchronously; halts native hardware ONLY if keyboard owned; emits `completed` ACK only after hardware stops.
+///    - On session replacement (B replaces A): hardware Stop(A) is awaited before initiating native start for B.
+///    - Late old Stop(A) completion cannot overwrite active session B response.
+///    - Fences monotonic response revision and matching sequence/request_id with fail-closed revision checks.
 /// 6. Honest background semantics:
 ///    - While active background recording is ongoing, iOS schedules the app via `UIBackgroundModes audio`. Command intake continues as long as scheduled.
 ///    - If suspended/idle, does NOT claim cold wake or stealth background recording.
@@ -31,29 +34,20 @@ public final class WarmIPCService {
 
     public weak var delegate: WarmIPCServiceDelegate?
 
-    public private(set) var admissionGate: EcholetAdmission.Gate?
+    public private(set) var flowCoordinator: WarmCaptureFlowCoordinator
     private var sharedDefaults: UserDefaults?
-    private var responseRevision: UInt64 = 0
-    private var isMicrophoneArmedByUser: Bool = false
     private var pollTimer: Timer?
     private var darwinObserverInstalled = false
 
     /// Serial queue to sequence all IPC polling, admission, and response mutations
     public let ipcQueue = DispatchQueue(label: "com.echolet.warmipc.service", qos: .userInitiated)
 
-    /// Currently active session binding token (sessionId, intentSequence, requestId, sequence)
-    private struct PendingSessionToken: Equatable {
-        let appEpoch: String
-        let sessionId: String
-        let intentSequence: UInt64
-        let requestId: String
-        let sequence: UInt64
-        let captureGeneration: UInt64
+    public var admissionGate: EcholetAdmission.Gate? {
+        return ipcQueue.sync { flowCoordinator.admissionGate }
     }
 
-    private var activeSessionToken: PendingSessionToken?
-
     private init() {
+        self.flowCoordinator = WarmCaptureFlowCoordinator(appEpoch: AppDelegate.sharedEpoch)
         self.sharedDefaults = UserDefaults(suiteName: AppDelegate.appGroupId)
         initializeGate()
         setupDarwinObserver()
@@ -71,7 +65,7 @@ public final class WarmIPCService {
                 let gate = try EcholetAdmission.Gate(appEpoch: epoch, coldBootArmed: true)
                 // Foreground / active app authorizes boot gate
                 gate.authorizeBoot()
-                self.admissionGate = gate
+                self.flowCoordinator.setAdmissionGate(gate)
             } catch {
                 print("[WarmIPCService] Failed to initialize admission gate: \(error)")
             }
@@ -117,18 +111,34 @@ public final class WarmIPCService {
     public func setUserArmMicrophone(_ armed: Bool) {
         ipcQueue.async { [weak self] in
             guard let self = self else { return }
-            self.isMicrophoneArmedByUser = armed
-            if !armed {
-                // Disarming mic stops any pending/active recording immediately
-                self.activeSessionToken = nil
-                self.admissionGate?.endActiveSession()
-                AudioCaptureController.shared.stopCapture()
-            }
+            let effects = self.flowCoordinator.setUserArmMicrophone(armed)
+            self.executeFlowEffects(effects, triggeringRequestId: nil, triggeringSessionId: nil, triggeringSequence: nil)
         }
     }
 
     public var isUserArmed: Bool {
-        return ipcQueue.sync { self.isMicrophoneArmedByUser }
+        return ipcQueue.sync { self.flowCoordinator.isMicrophoneArmedByUser }
+    }
+
+    // MARK: - Manual Audio Capture Ownership Bridge
+    public func registerManualStartCapture(completion: @escaping (Bool) -> Void) {
+        ipcQueue.async { [weak self] in
+            guard let self = self else {
+                completion(false)
+                return
+            }
+            let (shouldProceed, effects) = self.flowCoordinator.handleManualStartCaptureInitiated()
+            self.executeFlowEffects(effects, triggeringRequestId: nil, triggeringSessionId: nil, triggeringSequence: nil)
+            completion(shouldProceed)
+        }
+    }
+
+    public func registerManualCaptureStopped() {
+        ipcQueue.async { [weak self] in
+            guard let self = self else { return }
+            let effects = self.flowCoordinator.handleManualCaptureStopped()
+            self.executeFlowEffects(effects, triggeringRequestId: nil, triggeringSessionId: nil, triggeringSequence: nil)
+        }
     }
 
     // MARK: - Polling Lifecycle (App-owned)
@@ -155,7 +165,7 @@ public final class WarmIPCService {
         }
     }
 
-    // MARK: - Poll & Admission Logic
+    // MARK: - Poll & Intake Logic
     public func pollIncomingRequests() {
         ipcQueue.async { [weak self] in
             self?.pollIncomingRequestsInternal()
@@ -168,11 +178,6 @@ public final class WarmIPCService {
             return
         }
 
-        guard let gate = admissionGate else {
-            notifyBlocked("Admission gate uninitialized")
-            return
-        }
-
         guard let requestData = defaults.data(forKey: EcholetIPC.keyboardRequestKey) else {
             return
         }
@@ -181,166 +186,110 @@ public final class WarmIPCService {
             let decoder = EcholetIPC.makeDecoder()
             let request = try decoder.decode(EcholetIPC.KeyboardRequest.self, from: requestData)
 
-            // Skip if this request was already admitted and applied
-            if let lastApplied = gate.lastAppliedRequestId, lastApplied == request.requestId {
-                return
-            }
-
-            let outcome = gate.admitRequest(request)
-            switch outcome {
-            case .success(let admission):
-                handleAdmittedRequest(request, admission: admission)
-            case .failure(let rejection):
-                handleRejectedRequest(request, rejection: rejection)
-            }
+            let effects = self.flowCoordinator.handleIncomingRequest(request)
+            self.executeFlowEffects(
+                effects,
+                triggeringRequestId: request.requestId,
+                triggeringSessionId: request.sessionId,
+                triggeringSequence: request.sequence
+            )
         } catch {
             notifyRejected("Malformed request payload: \(error.localizedDescription)")
         }
     }
 
-    private func handleAdmittedRequest(_ request: EcholetIPC.KeyboardRequest, admission: EcholetAdmission.AdmissionOutcome) {
-        switch request.command {
-        case .start:
-            if case .replacedPriorSession(let retired) = admission {
-                // Clean replacement: stop previous hardware capture before starting new session
-                self.activeSessionToken = nil
-                AudioCaptureController.shared.stopCapture()
-                notifyStopAdmitted(sessionId: retired, intentSequence: request.intentSequence)
-            }
+    // MARK: - Effect Execution Engine (ipcQueue Only)
+    private func executeFlowEffects(
+        _ effects: [WarmCaptureFlowCoordinator.FlowEffect],
+        triggeringRequestId: String?,
+        triggeringSessionId: String?,
+        triggeringSequence: UInt64?
+    ) {
+        for effect in effects {
+            switch effect {
+            case .none:
+                break
 
-            // Distinguish START receipt from affirmative user arming and permission
-            guard self.isMicrophoneArmedByUser else {
-                // App not armed by user -> write blocked snapshot requiring explicit arm
+            case .writeResponse(let sessionId, let requestId, let sequence, let state, let text, let isFinal, let errorCode):
                 self.writeResponseSnapshot(
-                    sessionId: request.sessionId,
-                    acknowledgedRequestId: request.requestId,
-                    acknowledgedSequence: request.sequence,
-                    state: .blocked,
-                    recognizedText: nil,
-                    isFinal: false,
-                    errorCode: "app_microphone_not_armed"
+                    sessionId: sessionId,
+                    acknowledgedRequestId: requestId,
+                    acknowledgedSequence: sequence,
+                    state: state,
+                    recognizedText: text,
+                    isFinal: isFinal,
+                    errorCode: errorCode
                 )
-                self.notifyBlocked("Microphone not armed in containing app. Open Echolet and enable mic test.")
-                return
-            }
 
-            // Emit preparing state first while asynchronous start is underway
-            self.writeResponseSnapshot(
-                sessionId: request.sessionId,
-                acknowledgedRequestId: request.requestId,
-                acknowledgedSequence: request.sequence,
-                state: .preparing,
-                recognizedText: nil,
-                isFinal: false,
-                errorCode: nil
-            )
-
-            // Asynchronously preflight permission and start native audio engine
-            AudioCaptureController.shared.requestMicrophonePermission { [weak self] granted in
-                guard let self = self else { return }
-
-                self.ipcQueue.async {
-                    // Check if request or session was invalidated / replaced while permission was checking
-                    guard let currentGate = self.admissionGate,
-                          currentGate.activeSessionId == request.sessionId,
-                          currentGate.lastAppliedRequestId == request.requestId else {
-                        // Stale permission callback - fenced out
-                        return
-                    }
-
-                    if granted {
-                        // Start real capture and bind generation token
-                        AudioCaptureController.shared.startCapture { [weak self] result in
-                            guard let self = self else { return }
-                            self.ipcQueue.async {
-                                // Fencing: Ensure active session is still this exact token
-                                guard let currentGate = self.admissionGate,
-                                      currentGate.activeSessionId == request.sessionId,
-                                      currentGate.lastAppliedRequestId == request.requestId else {
-                                    return
-                                }
-
-                                switch result {
-                                case .success(let activeGen):
-                                    self.activeSessionToken = PendingSessionToken(
-                                        appEpoch: request.appEpoch,
-                                        sessionId: request.sessionId,
-                                        intentSequence: request.intentSequence,
-                                        requestId: request.requestId,
-                                        sequence: request.sequence,
-                                        captureGeneration: activeGen
-                                    )
-                                    // Hardware start confirmed: emit honest listening state
-                                    self.writeResponseSnapshot(
-                                        sessionId: request.sessionId,
-                                        acknowledgedRequestId: request.requestId,
-                                        acknowledgedSequence: request.sequence,
-                                        state: .listening,
-                                        recognizedText: nil,
-                                        isFinal: false,
-                                        errorCode: nil
-                                    )
-                                    self.notifyStartAdmitted(sessionId: request.sessionId, intentSequence: request.intentSequence)
-
-                                case .failure(let err):
-                                    self.activeSessionToken = nil
-                                    self.admissionGate?.endActiveSession()
-                                    self.writeResponseSnapshot(
-                                        sessionId: request.sessionId,
-                                        acknowledgedRequestId: request.requestId,
-                                        acknowledgedSequence: request.sequence,
-                                        state: .blocked,
-                                        recognizedText: nil,
-                                        isFinal: true,
-                                        errorCode: "audio_engine_start_failed: \(err.localizedDescription)"
-                                    )
-                                    self.notifyBlocked("Audio engine start failed: \(err.localizedDescription)")
-                                }
-                            }
-                        }
-                    } else {
-                        // Permission denied
-                        self.activeSessionToken = nil
-                        self.admissionGate?.endActiveSession()
-                        self.writeResponseSnapshot(
-                            sessionId: request.sessionId,
-                            acknowledgedRequestId: request.requestId,
-                            acknowledgedSequence: request.sequence,
-                            state: .blocked,
-                            recognizedText: nil,
-                            isFinal: true,
-                            errorCode: "microphone_permission_denied"
+            case .requestPermission(let token):
+                AudioCaptureController.shared.requestMicrophonePermission { [weak self] granted in
+                    guard let self = self else { return }
+                    self.ipcQueue.async {
+                        let permEffects = self.flowCoordinator.handlePermissionCallback(token: token, granted: granted)
+                        self.executeFlowEffects(
+                            permEffects,
+                            triggeringRequestId: token.requestId,
+                            triggeringSessionId: token.sessionId,
+                            triggeringSequence: token.sequence
                         )
-                        self.notifyBlocked("Microphone permission denied")
                     }
                 }
-            }
 
-        case .stop, .cancel:
-            self.activeSessionToken = nil
-            self.admissionGate?.endActiveSession()
-
-            // Wait for native capture controller to stop and deallocate tap before sending completed
-            AudioCaptureController.shared.stopCapture { [weak self] in
-                guard let self = self else { return }
-                self.ipcQueue.async {
-                    self.writeResponseSnapshot(
-                        sessionId: request.sessionId,
-                        acknowledgedRequestId: request.requestId,
-                        acknowledgedSequence: request.sequence,
-                        state: .completed,
-                        recognizedText: nil, // Probe mode only - no fabricated transcript
-                        isFinal: true,
-                        errorCode: nil
-                    )
-                    self.notifyStopAdmitted(sessionId: request.sessionId, intentSequence: request.intentSequence)
+            case .startHardware(let token):
+                AudioCaptureController.shared.startCapture { [weak self] result in
+                    guard let self = self else { return }
+                    self.ipcQueue.async {
+                        let (startEffects, cleanupNeeded) = self.flowCoordinator.handleHardwareStartCompletion(
+                            token: token,
+                            result: result.mapError { $0 as Error }
+                        )
+                        if cleanupNeeded {
+                            AudioCaptureController.shared.stopCapture()
+                        }
+                        self.executeFlowEffects(
+                            startEffects,
+                            triggeringRequestId: token.requestId,
+                            triggeringSessionId: token.sessionId,
+                            triggeringSequence: token.sequence
+                        )
+                    }
                 }
+
+            case .stopHardwareKeyboard:
+                // Hardware stop completion callback reenters ipcQueue
+                AudioCaptureController.shared.stopCapture { [weak self] in
+                    guard let self = self else { return }
+                    self.ipcQueue.async {
+                        let stopEffects = self.flowCoordinator.handleHardwareStopCompletion(
+                            stoppedRequestId: triggeringRequestId,
+                            stoppedSessionId: triggeringSessionId,
+                            stoppedSequence: triggeringSequence
+                        )
+                        self.executeFlowEffects(
+                            stopEffects,
+                            triggeringRequestId: triggeringRequestId,
+                            triggeringSessionId: triggeringSessionId,
+                            triggeringSequence: triggeringSequence
+                        )
+                    }
+                }
+
+            case .stopHardwareManual:
+                AudioCaptureController.shared.stopCapture()
+
+            case .notifyStartAdmitted(let sessionId, let intentSequence):
+                self.notifyStartAdmitted(sessionId: sessionId, intentSequence: intentSequence)
+
+            case .notifyStopAdmitted(let sessionId, let intentSequence):
+                self.notifyStopAdmitted(sessionId: sessionId, intentSequence: intentSequence)
+
+            case .notifyBlocked(let reason):
+                self.notifyBlocked(reason)
+
+            case .notifyRejected(let reason):
+                self.notifyRejected(reason)
             }
         }
-    }
-
-    private func handleRejectedRequest(_ request: EcholetIPC.KeyboardRequest, rejection: EcholetAdmission.AdmissionRejection) {
-        notifyRejected("Request \(request.requestId) rejected: \(rejection)")
     }
 
     // MARK: - Delegates Notification Helpers
@@ -372,7 +321,7 @@ public final class WarmIPCService {
         }
     }
 
-    // MARK: - Write Response Snapshots
+    // MARK: - Write Response Snapshots (ipcQueue Only)
     public func writeResponseSnapshot(
         sessionId: String,
         acknowledgedRequestId: String,
@@ -384,14 +333,18 @@ public final class WarmIPCService {
     ) {
         guard let defaults = sharedDefaults else { return }
 
-        responseRevision += 1
+        guard let rev = flowCoordinator.nextResponseRevision() else {
+            print("[WarmIPCService] Response revision overflowed UInt64.max; failing closed.")
+            return
+        }
+
         do {
             let response = try EcholetIPC.AppResponse(
                 appEpoch: AppDelegate.sharedEpoch,
                 sessionId: sessionId,
                 acknowledgedRequestId: acknowledgedRequestId,
                 acknowledgedSequence: acknowledgedSequence,
-                revision: responseRevision,
+                revision: rev,
                 state: state,
                 recognizedText: recognizedText,
                 isFinal: isFinal,
