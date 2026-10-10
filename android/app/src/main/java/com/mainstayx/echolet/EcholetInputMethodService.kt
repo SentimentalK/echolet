@@ -3,16 +3,32 @@ package com.mainstayx.echolet
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.content.res.ColorStateList
 import android.graphics.Color
 import android.graphics.Typeface
+import android.graphics.drawable.ClipDrawable
 import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.LayerDrawable
+import android.graphics.drawable.RippleDrawable
 import android.inputmethodservice.InputMethodService
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.text.SpannableStringBuilder
+import android.text.Spanned
+import android.text.TextUtils
+import android.text.style.ForegroundColorSpan
+import android.text.style.RelativeSizeSpan
 import android.view.Gravity
+import android.view.HapticFeedbackConstants
+import android.view.KeyEvent
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
+import android.view.WindowInsets
+import android.view.WindowInsetsController
 import android.view.inputmethod.EditorInfo
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -39,6 +55,7 @@ class EcholetInputMethodService : InputMethodService() {
     /** Parses lazily into a memoized flag; re-checked cheaply. */
     private var nativeLibsReady: Boolean? = null
     private val ui = Handler(Looper.getMainLooper())
+    private val deleteHandler = Handler(Looper.getMainLooper())
     private val modelExecutor = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
         Thread(r, "echolet-ime-model-io").apply { isDaemon = true }
     }
@@ -49,7 +66,7 @@ class EcholetInputMethodService : InputMethodService() {
     // callbacks can never touch a dead view tree.
     private var root: ViewGroup? = null
     private var primary: TextView? = null
-    private var expandToggle: TextView? = null
+    private var expandToggle: ImageView? = null
     private var subtitle: TextView? = null
     private var expandedScroll: ScrollView? = null
     private var expandedBody: ViewGroup? = null
@@ -151,97 +168,143 @@ class EcholetInputMethodService : InputMethodService() {
 
     // ------------------------------------------------------------- input view
 
+    private fun handleDelete() {
+        val ic = currentInputConnection ?: return
+        val selected = ic.getSelectedText(0)
+        if (!selected.isNullOrEmpty()) {
+            ic.commitText("", 1)
+        } else {
+            ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DEL))
+            ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_DEL))
+        }
+    }
+
     override fun onCreateInputView(): View {
+        deleteHandler.removeCallbacksAndMessages(null)
         clearViewRefs()
         refreshReadiness()
+        applyNavBarAppearance()
 
+        // Desktop-panel look: white strip on top, soft gray body below.
         val container = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(COLOR_SURFACE)
-            setPadding(dp(4), dp(4), dp(4), dp(6))
+            setBackgroundColor(COLOR_CARD)
+            setPadding(0, 0, 0, dp(16))
         }
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            container.setOnApplyWindowInsetsListener { v, insets ->
+                // Keep every control above the IME nav bar (back + globe
+                // switcher) that the system draws over the bottom of the IME.
+                val nav = insets.getInsets(WindowInsets.Type.navigationBars())
+                val bars = insets.getInsets(WindowInsets.Type.systemBars())
+                val bottom = maxOf(nav.bottom, bars.bottom)
+                v.setPadding(0, 0, 0, if (bottom > 0) bottom else dp(48))
+                insets
+            }
+            container.requestApplyInsets()
+        }
+
+        container.addView(
+            View(this).apply { setBackgroundColor(COLOR_BORDER) },
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(1)),
+        )
+
         val header = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+        }
+
+        val toggle = ImageView(this).apply {
+            setImageDrawable(icon(KeyIconDrawable.Kind.CHEVRON_UP))
+            scaleType = ImageView.ScaleType.CENTER
+            background = keyBackground()
+            isClickable = true
+            isFocusable = true
+            contentDescription = "Expand"
+            setOnClickListener {
+                haptic(it, strong = false)
+                applyPlan(presenter.onToggleExpand())
+            }
         }
 
         val primaryButton = TextView(this).apply {
-            textSize = 18f
+            textSize = 15f
             typeface = Typeface.DEFAULT_BOLD
             setTextColor(Color.WHITE)
             gravity = Gravity.CENTER
-            minHeight = dp(48)
-            minWidth = dp(48)
-            setPadding(dp(16), dp(12), dp(16), dp(12))
             isSingleLine = true
             isClickable = true
             isFocusable = true
-        }
-        // THE only session control action: Phase 0 contract preserved.
-        primaryButton.setOnClickListener {
-            val reason = blockedReason()
-            controller.onControlTap(
-                ready = reason == null,
-                blockedReason = reason,
-                ic = currentInputConnection,
-            )
+            setOnClickListener {
+                haptic(it, strong = true)
+                val reason = blockedReason()
+                controller.onControlTap(
+                    ready = reason == null,
+                    blockedReason = reason,
+                    ic = currentInputConnection,
+                )
+            }
         }
 
-        val toggle = TextView(this).apply {
-            textSize = 20f
-            setTextColor(COLOR_TEXT)
-            gravity = Gravity.CENTER
-            minHeight = dp(48)
-            minWidth = dp(48)
-            background = roundedOutline()
+        val backspaceButton = ImageView(this).apply {
+            setImageDrawable(icon(KeyIconDrawable.Kind.BACKSPACE))
+            scaleType = ImageView.ScaleType.CENTER
+            background = keyBackground()
             isClickable = true
             isFocusable = true
+            contentDescription = "Backspace"
+            setOnTouchListener { v, event ->
+                when (event.actionMasked) {
+                    MotionEvent.ACTION_DOWN -> {
+                        v.isPressed = true
+                        haptic(v, strong = false)
+                        handleDelete()
+                        deleteHandler.removeCallbacksAndMessages(null)
+                        deleteHandler.postDelayed(object : Runnable {
+                            override fun run() {
+                                if (isDestroyed) return
+                                haptic(v, strong = false)
+                                handleDelete()
+                                deleteHandler.postDelayed(this, 60)
+                            }
+                        }, 400)
+                        true
+                    }
+                    MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                        v.isPressed = false
+                        deleteHandler.removeCallbacksAndMessages(null)
+                        true
+                    }
+                    else -> false
+                }
+            }
         }
-        // Layout visibility/height ONLY: never a session action.
-        toggle.setOnClickListener { applyPlan(presenter.onToggleExpand()) }
 
-        header.addView(
-            primaryButton,
-            LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-                1f,
-            )
-        )
         header.addView(
             toggle,
-            LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-                ViewGroup.LayoutParams.MATCH_PARENT,
-            ).apply { marginStart = dp(6) }
+            LinearLayout.LayoutParams(dp(52), dp(52)).apply { marginEnd = dp(8) },
         )
-
-        val subtitleView = TextView(this).apply {
-            textSize = 12f
-            setTextColor(COLOR_MUTED)
-            maxLines = 1
-            ellipsize = android.text.TextUtils.TruncateAt.END
-            setPadding(dp(12), dp(4), dp(12), dp(2))
-        }
+        header.addView(primaryButton, LinearLayout.LayoutParams(0, dp(52), 1f))
+        header.addView(
+            backspaceButton,
+            LinearLayout.LayoutParams(dp(52), dp(52)).apply { marginStart = dp(8) },
+        )
 
         val scroll = ScrollView(this).apply {
             isVerticalScrollBarEnabled = false
+            overScrollMode = View.OVER_SCROLL_NEVER
+            setBackgroundColor(COLOR_BG)
             visibility = View.GONE
         }
         val body = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(8), dp(2), dp(8), dp(8))
+            setPadding(dp(16), dp(14), dp(16), dp(10))
         }
         scroll.addView(body)
 
         container.addView(header)
-        container.addView(
-            subtitleView,
-            LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-            )
-        )
         container.addView(
             scroll,
             LinearLayout.LayoutParams(
@@ -253,7 +316,7 @@ class EcholetInputMethodService : InputMethodService() {
         root = container
         primary = primaryButton
         expandToggle = toggle
-        subtitle = subtitleView
+        subtitle = null
         expandedScroll = scroll
         expandedBody = body
         lastPanel = null
@@ -263,6 +326,49 @@ class EcholetInputMethodService : InputMethodService() {
         applyPlan(presenter.render(controller.model.currentState, controller.lastStatusText))
         return container
     }
+
+    /**
+     * Our IME surface is light, so ask for dark nav-bar glyphs. Without this
+     * the system draws the IME back/globe switcher in white, which is
+     * invisible on the white keyboard. Re-applied when the window is shown
+     * because the framework resets appearance while attaching the IME window.
+     */
+    private fun applyNavBarAppearance() {
+        val w = window?.window ?: return
+        @Suppress("DEPRECATION")
+        w.navigationBarColor = COLOR_CARD
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            w.isNavigationBarContrastEnforced = false
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            @Suppress("DEPRECATION")
+            w.setDecorFitsSystemWindows(false)
+            w.insetsController?.setSystemBarsAppearance(
+                WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS,
+                WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS,
+            )
+        }
+        @Suppress("DEPRECATION")
+        w.decorView.systemUiVisibility =
+            w.decorView.systemUiVisibility or View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR
+    }
+
+    private fun haptic(v: View, strong: Boolean) {
+        val type = if (strong && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            HapticFeedbackConstants.CONFIRM
+        } else {
+            HapticFeedbackConstants.KEYBOARD_TAP
+        }
+        v.isHapticFeedbackEnabled = true
+        v.performHapticFeedback(type, HapticFeedbackConstants.FLAG_IGNORE_VIEW_SETTING)
+    }
+
+    private fun icon(kind: KeyIconDrawable.Kind): KeyIconDrawable =
+        KeyIconDrawable(kind, dp(24), 2f * resources.displayMetrics.density, COLOR_TEXT_PRIMARY)
+
+    /** White outlined key with a subtle press ripple. */
+    private fun keyBackground(): RippleDrawable =
+        RippleDrawable(ColorStateList.valueOf(0x1A000000), roundedOutline(12), null)
 
     /**
      * Not a fullscreen IME: the bounded Compact/Expanded shell overlays the
@@ -293,19 +399,21 @@ class EcholetInputMethodService : InputMethodService() {
         val primaryView = primary ?: return
         val toggleView = expandToggle ?: return
 
+        val stop = plan.primaryStopStyle
         primaryView.text = plan.primaryLabel
-        primaryView.background = roundedFilled(
-            if (plan.primaryStopStyle) COLOR_STOP_RED else COLOR_CHARCOAL,
+        primaryView.background = RippleDrawable(
+            ColorStateList.valueOf(0x33FFFFFF),
+            roundedFilled(if (stop) COLOR_STOP_RED else COLOR_PRIMARY_BUTTON, 12),
+            null,
         )
-        toggleView.text = if (plan.layout == ImeLayoutMode.EXPANDED) "▴" else "▾"
-        toggleView.contentDescription =
-            if (plan.layout == ImeLayoutMode.EXPANDED) "Collapse" else "Expand"
-
-        subtitle?.text = plan.subtitle
-        subtitle?.visibility = if (plan.subtitle.isNotBlank()) View.VISIBLE else View.GONE
+        // Compact: arrow points up (the panel opens upward). Expanded: down.
+        val expanded = plan.layout == ImeLayoutMode.EXPANDED
+        toggleView.setImageDrawable(
+            icon(if (expanded) KeyIconDrawable.Kind.CHEVRON_DOWN else KeyIconDrawable.Kind.CHEVRON_UP)
+        )
+        toggleView.contentDescription = if (expanded) "Collapse" else "Expand"
 
         val scroll = expandedScroll ?: return
-        val expanded = plan.layout == ImeLayoutMode.EXPANDED
         scroll.visibility = if (expanded) View.VISIBLE else View.GONE
         if (expanded) {
             val panel = plan.expandedPanel
@@ -327,219 +435,268 @@ class EcholetInputMethodService : InputMethodService() {
         container.requestLayout()
     }
 
-    /** Builds the scrollable Expanded body: truthful, bounded content only. */
+    /**
+     * Builds the scrollable Expanded body, styled after the desktop panel:
+     * an attention card ONLY when something needs fixing (the Start/Stop
+     * button already shows the session state), a MODELS section of compact
+     * single-line rows, and a short footer.
+     */
     private fun buildExpandedBody(body: ViewGroup, panel: ImeExpandedPanel) {
         body.removeAllViews()
-        body.addView(card(panel.statusTitle, panel.statusBody, highlightTitle = true))
-        val prereqCard = roundedCard()
-        panel.prerequisiteLines.forEach { line ->
-            prereqCard.addView(textView(line.title, 14f, if (line.ok) COLOR_TEXT else COLOR_STOP_RED, bold = true))
-            prereqCard.addView(textView(line.body, 13f, COLOR_MUTED))
-        }
-        body.addView(prereqCard)
 
-        // Phase 1-B: Model Catalog Browser
-        val snapshot = panel.modelSnapshot
-        if (snapshot != null && snapshot.groups.isNotEmpty()) {
-            val modelsCard = roundedCard()
-            modelsCard.addView(textView("Available Voice Models", 15f, COLOR_TEXT, bold = true))
-
-            snapshot.groups.forEach { group ->
-                modelsCard.addView(
-                    textView(group.label, 13f, COLOR_MUTED, bold = true).apply {
-                        setPadding(0, dp(6), 0, dp(2))
-                    }
+        // 1. Attention card — only when blocked or setup is required.
+        // The Start/Stop button already shows session state, and the model
+        // list covers voice-model status, so the mic/runtime/model checklist
+        // is not shown when everything is usable.
+        val blocked = panel.statusTitle == "Blocked"
+        val setupLines = panel.prerequisiteLines.filter { line ->
+            !line.ok && (
+                line.title.contains("Microphone", ignoreCase = true) ||
+                    line.title.contains("runtime", ignoreCase = true)
                 )
-
-                group.models.forEach { model ->
-                    val row = LinearLayout(this).apply {
-                        orientation = LinearLayout.HORIZONTAL
-                        gravity = Gravity.CENTER_VERTICAL
-                        setPadding(0, dp(6), 0, dp(6))
-                    }
-
-                    val infoLayout = LinearLayout(this).apply {
-                        orientation = LinearLayout.VERTICAL
-                        layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-                    }
-
-                    val nameRow = LinearLayout(this).apply {
-                        orientation = LinearLayout.HORIZONTAL
-                        gravity = Gravity.CENTER_VERTICAL
-                    }
-
-                    val nameText = textView(
-                        if (model.selected) "✓ ${model.label}" else model.label,
-                        14f,
-                        COLOR_TEXT,
-                        bold = model.selected,
-                    )
-                    nameRow.addView(nameText)
-
-                    val badge = TextView(this).apply {
-                        text = " ${model.verificationLabel} "
-                        textSize = 10f
-                        setTextColor(if (model.isVerified) 0xFF059669.toInt() else 0xFFD97706.toInt())
-                        background = GradientDrawable().apply {
-                            cornerRadius = 4 * resources.displayMetrics.density
-                            setColor(if (model.isVerified) 0x1A059669 else 0x1AD97706)
-                        }
-                    }
-                    val badgeParams = LinearLayout.LayoutParams(
-                        ViewGroup.LayoutParams.WRAP_CONTENT,
-                        ViewGroup.LayoutParams.WRAP_CONTENT,
-                    ).apply { marginStart = dp(6) }
-                    nameRow.addView(badge, badgeParams)
-
-                    infoLayout.addView(nameRow)
-
-                    val statusSubtitle = when {
-                        model.downloadPhase != "NotDownloading" && model.downloadPhase != "Completed" ->
-                            model.downloadLabel ?: model.downloadPhase
-                        model.installed -> "Installed · ${model.releaseDate}"
-                        else -> "Available for download · ${model.releaseDate}"
-                    }
-                    infoLayout.addView(textView(statusSubtitle, 12f, COLOR_MUTED))
-
-                    row.addView(infoLayout)
-
-                    // Action button (>=48dp touch target)
-                    val actionButton = TextView(this).apply {
+        }
+        val showNotice = setupLines.isNotEmpty() || panel.setupVisible ||
+            (blocked && panel.statusBody.isNotBlank())
+        if (showNotice) {
+            val notice = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                background = GradientDrawable().apply {
+                    cornerRadius = dp(10).toFloat()
+                    setColor(COLOR_NOTICE_BG)
+                    setStroke(dp(1), COLOR_NOTICE_BORDER)
+                }
+                setPadding(dp(12), dp(10), dp(12), dp(10))
+            }
+            if (setupLines.isNotEmpty()) {
+                setupLines.forEach { line ->
+                    notice.addView(textView(line.title, 13f, COLOR_NOTICE_TEXT, bold = true))
+                    notice.addView(textView(line.body, 12f, COLOR_TEXT_SECONDARY))
+                }
+            } else if (blocked && panel.statusBody.isNotBlank()) {
+                notice.addView(textView(panel.statusBody, 13f, COLOR_NOTICE_TEXT, bold = true))
+            }
+            if (panel.setupVisible) {
+                notice.addView(
+                    TextView(this).apply {
+                        text = "Open Echolet Setup"
                         textSize = 13f
                         typeface = Typeface.DEFAULT_BOLD
+                        setTextColor(Color.WHITE)
                         gravity = Gravity.CENTER
-                        minHeight = dp(48)
-                        minWidth = dp(48)
-                        setPadding(dp(12), dp(8), dp(12), dp(8))
+                        background = RippleDrawable(
+                            ColorStateList.valueOf(0x33FFFFFF),
+                            roundedFilled(COLOR_PRIMARY_BUTTON, 8),
+                            null,
+                        )
                         isClickable = true
                         isFocusable = true
+                        // Explicit user action only: opens the setup Activity,
+                        // never writes setup/error text into the editor and never
+                        // routed to the controller.
+                        setOnClickListener { presenter.onSetupClicked() }
+                    },
+                    LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(40))
+                        .apply { topMargin = dp(8) },
+                )
+            }
+            body.addView(notice, matchWrap().apply { bottomMargin = dp(16) })
+        }
 
-                        when {
-                            model.selected -> {
-                                text = "Selected"
-                                setTextColor(COLOR_MUTED)
-                                background = roundedOutline()
-                                isEnabled = false
-                            }
-                            model.downloadPhase == "Starting" ||
-                            model.downloadPhase == "Downloading" ||
-                            model.downloadPhase == "Verifying" ||
-                            model.downloadPhase == "Extracting" ||
-                            model.downloadPhase == "Installing" -> {
-                                text = model.progressPercent?.let { "$it%" } ?: "..."
-                                setTextColor(Color.WHITE)
-                                background = roundedFilled(0xFF2563EB.toInt())
-                                isEnabled = false
-                            }
-                            model.primaryAction == "Select" -> {
-                                text = "Select"
-                                setTextColor(Color.WHITE)
-                                background = roundedFilled(COLOR_CHARCOAL)
-                                isEnabled = model.enabled
-                                setOnClickListener {
-                                    if (isDestroyed) return@setOnClickListener
-                                    if (controller.isSessionActive()) {
-                                        android.util.Log.w("EcholetIme", "Model selection rejected: session active")
-                                        return@setOnClickListener
-                                    }
-                                    try {
-                                        modelExecutor.execute {
-                                            if (isDestroyed) return@execute
-                                            if (controller.isSessionActive()) {
-                                                android.util.Log.w("EcholetIme", "Model selection rejected: session became active")
-                                                return@execute
-                                            }
-                                            val ok = try {
-                                                NativeBridge.nativeSelectModel(model.id)
-                                            } catch (t: Throwable) {
-                                                android.util.Log.e("EcholetIme", "Model selection failed for ${model.id}", t)
-                                                false
-                                            }
-                                            if (ok) {
-                                                runOnUi {
-                                                    if (isDestroyed) return@runOnUi
-                                                    refreshReadiness()
-                                                    refreshModelSnapshot()
-                                                }
-                                            } else {
-                                                android.util.Log.w("EcholetIme", "Model selection rejected by core for ${model.id}")
-                                            }
-                                        }
-                                    } catch (_: java.util.concurrent.RejectedExecutionException) {
-                                        // Fail closed
-                                    }
-                                }
-                            }
-                            model.primaryAction == "Download" || model.primaryAction == "RetryDownload" -> {
-                                text = if (model.primaryAction == "RetryDownload") "Retry" else "Download"
-                                setTextColor(Color.WHITE)
-                                background = roundedFilled(0xFF2563EB.toInt())
-                                isEnabled = model.enabled
-                                setOnClickListener {
-                                    downloadManager.startDownload(model.id)
-                                    refreshModelSnapshot()
-                                }
-                            }
-                            else -> {
-                                visibility = View.GONE
-                            }
-                        }
-                    }
-
-                    val btnParams = LinearLayout.LayoutParams(
-                        ViewGroup.LayoutParams.WRAP_CONTENT,
-                        ViewGroup.LayoutParams.WRAP_CONTENT,
-                    ).apply { marginStart = dp(8) }
-                    row.addView(actionButton, btnParams)
-
-                    modelsCard.addView(row)
+        // 2. Models.
+        val snapshot = panel.modelSnapshot
+        if (snapshot != null && snapshot.groups.isNotEmpty()) {
+            body.addView(sectionLabel("MODELS"), matchWrap().apply { bottomMargin = dp(8) })
+            snapshot.groups.forEachIndexed { gi, group ->
+                body.addView(
+                    singleLine(group.label, 11f, COLOR_TEXT_MUTED, bold = true),
+                    matchWrap().apply {
+                        if (gi > 0) topMargin = dp(10)
+                        bottomMargin = dp(6)
+                    },
+                )
+                group.models.forEach { model ->
+                    body.addView(modelRow(model), matchWrap().apply { bottomMargin = dp(6) })
                 }
             }
-
-            body.addView(modelsCard)
         }
 
+        // 3. Footer.
         body.addView(
-            textView(panel.offlineNote, 13f, COLOR_MUTED).apply {
-                setPadding(dp(8), dp(6), dp(8), dp(2))
-            }
+            singleLine("Local dictation. Audio never leaves this device.", 10f, COLOR_TEXT_SUBTLE).apply {
+                typeface = Typeface.MONOSPACE
+                gravity = Gravity.CENTER
+            },
+            matchWrap().apply { topMargin = dp(10) },
         )
-        if (panel.setupVisible) {
-            body.addView(
-                TextView(this).apply {
-                    text = "Open Echolet Setup"
-                    textSize = 16f
-                    setTextColor(Color.WHITE)
-                    gravity = Gravity.CENTER
-                    minHeight = dp(48)
-                    minWidth = dp(48)
-                    background = roundedFilled(COLOR_CHARCOAL)
-                    setPadding(dp(16), dp(12), dp(16), dp(12))
-                    isClickable = true
-                    isFocusable = true
-                    // Explicit user action only: opens the setup Activity,
-                    // never writes setup/error text into the editor and never
-                    // routed to the controller.
-                    setOnClickListener { presenter.onSetupClicked() }
-                },
-                LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.WRAP_CONTENT,
-                ).apply { topMargin = dp(6) }
+    }
+
+    /** One desktop-style model row: name + date on the left, action on the right. */
+    private fun modelRow(model: ModelItemUi): View {
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(12), dp(6), dp(8), dp(6))
+            background = GradientDrawable().apply {
+                cornerRadius = dp(10).toFloat()
+                setColor(if (model.selected) COLOR_ROW_SELECTED else COLOR_CARD)
+                setStroke(dp(1), if (model.selected) COLOR_BORDER_STRONG else COLOR_BORDER)
+            }
+        }
+
+        val info = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+
+        // Desktop shows the short name and puts the version/date on the next
+        // line, so a long "Name — version" title is not cut off with an ellipsis.
+        val parts = model.label.split(" — ", limit = 2)
+        val shortName = parts[0].trim().ifEmpty { model.label.trim() }
+        val name = SpannableStringBuilder(shortName)
+        if (!model.isVerified && model.verificationLabel.isNotBlank()) {
+            val start = name.length
+            name.append("  ").append(model.verificationLabel)
+            name.setSpan(ForegroundColorSpan(COLOR_STOP_RED), start, name.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            name.setSpan(RelativeSizeSpan(0.8f), start, name.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+        }
+        info.addView(infoText(name, 13f, COLOR_TEXT_PRIMARY, bold = true))
+
+        val inProgress = model.downloadPhase in IN_PROGRESS_PHASES
+        val subtitle = model.releaseDate.trim().ifEmpty { parts.getOrNull(1)?.trim().orEmpty() }
+        if (subtitle.isNotEmpty()) {
+            info.addView(
+                infoText(subtitle, 11f, COLOR_TEXT_SUBTLE),
+                matchWrap().apply { topMargin = dp(1) },
             )
         }
+        row.addView(info, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+
+        val action = TextView(this).apply {
+            textSize = 12f
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            isSingleLine = true
+            includeFontPadding = false
+            setPadding(dp(4), 0, dp(4), 0)
+        }
+        when {
+            model.selected -> {
+                action.text = "✓ Selected"
+                action.setTextColor(Color.WHITE)
+                action.background = roundedFilled(COLOR_PRIMARY_BUTTON, 8)
+            }
+            inProgress -> {
+                val pct = model.progressPercent
+                action.text = when (model.downloadPhase) {
+                    "Downloading" -> pct?.let { "$it%" } ?: "Downloading"
+                    "Starting" -> "Starting"
+                    "Verifying" -> "Verifying"
+                    "Extracting" -> "Extracting"
+                    "Installing" -> "Installing"
+                    else -> pct?.let { "$it%" } ?: model.downloadPhase
+                }
+                action.setTextColor(COLOR_PRIMARY_BUTTON)
+                val fill = ClipDrawable(roundedFilled(COLOR_BORDER_STRONG, 8), Gravity.START, ClipDrawable.HORIZONTAL)
+                fill.level = ((pct ?: 0).coerceIn(0, 100)) * 100
+                action.background = LayerDrawable(arrayOf(smallOutline(), fill))
+            }
+            model.primaryAction == "Select" || model.primaryAction == "Download" ||
+                model.primaryAction == "RetryDownload" -> {
+                action.text = when (model.primaryAction) {
+                    "Select" -> "Select"
+                    "RetryDownload" -> "Retry"
+                    else -> "Download"
+                }
+                action.isEnabled = model.enabled
+                action.setTextColor(if (model.enabled) COLOR_PRIMARY_BUTTON else COLOR_TEXT_SUBTLE)
+                action.background = if (model.enabled) {
+                    RippleDrawable(ColorStateList.valueOf(0x1A000000), smallOutline(), null)
+                } else {
+                    roundedFilled(COLOR_ROW_SELECTED, 8)
+                }
+                action.isClickable = true
+                action.isFocusable = true
+                action.setOnClickListener { v ->
+                    haptic(v, strong = false)
+                    if (model.primaryAction == "Select") selectModel(model.id) else {
+                        downloadManager.startDownload(model.id)
+                        refreshModelSnapshot()
+                    }
+                }
+            }
+            else -> action.visibility = View.GONE
+        }
+        row.addView(
+            action,
+            LinearLayout.LayoutParams(dp(96), dp(34)).apply { marginStart = dp(8) },
+        )
+        return row
     }
 
-    private fun roundedCard(): LinearLayout = LinearLayout(this).apply {
-        orientation = LinearLayout.VERTICAL
-        background = roundedFilled(COLOR_CARD)
-        setPadding(dp(14), dp(12), dp(14), dp(12))
+    private fun selectModel(modelId: String) {
+        if (isDestroyed) return
+        if (controller.isSessionActive()) {
+            android.util.Log.w("EcholetIme", "Model selection rejected: session active")
+            return
+        }
+        try {
+            modelExecutor.execute {
+                if (isDestroyed) return@execute
+                if (controller.isSessionActive()) {
+                    android.util.Log.w("EcholetIme", "Model selection rejected: session became active")
+                    return@execute
+                }
+                val ok = try {
+                    NativeBridge.nativeSelectModel(modelId)
+                } catch (t: Throwable) {
+                    android.util.Log.e("EcholetIme", "Model selection failed for $modelId", t)
+                    false
+                }
+                if (ok) {
+                    runOnUi {
+                        if (isDestroyed) return@runOnUi
+                        refreshReadiness()
+                        refreshModelSnapshot()
+                    }
+                } else {
+                    android.util.Log.w("EcholetIme", "Model selection rejected by core for $modelId")
+                }
+            }
+        } catch (_: java.util.concurrent.RejectedExecutionException) {
+            // Fail closed
+        }
     }
 
-    private fun card(title: String, bodyText: String, highlightTitle: Boolean): LinearLayout =
-        roundedCard().apply {
-            addView(textView(title, 15f, COLOR_TEXT, bold = highlightTitle))
-            if (bodyText.isNotBlank()) addView(textView(bodyText, 13f, COLOR_MUTED))
+    private fun matchWrap() = LinearLayout.LayoutParams(
+        ViewGroup.LayoutParams.MATCH_PARENT,
+        ViewGroup.LayoutParams.WRAP_CONTENT,
+    )
+
+    /** Monospace uppercase eyebrow heading, as on the desktop panel. */
+    private fun sectionLabel(text: String): TextView =
+        singleLine(text, 10f, COLOR_TEXT_MUTED, bold = true).apply {
+            typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+            letterSpacing = 0.12f
+        }
+
+    private fun singleLine(text: String, size: Float, color: Int, bold: Boolean = false): TextView =
+        TextView(this).apply {
+            this.text = text
+            textSize = size
+            setTextColor(color)
+            if (bold) typeface = Typeface.DEFAULT_BOLD
+            isSingleLine = true
+            ellipsize = TextUtils.TruncateAt.END
+            includeFontPadding = false
+        }
+
+    /** Model-row copy: wraps inside the left column and never draws an ellipsis. */
+    private fun infoText(text: CharSequence, size: Float, color: Int, bold: Boolean = false): TextView =
+        TextView(this).apply {
+            this.text = text
+            textSize = size
+            setTextColor(color)
+            if (bold) typeface = Typeface.DEFAULT_BOLD
+            includeFontPadding = false
+            setLineSpacing(0f, 1f)
+            layoutParams = matchWrap()
         }
 
     private fun textView(text: String, size: Float, color: Int, bold: Boolean = false): TextView =
@@ -548,19 +705,21 @@ class EcholetInputMethodService : InputMethodService() {
             textSize = size
             setTextColor(color)
             if (bold) typeface = Typeface.DEFAULT_BOLD
-            setPadding(0, dp(2), 0, dp(4))
+            setPadding(0, dp(2), 0, dp(2))
         }
 
-    private fun roundedFilled(color: Int): GradientDrawable = GradientDrawable().apply {
-        cornerRadius = 14 * resources.displayMetrics.density
+    private fun roundedFilled(color: Int, radiusDp: Int = 12): GradientDrawable = GradientDrawable().apply {
+        cornerRadius = dp(radiusDp).toFloat()
         setColor(color)
     }
 
-    private fun roundedOutline(): GradientDrawable = GradientDrawable().apply {
-        cornerRadius = 14 * resources.displayMetrics.density
-        setColor(Color.WHITE)
-        setStroke(dp(1), COLOR_MUTED)
+    private fun roundedOutline(radiusDp: Int = 12): GradientDrawable = GradientDrawable().apply {
+        cornerRadius = dp(radiusDp).toFloat()
+        setColor(COLOR_CARD)
+        setStroke(dp(1), COLOR_BORDER)
     }
+
+    private fun smallOutline(): GradientDrawable = roundedOutline(8)
 
     /**
      * Expanded height clamp: the scroll region never exceeds a conservative
@@ -597,6 +756,7 @@ class EcholetInputMethodService : InputMethodService() {
 
     override fun onStartInputView(editorInfo: EditorInfo?, restarting: Boolean) {
         super.onStartInputView(editorInfo, restarting)
+        applyNavBarAppearance()
         if (editorInfo == null) {
             controller.onInputStarted(null, restarting, viewVisible = false)
             return
@@ -628,6 +788,11 @@ class EcholetInputMethodService : InputMethodService() {
 
     override fun onWindowShown() {
         super.onWindowShown()
+        applyNavBarAppearance()
+        root?.requestApplyInsets()
+        ui.post {
+            if (!isDestroyed) applyNavBarAppearance()
+        }
         refreshReadiness()
         refreshModelSnapshot()
         applyPlan(presenter.onFreshVisibility(readiness))
@@ -643,6 +808,7 @@ class EcholetInputMethodService : InputMethodService() {
     }
 
     override fun onDestroy() {
+        deleteHandler.removeCallbacksAndMessages(null)
         synchronized(this) {
             isDestroyed = true
             modelSnapshotGen++
@@ -679,11 +845,37 @@ class EcholetInputMethodService : InputMethodService() {
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
 
     private companion object {
-        const val COLOR_CHARCOAL = 0xFF18181B.toInt()
-        const val COLOR_STOP_RED = 0xFFEF4444.toInt()
-        const val COLOR_SURFACE = 0xFFFAFAFA.toInt()
-        const val COLOR_CARD = -0x1 // Color.WHITE
-        const val COLOR_TEXT = 0xFF18181B.toInt()
-        const val COLOR_MUTED = 0xFF3F3F46.toInt()
+        const val COLOR_BG = 0xFFF9FAFB.toInt()
+        const val COLOR_CARD = 0xFFFFFFFF.toInt()
+        const val COLOR_BORDER = 0xFFE5E7EB.toInt()
+        const val COLOR_TEXT_PRIMARY = 0xFF111827.toInt()
+        const val COLOR_TEXT_MUTED = 0xFF6B7280.toInt()
+        const val COLOR_PRIMARY_BUTTON = 0xFF1F2937.toInt()
+        const val COLOR_STOP_RED = 0xFFDC2626.toInt()
+        const val COLOR_DANGER = 0xFFDC2626.toInt()
+        const val COLOR_SUCCESS = 0xFF059669.toInt()
+        const val COLOR_WARNING = 0xFFD97706.toInt()
+        const val COLOR_NOTICE_BG = 0xFFFEF3C7.toInt()
+        const val COLOR_NOTICE_BORDER = 0xFFFDE68A.toInt()
+        const val COLOR_NOTICE_TEXT = 0xFF92400E.toInt()
+        const val COLOR_TEXT_SECONDARY = 0xFF4B5563.toInt()
+        const val COLOR_TEXT_SUBTLE = 0xFF9CA3AF.toInt()
+        const val COLOR_ROW_SELECTED = 0xFFF3F4F6.toInt()
+        const val COLOR_BORDER_STRONG = 0xFFD1D5DB.toInt()
+
+        val IN_PROGRESS_PHASES = setOf(
+            "Starting",
+            "Preparing",
+            "Downloading",
+            "Verifying",
+            "Extracting",
+            "Installing",
+        )
+
+        // Backward compatibility aliases
+        const val COLOR_CHARCOAL = COLOR_PRIMARY_BUTTON
+        const val COLOR_SURFACE = COLOR_BG
+        const val COLOR_TEXT = COLOR_TEXT_PRIMARY
+        const val COLOR_MUTED = COLOR_TEXT_MUTED
     }
 }

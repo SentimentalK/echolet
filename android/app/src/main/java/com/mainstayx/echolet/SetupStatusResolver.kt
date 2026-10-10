@@ -9,10 +9,10 @@ enum class KeyboardSelectedState {
 data class SetupOsStatus(
     val micGranted: Boolean,
     val imeEnabled: Boolean,
-    val imeSelected: KeyboardSelectedState,
+    val imeSelected: KeyboardSelectedState = KeyboardSelectedState.NOT_SELECTED,
 ) {
     val allPrerequisitesReady: Boolean
-        get() = micGranted && imeEnabled && (imeSelected == KeyboardSelectedState.SELECTED)
+        get() = micGranted && imeEnabled
 }
 
 /**
@@ -55,19 +55,15 @@ object SetupStatusResolver {
 
     fun deriveGuidance(status: SetupOsStatus): String = when {
         status.allPrerequisitesReady ->
-            "All OS prerequisites satisfied. Open any text field and switch to Echolet to begin voice typing."
+            "All setup complete. Switch to Echolet voice keyboard when typing in any app."
         !status.micGranted && !status.imeEnabled ->
             "Grant microphone permission and enable Echolet in Android keyboard settings to get started."
         !status.micGranted ->
             "Grant microphone permission so Echolet can record audio while you dictate."
         !status.imeEnabled ->
             "Enable Echolet in Android keyboard settings below."
-        status.imeSelected == KeyboardSelectedState.NOT_SELECTED ->
-            "Echolet is enabled. Select Echolet as your active keyboard in settings or when typing."
-        status.imeSelected == KeyboardSelectedState.UNKNOWN ->
-            "Echolet is enabled. Check in keyboard settings or switch to Echolet when a text field is focused."
         else ->
-            "Open any text field and switch to Echolet voice keyboard."
+            "Switch to Echolet voice keyboard when typing in any app."
     }
 
     fun micStatusSummary(micGranted: Boolean): String =

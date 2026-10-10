@@ -49,7 +49,6 @@ class MainActivity : Activity() {
     // Status views
     private var micStatusView: TextView? = null
     private var imeEnabledStatusView: TextView? = null
-    private var imeSelectedStatusView: TextView? = null
     private var guidanceView: TextView? = null
 
     // Setup action buttons
@@ -136,9 +135,6 @@ class MainActivity : Activity() {
 
             imeEnabledStatusView = createStatusRow(this@MainActivity, "2. Keyboard in System Settings")
             addView(imeEnabledStatusView)
-
-            imeSelectedStatusView = createStatusRow(this@MainActivity, "3. Active Keyboard Selection")
-            addView(imeSelectedStatusView)
 
             val modelInfoNote = TextView(this@MainActivity).apply {
                 text = "Voice models: Downloaded and selected inside Echolet keyboard."
@@ -384,16 +380,6 @@ class MainActivity : Activity() {
             SetupStatusResolver.imeEnabledSummary(status.imeEnabled)
         imeEnabledStatusView?.setTextColor(if (status.imeEnabled) COLOR_SUCCESS else COLOR_DANGER)
 
-        imeSelectedStatusView?.text = "3. Active Keyboard Selection: " +
-            SetupStatusResolver.imeSelectedSummary(status.imeSelected)
-        imeSelectedStatusView?.setTextColor(
-            when (status.imeSelected) {
-                KeyboardSelectedState.SELECTED -> COLOR_SUCCESS
-                KeyboardSelectedState.NOT_SELECTED -> COLOR_WARNING
-                KeyboardSelectedState.UNKNOWN -> COLOR_WARNING
-            }
-        )
-
         guidanceView?.text = SetupStatusResolver.deriveGuidance(status)
 
         // Update mic button
@@ -429,6 +415,31 @@ class MainActivity : Activity() {
             micButton?.isEnabled = true
             micButton?.setOnClickListener {
                 requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), REQUEST_MIC)
+            }
+        }
+
+        // Update keyboard button
+        if (status.imeEnabled) {
+            imeButton?.text = "Echolet keyboard enabled ✓"
+            imeButton?.background = roundedFilled(COLOR_SUCCESS)
+            imeButton?.setOnClickListener(null)
+            imeButton?.isEnabled = false
+        } else {
+            imeButton?.text = "Enable Echolet keyboard"
+            imeButton?.background = roundedFilled(COLOR_PRIMARY_BUTTON)
+            imeButton?.isEnabled = true
+            imeButton?.setOnClickListener {
+                val opened = try {
+                    startActivity(Intent(Settings.ACTION_INPUT_METHOD_SETTINGS))
+                    true
+                } catch (_: ActivityNotFoundException) {
+                    false
+                } catch (_: SecurityException) {
+                    false
+                }
+                if (!opened) {
+                    status("Could not open keyboard settings automatically. Open Android Settings > System > Languages & input to enable Echolet.")
+                }
             }
         }
     }

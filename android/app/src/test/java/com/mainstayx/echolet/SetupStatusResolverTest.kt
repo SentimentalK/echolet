@@ -65,25 +65,24 @@ class SetupStatusResolverTest {
     }
 
     @Test
-    fun `allPrerequisitesReady is true ONLY when mic granted, IME enabled, and IME selected`() {
+    fun `allPrerequisitesReady is true when mic is granted and IME is enabled in settings`() {
         val allReady = SetupOsStatus(
             micGranted = true,
             imeEnabled = true,
-            imeSelected = KeyboardSelectedState.SELECTED,
+            imeSelected = KeyboardSelectedState.NOT_SELECTED,
         )
         assertTrue(allReady.allPrerequisitesReady)
-        assertTrue(SetupStatusResolver.deriveGuidance(allReady).contains("All OS prerequisites satisfied"))
+        assertTrue(SetupStatusResolver.deriveGuidance(allReady).contains("All setup complete"))
     }
 
     @Test
-    fun `enabled but not selected never reports all ready`() {
+    fun `enabled in settings reports all ready even when not active IME`() {
         val enabledNotSelected = SetupOsStatus(
             micGranted = true,
             imeEnabled = true,
             imeSelected = KeyboardSelectedState.NOT_SELECTED,
         )
-        assertFalse(enabledNotSelected.allPrerequisitesReady)
-        assertTrue(SetupStatusResolver.deriveGuidance(enabledNotSelected).contains("Select Echolet as your active keyboard"))
+        assertTrue(enabledNotSelected.allPrerequisitesReady)
     }
 
     @Test
@@ -98,14 +97,14 @@ class SetupStatusResolverTest {
     }
 
     @Test
-    fun `unknown selected state never false-positives ready`() {
-        val unknownSelection = SetupOsStatus(
+    fun `IME not enabled never reports all ready`() {
+        val noIme = SetupOsStatus(
             micGranted = true,
-            imeEnabled = true,
-            imeSelected = KeyboardSelectedState.UNKNOWN,
+            imeEnabled = false,
+            imeSelected = KeyboardSelectedState.NOT_SELECTED,
         )
-        assertFalse("Must never false-positive ready when selection is unknown", unknownSelection.allPrerequisitesReady)
-        assertTrue(SetupStatusResolver.deriveGuidance(unknownSelection).contains("Check in keyboard settings"))
+        assertFalse(noIme.allPrerequisitesReady)
+        assertTrue(SetupStatusResolver.deriveGuidance(noIme).contains("Enable Echolet"))
     }
 
     @Test
@@ -119,7 +118,7 @@ class SetupStatusResolverTest {
 
     @Test
     fun `simulated onResume refresh transitions update status cleanly`() {
-        // Initial launch: mic not granted, IME not enabled, not selected
+        // Initial launch: mic not granted, IME not enabled
         var state = SetupOsStatus(
             micGranted = false,
             imeEnabled = false,
@@ -134,11 +133,7 @@ class SetupStatusResolverTest {
 
         // Step 2: User enables IME in settings and returns via onResume
         state = state.copy(imeEnabled = true)
-        assertFalse(state.allPrerequisitesReady)
-        assertTrue(SetupStatusResolver.deriveGuidance(state).contains("Select Echolet as your active keyboard"))
-
-        // Step 3: User selects IME and returns via onResume
-        state = state.copy(imeSelected = KeyboardSelectedState.SELECTED)
         assertTrue(state.allPrerequisitesReady)
+        assertTrue(SetupStatusResolver.deriveGuidance(state).contains("All setup complete"))
     }
 }
