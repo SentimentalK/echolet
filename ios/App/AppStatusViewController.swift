@@ -1,14 +1,16 @@
 import UIKit
+import AVFoundation
 
 /// Minimal status and test harness view controller for the Containing App.
 ///
 /// Responsibilities:
 /// 1. Mint and publish a unique launch app_epoch UUID to App Group UserDefaults (`echolet.app.epoch.v2`).
 /// 2. Display clear instructions for enabling the custom keyboard in Settings.
-/// 3. Provide a DEBUG-only test responder button that monitors for valid pending Keyboard requests
-///    in the App Group defaults and generates an explicit mock response snapshot.
-/// 4. Surface explicit status/error warnings if App Group entitlements are missing or unconfigured.
-class AppStatusViewController: UIViewController {
+/// 3. Provide real microphone testing controls with permission preflight, live PCM metering (~4Hz), and frame counters.
+/// 4. Provide Warm IPC coordination for keyboard requests while app is active.
+/// 5. Preserve DEBUG-only mock transcription button for IPC regression testing.
+/// 6. Surface explicit status/error warnings if App Group entitlements are missing or unconfigured.
+class AppStatusViewController: UIViewController, AudioCaptureDelegate, WarmIPCServiceDelegate {
 
     static let appGroupId = "group.com.mainstayx.echolet.dev"
 
@@ -26,23 +28,47 @@ class AppStatusViewController: UIViewController {
     private let epochStatusLabel = UILabel()
     private let appGroupStatusLabel = UILabel()
     private let instructionsLabel = UILabel()
-    private let lastRequestLabel = UILabel()
+
+    // Real Microphone Capture Test UI (J3A)
+    private let micSectionLabel = UILabel()
+    private let micStatusLabel = UILabel()
+    private let micLevelMeterLabel = UILabel()
+    private let micLevelProgress = UIProgressView(progressViewStyle: .default)
+    private let micArmSwitchContainer = UIStackView()
+    private let micArmSwitchLabel = UILabel()
+    private let micArmSwitch = UISwitch()
+    private let micActionRow = UIStackView()
+    private let startMicButton = UIButton(type: .system)
+    private let stopMicButton = UIButton(type: .system)
+
+    // Contained In-App Editor Target
     private let testTextViewLabel = UILabel()
     private let testTextView = UITextView()
-    private let demoResponseButton = UIButton(type: .system)
+
+    // Last Request Display
+    private let lastRequestLabel = UILabel()
     private let refreshButton = UIButton(type: .system)
+    private let demoResponseButton = UIButton(type: .system)
     private let statusNoteLabel = UILabel()
 
     override func viewDidLoad() {
         super.viewDidLoad()
         setupUI()
         initializeIPC()
+        AudioCaptureController.shared.delegate = self
+        WarmIPCService.shared.delegate = self
         refreshIPCStatus()
     }
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
         refreshIPCStatus()
+        WarmIPCService.shared.startPolling()
+    }
+
+    override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated)
+        WarmIPCService.shared.stopPolling()
     }
 
     private func setupUI() {
@@ -95,15 +121,94 @@ class AppStatusViewController: UIViewController {
         Keyboard Setup Guide:
         1. Open Settings -> General -> Keyboard -> Keyboards -> Add New Keyboard.
         2. Select "Echolet", then tap "Echolet" and turn on "Allow Full Access" (needed for local App Group IPC).
-        3. Note: If using an Apple Personal Team / Free Account, App Groups entitlement may not be provisioned by Apple. If App Group defaults are unavailable, cross-process IPC will fail-closed.
+        3. Real Microphone Capture (J3A):
+           - Tap "Enable/Arm Microphone Test" switch below to authorize warm capture.
+           - Tap "Start Audio Test" to capture real PCM frames from iPad mic.
+           - Speak into iPad: watch RMS level and frame count advance in real time.
+           - Tap "Stop Audio Test": microphone releases cleanly and frame count stops.
         4. In-App Contained Test Flow:
            - Tap the text editor box below so the keyboard appears.
            - Switch to Echolet keyboard using the Globe (🌐) key.
            - Tap "Start Test" on the Echolet keyboard.
-           - Tap "DEBUG: Send Mock Transcription" below (editor stays active or tap "Check for Incoming Request").
+           - Tap "DEBUG: Send Mock Transcription" below.
            - Tap "Consume Response" on the Echolet keyboard to insert mock text into the editor.
         """
         stackView.addArrangedSubview(instructionsLabel)
+
+        // MARK: Real Microphone Section (J3A)
+        let micContainer = UIView()
+        micContainer.backgroundColor = .secondarySystemBackground
+        micContainer.layer.cornerRadius = 10
+        micContainer.layer.masksToBounds = true
+
+        let micStack = UIStackView()
+        micStack.translatesAutoresizingMaskIntoConstraints = false
+        micStack.axis = .vertical
+        micStack.spacing = 10
+        micContainer.addSubview(micStack)
+
+        NSLayoutConstraint.activate([
+            micStack.topAnchor.constraint(equalTo: micContainer.topAnchor, constant: 12),
+            micStack.leadingAnchor.constraint(equalTo: micContainer.leadingAnchor, constant: 12),
+            micStack.trailingAnchor.constraint(equalTo: micContainer.trailingAnchor, constant: -12),
+            micStack.bottomAnchor.constraint(equalTo: micContainer.bottomAnchor, constant: -12)
+        ])
+
+        micSectionLabel.text = "iPad Microphone Capture Probe (J3A)"
+        micSectionLabel.font = .boldSystemFont(ofSize: 15)
+        micStack.addArrangedSubview(micSectionLabel)
+
+        micStatusLabel.font = .systemFont(ofSize: 13, weight: .semibold)
+        micStatusLabel.textColor = .secondaryLabel
+        micStatusLabel.text = "Microphone Status: NOT RECORDING"
+        micStack.addArrangedSubview(micStatusLabel)
+
+        micLevelMeterLabel.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+        micLevelMeterLabel.numberOfLines = 0
+        micLevelMeterLabel.text = "Frames: 0 | RMS: -160 dB | Peak: -160 dB | Time: 0.0s"
+        micStack.addArrangedSubview(micLevelMeterLabel)
+
+        micLevelProgress.progress = 0.0
+        micStack.addArrangedSubview(micLevelProgress)
+
+        // Arm Switch
+        micArmSwitchContainer.axis = .horizontal
+        micArmSwitchContainer.spacing = 8
+        micArmSwitchContainer.alignment = .center
+
+        micArmSwitchLabel.text = "Enable / Arm Microphone Test:"
+        micArmSwitchLabel.font = .systemFont(ofSize: 13)
+        micArmSwitchContainer.addArrangedSubview(micArmSwitchLabel)
+
+        micArmSwitch.isOn = false
+        micArmSwitch.addTarget(self, action: #selector(didToggleArmSwitch(_:)), for: .valueChanged)
+        micArmSwitchContainer.addArrangedSubview(micArmSwitch)
+        micStack.addArrangedSubview(micArmSwitchContainer)
+
+        // Capture Action Buttons
+        micActionRow.axis = .horizontal
+        micActionRow.spacing = 10
+        micActionRow.distribution = .fillEqually
+
+        startMicButton.setTitle("Start Audio Test", for: .normal)
+        startMicButton.titleLabel?.font = .boldSystemFont(ofSize: 14)
+        startMicButton.backgroundColor = .systemGreen
+        startMicButton.setTitleColor(.white, for: .normal)
+        startMicButton.layer.cornerRadius = 8
+        startMicButton.addTarget(self, action: #selector(didTapStartMic), for: .touchUpInside)
+        micActionRow.addArrangedSubview(startMicButton)
+
+        stopMicButton.setTitle("Stop Audio Test", for: .normal)
+        stopMicButton.titleLabel?.font = .boldSystemFont(ofSize: 14)
+        stopMicButton.backgroundColor = .systemRed
+        stopMicButton.setTitleColor(.white, for: .normal)
+        stopMicButton.layer.cornerRadius = 8
+        stopMicButton.addTarget(self, action: #selector(didTapStopMic), for: .touchUpInside)
+        stopMicButton.isEnabled = false
+        micActionRow.addArrangedSubview(stopMicButton)
+
+        micStack.addArrangedSubview(micActionRow)
+        stackView.addArrangedSubview(micContainer)
 
         // Contained In-App Editor Target
         testTextViewLabel.text = "In-App Test Editor (Tap here to summon Echolet keyboard):"
@@ -144,7 +249,7 @@ class AppStatusViewController: UIViewController {
         statusNoteLabel.numberOfLines = 0
         statusNoteLabel.font = .systemFont(ofSize: 12)
         statusNoteLabel.textColor = .tertiaryLabel
-        statusNoteLabel.text = "DEMO ONLY: No microphone recording or real ASR models run in this scaffold."
+        statusNoteLabel.text = "Audio capture runs entirely on-device; PCM frames are measured for level/duration only and never saved or transmitted."
         stackView.addArrangedSubview(statusNoteLabel)
     }
 
@@ -153,7 +258,6 @@ class AppStatusViewController: UIViewController {
         self.sharedDefaults = defaults
 
         if let defaults = defaults {
-            // Write our fresh process epoch
             defaults.set(currentEpoch, forKey: EcholetIPC.appEpochKey)
             defaults.synchronize()
             appGroupStatusLabel.text = "App Group: Connected (\(Self.appGroupId))"
@@ -164,6 +268,135 @@ class AppStatusViewController: UIViewController {
         }
     }
 
+    // MARK: - Real Microphone Controls (J3A)
+    @objc private func didToggleArmSwitch(_ sender: UISwitch) {
+        WarmIPCService.shared.setUserArmMicrophone(sender.isOn)
+        if sender.isOn {
+            AudioCaptureController.shared.requestMicrophonePermission { [weak self] granted in
+                DispatchQueue.main.async {
+                    if !granted {
+                        sender.isOn = false
+                        WarmIPCService.shared.setUserArmMicrophone(false)
+                        self?.micStatusLabel.text = "Microphone Status: PERMISSION DENIED (Blocked)"
+                        self?.micStatusLabel.textColor = .systemRed
+                    }
+                }
+            }
+        } else {
+            if AudioCaptureController.shared.status == .recording {
+                AudioCaptureController.shared.stopCapture()
+            }
+        }
+    }
+
+    @objc private func didTapStartMic() {
+        AudioCaptureController.shared.requestMicrophonePermission { [weak self] granted in
+            guard let self = self else { return }
+            if granted {
+                self.micArmSwitch.isOn = true
+                WarmIPCService.shared.setUserArmMicrophone(true)
+                AudioCaptureController.shared.startCapture()
+            } else {
+                self.micStatusLabel.text = "Microphone Status: PERMISSION DENIED"
+                self.micStatusLabel.textColor = .systemRed
+            }
+        }
+    }
+
+    @objc private func didTapStopMic() {
+        AudioCaptureController.shared.stopCapture()
+    }
+
+    // MARK: - AudioCaptureDelegate
+    func audioCaptureController(_ controller: AudioCaptureController, didUpdateStatus status: AudioCaptureController.Status) {
+        switch status {
+        case .recording:
+            micStatusLabel.text = "Microphone Status: ACTIVE RECORDING (Hardware Tap On)"
+            micStatusLabel.textColor = .systemGreen
+            startMicButton.isEnabled = false
+            stopMicButton.isEnabled = true
+        case .stopped:
+            micStatusLabel.text = "Microphone Status: STOPPED (Hardware Tap Released)"
+            micStatusLabel.textColor = .systemGray
+            startMicButton.isEnabled = true
+            stopMicButton.isEnabled = false
+        case .interrupted:
+            micStatusLabel.text = "Microphone Status: INTERRUPTED (Audio Session Preempted)"
+            micStatusLabel.textColor = .systemOrange
+            startMicButton.isEnabled = true
+            stopMicButton.isEnabled = false
+        case .blocked:
+            micStatusLabel.text = "Microphone Status: BLOCKED (Permission Denied)"
+            micStatusLabel.textColor = .systemRed
+            startMicButton.isEnabled = true
+            stopMicButton.isEnabled = false
+        case .failed:
+            micStatusLabel.text = "Microphone Status: FAILED (AudioEngine Exception)"
+            micStatusLabel.textColor = .systemRed
+            startMicButton.isEnabled = true
+            stopMicButton.isEnabled = false
+        case .ready:
+            micStatusLabel.text = "Microphone Status: READY (Permission Granted)"
+            micStatusLabel.textColor = .systemBlue
+            startMicButton.isEnabled = true
+            stopMicButton.isEnabled = false
+        case .idle:
+            micStatusLabel.text = "Microphone Status: NOT RECORDING (Idle)"
+            micStatusLabel.textColor = .secondaryLabel
+            startMicButton.isEnabled = true
+            stopMicButton.isEnabled = false
+        case .requestingPermission:
+            micStatusLabel.text = "Microphone Status: REQUESTING PERMISSION..."
+            micStatusLabel.textColor = .systemOrange
+            startMicButton.isEnabled = false
+            stopMicButton.isEnabled = false
+        }
+    }
+
+    func audioCaptureController(_ controller: AudioCaptureController, didUpdateMetrics metrics: AudioCaptureController.Metrics) {
+        let text = String(
+            format: "Frames: %llu | RMS: %.1f dB | Peak: %.1f dB | Time: %.1fs (%.0f Hz)",
+            metrics.frameCount,
+            metrics.rmsPower,
+            metrics.peakPower,
+            metrics.elapsedSeconds,
+            metrics.sampleRate
+        )
+        micLevelMeterLabel.text = text
+
+        // Normalize RMS (-60 dB to 0 dB) to [0.0, 1.0] for level meter
+        let clampedRms = max(-60.0, min(0.0, metrics.rmsPower))
+        let normalized = (clampedRms + 60.0) / 60.0
+        micLevelProgress.setProgress(normalized, animated: true)
+    }
+
+    func audioCaptureController(_ controller: AudioCaptureController, didFailWithError error: AudioCaptureController.CaptureError) {
+        micStatusLabel.text = "Error: \(error.localizedDescription)"
+        micStatusLabel.textColor = .systemRed
+    }
+
+    // MARK: - WarmIPCServiceDelegate
+    func warmIPCService(_ service: WarmIPCService, didAdmitStartSession sessionId: String, intentSequence: UInt64) {
+        lastRequestLabel.text = "Warm IPC Admitted START:\nSession: \(sessionId)\nIntent Seq: \(intentSequence)"
+        lastRequestLabel.textColor = .systemGreen
+    }
+
+    func warmIPCService(_ service: WarmIPCService, didAdmitStopSession sessionId: String, intentSequence: UInt64) {
+        lastRequestLabel.text = "Warm IPC Admitted STOP:\nSession: \(sessionId)\nIntent Seq: \(intentSequence)"
+        lastRequestLabel.textColor = .systemBlue
+    }
+
+    func warmIPCService(_ service: WarmIPCService, didRejectRequest description: String) {
+        lastRequestLabel.text = "Warm IPC Rejected Request:\n\(description)"
+        lastRequestLabel.textColor = .systemOrange
+    }
+
+    func warmIPCService(_ service: WarmIPCService, didEncounterBlockedState reason: String) {
+        lastRequestLabel.text = "Warm IPC Blocked:\n\(reason)"
+        lastRequestLabel.textColor = .systemRed
+    }
+
+    // MARK: - Manual IPC Refresh & Mock Response
     @objc private func didTapRefresh() {
         refreshIPCStatus()
     }

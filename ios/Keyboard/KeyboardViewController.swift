@@ -311,21 +311,29 @@ class KeyboardViewController: UIInputViewController {
 
             // 5. Text insertion into visible editor target
             // NOTE: In this debug mock harness, recognizedText represents the complete final transcript.
-            // Production streaming will introduce partial delta diffing. To prevent repeated text insertion
-            // across multiple revisions, we only insert text when final, or record delta in future iterations.
+            // If response state is listening or blocked without recognizedText (J3A audio probe),
+            // update status display honestly without inserting fabricated text.
             if response.isFinal {
                 if let textToInsert = response.recognizedText, !textToInsert.isEmpty {
                     textDocumentProxy.insertText(textToInsert)
                     statusLabel.text = "Inserted final text (rev \(response.revision)): \(textToInsert.prefix(20))..."
+                } else if response.state == .blocked {
+                    statusLabel.text = "Mic blocked (code: \(response.errorCode ?? "unknown")). Open Echolet."
                 } else {
-                    statusLabel.text = "Response received with empty text (state: \(response.state.rawValue))"
+                    statusLabel.text = "Session complete (rev \(response.revision), state: \(response.state.rawValue))"
                 }
                 self.activeSession = nil
                 updateStatusDisplay()
             } else {
                 // Non-final intermediate revision: record watermark without duplicate full insertion
                 self.activeSession?.lastAcceptedRevision = response.revision
-                statusLabel.text = "Received intermediate rev \(response.revision) (waiting for final)"
+                if response.state == .listening {
+                    statusLabel.text = "Mic ACTIVE on iPad (rev \(response.revision))\nListening..."
+                } else if response.state == .blocked {
+                    statusLabel.text = "Mic BLOCKED: Open Echolet to arm test"
+                } else {
+                    statusLabel.text = "Received intermediate rev \(response.revision) (state: \(response.state.rawValue))"
+                }
             }
 
         } catch {

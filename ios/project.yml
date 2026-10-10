@@ -18,6 +18,7 @@ targets:
     sources:
       - path: App
       - path: protocol/EcholetIPC.swift
+      - path: protocol/EcholetAdmission.swift
     settings:
       PRODUCT_BUNDLE_IDENTIFIER: com.mainstayx.echolet.app
       INFOPLIST_FILE: App/Info.plist
@@ -34,6 +35,7 @@ targets:
     sources:
       - path: Keyboard
       - path: protocol/EcholetIPC.swift
+      - path: protocol/EcholetAdmission.swift
     settings:
       PRODUCT_BUNDLE_IDENTIFIER: com.mainstayx.echolet.app.keyboard
       INFOPLIST_FILE: Keyboard/Info.plist
