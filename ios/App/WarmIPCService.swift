@@ -211,7 +211,7 @@ public final class WarmIPCService {
                 break
 
             case .writeResponse(let sessionId, let requestId, let sequence, let state, let text, let isFinal, let errorCode):
-                self.writeResponseSnapshot(
+                self.writeResponseSnapshotOnQueue(
                     sessionId: sessionId,
                     acknowledgedRequestId: requestId,
                     acknowledgedSequence: sequence,
@@ -325,7 +325,15 @@ public final class WarmIPCService {
     }
 
     // MARK: - Write Response Snapshots (ipcQueue Only)
-    public func writeResponseSnapshot(
+    //
+    // Single-writer invariant: ALL response revision increments and App Group
+    // response key mutations are owned exclusively by `ipcQueue`. The revision
+    // mailbox (`WarmCaptureFlowCoordinator.responseRevision`) and the latest
+    // response snapshot are mutated only inside this helper, which is private
+    // and must only run from code already executing on `ipcQueue` (the live
+    // flow effect engine and the DEBUG mock submit path both enter via
+    // `ipcQueue`; DEBUG exposes a dispatchPrecondition to prove it).
+    private func writeResponseSnapshotOnQueue(
         sessionId: String,
         acknowledgedRequestId: String,
         acknowledgedSequence: UInt64,
@@ -333,12 +341,18 @@ public final class WarmIPCService {
         recognizedText: String?,
         isFinal: Bool,
         errorCode: String?
-    ) {
-        guard let defaults = sharedDefaults else { return }
+    ) -> Bool {
+        #if DEBUG
+        dispatchPrecondition(condition: .onQueue(ipcQueue))
+        #endif
+
+        guard let defaults = sharedDefaults else {
+            return false
+        }
 
         guard let rev = flowCoordinator.nextResponseRevision() else {
             print("[WarmIPCService] Response revision overflowed UInt64.max; failing closed.")
-            return
+            return false
         }
 
         do {
@@ -369,8 +383,84 @@ public final class WarmIPCService {
                 nil,
                 true
             )
+            return true
         } catch {
             print("[WarmIPCService] Failed to write response snapshot: \(error)")
+            return false
         }
     }
+
+    #if DEBUG
+    // MARK: - DEBUG Mock Response Submission (Single-Writer Queue-Owned)
+    //
+    /// Asynchronous DEBUG mock submit path for the containing app's regression
+    /// harness (`AppStatusViewController`). Re-reads and validates the latest
+    /// App Group request ON `ipcQueue`, evaluates the read-only eligibility
+    /// probe so a stale mock (older intent superseded by a newer session or
+    /// STOP, a superseded same-intent request, or a conflicting active session)
+    /// can never overwrite the newest response snapshot, and only then writes
+    /// the final recognized text through the same queue-owned single-writer
+    /// helper as the real IPC path. The completion dispatches to main after the
+    /// actual write outcome and never claims success for a rejected or failed
+    /// write.
+    public func submitDebugMockResponse(
+        recognizedText: String,
+        completion: @escaping (_ succeeded: Bool, _ rejectionReason: String?) -> Void
+    ) {
+        ipcQueue.async { [weak self] in
+            guard let self = self else {
+                DispatchQueue.main.async { completion(false, "WarmIPCService unavailable") }
+                return
+            }
+
+            guard let defaults = self.sharedDefaults,
+                  let requestData = defaults.data(forKey: EcholetIPC.keyboardRequestKey) else {
+                DispatchQueue.main.async { completion(false, "No keyboard request to respond to") }
+                return
+            }
+
+            do {
+                let request = try EcholetIPC.makeDecoder().decode(EcholetIPC.KeyboardRequest.self, from: requestData)
+                try request.validate()
+
+                guard request.appEpoch == self.flowCoordinator.appEpoch else {
+                    DispatchQueue.main.async { completion(false, "Request belongs to different app epoch") }
+                    return
+                }
+
+                // Serialized together with live intake on ipcQueue: eligibility
+                // evaluation and the write below form one atomic queue step.
+                let eligibility = self.flowCoordinator.evaluateMockResponseEligibility(request)
+                guard eligibility == .eligible else {
+                    DispatchQueue.main.async {
+                        completion(false, "Mock response rejected: \(eligibility.rejectedReason ?? "unknown")")
+                    }
+                    return
+                }
+
+                let wrote = self.writeResponseSnapshotOnQueue(
+                    sessionId: request.sessionId,
+                    acknowledgedRequestId: request.requestId,
+                    acknowledgedSequence: request.sequence,
+                    state: .completed,
+                    recognizedText: recognizedText,
+                    isFinal: true,
+                    errorCode: nil
+                )
+
+                DispatchQueue.main.async {
+                    if wrote {
+                        completion(true, nil)
+                    } else {
+                        completion(false, "Failed to write App Group response snapshot")
+                    }
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    completion(false, "Failed to decode latest request: \(error.localizedDescription)")
+                }
+            }
+        }
+    }
+    #endif
 }

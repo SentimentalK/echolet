@@ -460,6 +460,147 @@ func testWarmCaptureFlowSuite() {
         assertFlow(false, "Case 12 threw: \(error)")
     }
 
+    // Case 13: DEBUG mock response sequencing guard (read-only probe): stale mock
+    // intents cannot overwrite newer STOP/session responses; only the CURRENT
+    // intent's exact START request may be refined.
+    do {
+        let gate = try EcholetAdmission.Gate(appEpoch: epoch, coldBootArmed: false)
+        let coordinator = WarmCaptureFlowCoordinator(appEpoch: epoch, admissionGate: gate)
+        _ = coordinator.setUserArmMicrophone(true)
+
+        let reqA = try EcholetIPC.KeyboardRequest(appEpoch: epoch, intentSequence: 1, sessionId: "session-A", sequence: 1, requestId: "req-A", command: .start)
+
+        // Newest unapplied current intent => eligible initial mock
+        assertFlow(coordinator.evaluateMockResponseEligibility(reqA) == .eligible, "Fresh current START is mock-eligible")
+
+        // Live intake admits A (real flow owns the response slot thereafter)
+        _ = coordinator.handleIncomingRequest(reqA)
+
+        // Exact latest applied START => allowed refinement (mock .completed over real .listening)
+        assertFlow(coordinator.evaluateMockResponseEligibility(reqA) == .eligible, "Refining exact latest applied START allowed")
+
+        // Same watermark but different request id => superseded, never eligible
+        let reqForgedSameIntent = try EcholetIPC.KeyboardRequest(appEpoch: epoch, intentSequence: 1, sessionId: "session-A", sequence: 2, requestId: "req-forged-1", command: .start)
+        assertFlow(coordinator.evaluateMockResponseEligibility(reqForgedSameIntent) != .eligible, "Same-intent different request id superseded")
+
+        // Newer STOP for A (intent 2) admitted => old START mock stale
+        let reqStopA = try EcholetIPC.KeyboardRequest(appEpoch: epoch, intentSequence: 2, sessionId: "session-A", sequence: 2, requestId: "req-stop-A", command: .stop)
+        let stopEffects = coordinator.handleIncomingRequest(reqStopA)
+        let stopDirective = firstStopDirective(stopEffects)
+        assertFlow(stopDirective != nil, "Stop admitted in case 13")
+        assertFlow(coordinator.evaluateMockResponseEligibility(reqA) != .eligible, "Mock of older intent must NEVER write after newer STOP")
+
+        // A same-intent forged clone stamped higher than its reality is also stale
+        let reqStaleForged = try EcholetIPC.KeyboardRequest(appEpoch: epoch, intentSequence: 1, sessionId: "session-A", sequence: 3, requestId: "req-stale-forged", command: .start)
+        assertFlow(coordinator.evaluateMockResponseEligibility(reqStaleForged) != .eligible, "Old intent forged start remains stale")
+
+        // Newer session B (intent 3, seq 1) is cleanly admissible; before live
+        // intake applies it, the mock probe sees it as the current newest intent.
+        let reqB = try EcholetIPC.KeyboardRequest(appEpoch: epoch, intentSequence: 3, sessionId: "session-B", sequence: 1, requestId: "req-B", command: .start)
+        assertFlow(coordinator.evaluateMockResponseEligibility(reqB) == .eligible, "Newest unapplied replacement START is mock-eligible")
+        _ = coordinator.handleIncomingRequest(reqB)
+        assertFlow(coordinator.evaluateMockResponseEligibility(reqB) == .eligible, "Refining exact latest applied replacement START allowed")
+        assertFlow(coordinator.evaluateMockResponseEligibility(reqA) != .eligible, "Old session A never again mock-eligible after newer session")
+
+        // New session C with sequence > 1 while a session is active => conflict
+        let gateC = try EcholetAdmission.Gate(appEpoch: epoch, coldBootArmed: false)
+        let coordinatorC = WarmCaptureFlowCoordinator(appEpoch: epoch, admissionGate: gateC)
+        _ = coordinatorC.setUserArmMicrophone(true)
+        let reqCActive = try EcholetIPC.KeyboardRequest(appEpoch: epoch, intentSequence: 1, sessionId: "session-C", sequence: 1, requestId: "req-C", command: .start)
+        _ = coordinatorC.handleIncomingRequest(reqCActive) // C active listening (gate level)
+        let reqCConflict = try EcholetIPC.KeyboardRequest(appEpoch: epoch, intentSequence: 2, sessionId: "session-D", sequence: 2, requestId: "req-D", command: .start)
+        assertFlow(coordinatorC.evaluateMockResponseEligibility(reqCConflict) != .eligible, "Conflicting active-session newer-intent mock rejected")
+
+        // Cold boot fence: an uninitialized boot gate never mock-eligible
+        let gateFenced = try EcholetAdmission.Gate(appEpoch: epoch, coldBootArmed: true)
+        let coordinatorFenced = WarmCaptureFlowCoordinator(appEpoch: epoch, admissionGate: gateFenced)
+        let reqFenced = try EcholetIPC.KeyboardRequest(appEpoch: epoch, intentSequence: 1, sessionId: "session-F", sequence: 1, requestId: "req-F", command: .start)
+        assertFlow(coordinatorFenced.evaluateMockResponseEligibility(reqFenced) != .eligible, "Cold boot fence blocks mocks")
+    } catch {
+        assertFlow(false, "Case 13 threw: \(error)")
+    }
+
+    // Case 14: single-writer serialization — UI mock decides/advances revision
+    // atomically with live intake on a real serial queue; probes and revision
+    // counter form ONE serialized order with no stale writes or duplicates.
+    do {
+        let gate = try EcholetAdmission.Gate(appEpoch: epoch, coldBootArmed: false)
+        let coordinator = WarmCaptureFlowCoordinator(appEpoch: epoch, admissionGate: gate)
+        _ = coordinator.setUserArmMicrophone(true)
+
+        let reqStopA = try EcholetIPC.KeyboardRequest(appEpoch: epoch, intentSequence: 2, sessionId: "session-A", sequence: 2, requestId: "req-stop-A", command: .stop)
+
+        let q = DispatchQueue(label: "test.warmcapture.mockrace")
+        var mockRevisions: [UInt64] = []
+        let successCount = NSLock()
+        var successes = 0
+
+        func enqueueMock(_ request: EcholetIPC.KeyboardRequest) {
+            q.async {
+                // Atomic on the queue: identical production decision-step order
+                // (eligibility probe, then revision increment, only if eligible).
+                if coordinator.evaluateMockResponseEligibility(request) == .eligible {
+                    let rev = coordinator.nextResponseRevision()
+                    assertFlow(rev != nil, "Race case revision must not overflow")
+                    mockRevisions.append(rev!)
+                    successCount.lock()
+                    successes += 1
+                    successCount.unlock()
+                }
+            }
+        }
+
+        // Phase 1: queue-first live STOP admission (intent 2), then concurrent
+        // spawns of stale mock reqA intent 1 taps and duplicate live intakes.
+        // Serial order is deterministic: STOP applies first, so every later
+        // stale mock must contribute ZERO revision.
+        let reqA = try EcholetIPC.KeyboardRequest(appEpoch: epoch, intentSequence: 1, sessionId: "session-A", sequence: 1, requestId: "req-A", command: .start)
+        _ = coordinator.handleIncomingRequest(reqA)
+        q.async {
+            let effects = coordinator.handleIncomingRequest(reqStopA)
+            assertFlow(!effects.isEmpty, "Stop applies first in serialized race phase 1")
+        }
+        let phase1 = DispatchGroup()
+        for _ in 0..<30 {
+            phase1.enter()
+            q.async {
+                enqueueMock(reqA)
+                phase1.leave()
+            }
+        }
+        phase1.wait()
+        q.sync {}
+        assertFlow(successes == 0, "Stale UI mocks after newer STOP wrote nothing")
+        assertFlow(mockRevisions.isEmpty, "No revisions consumed by stale mocks")
+        assertFlow(coordinator.responseRevision == 0, "Serialized revision mailbox untouched by stale mock race")
+
+        // Phase 2: queue-first live admission of CURRENT intent (reqC intent 3),
+        // then concurrent UI refinement mocks of the exact same request: every
+        // probe is eligible, every write advances ONE strictly increasing
+        // serialized revision order, and no duplicate/old ACK can interleave.
+        let reqC = try EcholetIPC.KeyboardRequest(appEpoch: epoch, intentSequence: 3, sessionId: "session-C", sequence: 1, requestId: "req-C", command: .start)
+        q.async {
+            let effects = coordinator.handleIncomingRequest(reqC)
+            assertFlow(!effects.isEmpty, "Current intake applies first in serialized race phase 2")
+        }
+        let phase2 = DispatchGroup()
+        for _ in 0..<30 {
+            phase2.enter()
+            q.async {
+                enqueueMock(reqC)
+                phase2.leave()
+            }
+        }
+        phase2.wait()
+        q.sync {}
+        assertFlow(successes == 30, "All refinement mocks of the current intent wrote exactly once each")
+        assertFlow(mockRevisions.count == 30, "Every eligible write consumed exactly one revision")
+        assertFlow(mockRevisions == (1...30).map { $0 + UInt64(0) }, "Single serialized revision order: strictly monotonic 1..30")
+        assertFlow(coordinator.responseRevision == 30, "Coordinator revision mailbox agrees with serialized writes")
+    } catch {
+        assertFlow(false, "Case 14 threw: \(error)")
+    }
+
     print("[TEST] All WarmCaptureFlowCoordinator unit tests PASSED successfully.")
 }
 

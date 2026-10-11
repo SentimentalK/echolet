@@ -18,7 +18,6 @@ class AppStatusViewController: UIViewController, AudioCaptureDelegate, WarmIPCSe
     private var currentEpoch: String { AppDelegate.sharedEpoch }
     private var sharedDefaults: UserDefaults?
     private var lastObservedRequestId: String?
-    private var responseRevision: UInt64 = 0
 
     // MARK: - UI Elements
     private let scrollView = UIScrollView()
@@ -479,40 +478,23 @@ class AppStatusViewController: UIViewController, AudioCaptureDelegate, WarmIPCSe
     }
 
     @objc private func didTapDemoResponse() {
-        guard let defaults = sharedDefaults else { return }
-        guard let requestData = defaults.data(forKey: EcholetIPC.keyboardRequestKey) else { return }
+        // Mock submission is queue-owned: eligibility is validated and written
+        // on WarmIPCService.ipcQueue (single writer). The completion mirrors the
+        // real write/result honestly on the main thread.
+        let mockText = "[Echolet Test Demo: App Group IPC OK]"
 
-        do {
-            let decoder = EcholetIPC.makeDecoder()
-            let request = try decoder.decode(EcholetIPC.KeyboardRequest.self, from: requestData)
-            try request.validate()
+        WarmIPCService.shared.submitDebugMockResponse(recognizedText: mockText) { [weak self] succeeded, rejectionReason in
+            guard let self = self else { return }
 
-            guard request.appEpoch == currentEpoch else {
-                lastRequestLabel.text = "Cannot respond: Request belongs to different app epoch."
-                return
+            if succeeded {
+                self.lastRequestLabel.text = """
+                Mock Response Written via WarmIPCService:
+                Text: \(mockText)
+                State: completed (final)
+                """
+            } else {
+                self.lastRequestLabel.text = "Mock response NOT written: \(rejectionReason ?? "unknown rejection")"
             }
-
-            let mockText = "[Echolet Test Demo: App Group IPC OK]"
-
-            WarmIPCService.shared.writeResponseSnapshot(
-                sessionId: request.sessionId,
-                acknowledgedRequestId: request.requestId,
-                acknowledgedSequence: request.sequence,
-                state: .completed,
-                recognizedText: mockText,
-                isFinal: true,
-                errorCode: nil
-            )
-
-            lastRequestLabel.text = """
-            Mock Response Written via WarmIPCService:
-            Session: \(request.sessionId)
-            Ack Request: \(request.requestId)
-            Text: \(mockText)
-            State: completed (final)
-            """
-        } catch {
-            lastRequestLabel.text = "Failed to write mock response: \(error.localizedDescription)"
         }
     }
 }

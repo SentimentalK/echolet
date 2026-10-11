@@ -162,5 +162,73 @@ public enum EcholetAdmission {
                 }
             }
         }
+
+    // MARK: - DEBUG Mock Response Eligibility Probe (read-only)
+    ///
+    /// Non-mutating mirror of the wire admission ordering used by the containing
+    /// app's DEBUG mock response path (`WarmIPCService.submitDebugMockResponse`).
+    /// A stale mock (older intent sequence superseded by a newer session or
+    /// STOP, a superseded same-intent request, or a conflicting active session)
+    /// is rejected before it could overwrite the newest App Group response.
+    public enum MockResponseEligibility: Equatable {
+        case eligible
+        case rejected(reason: String)
+
+        public var rejectedReason: String? {
+            if case .rejected(let reason) = self { return reason }
+            return nil
+        }
+    }
+
+    public func evaluateMockResponseEligibility(_ request: EcholetIPC.KeyboardRequest) -> MockResponseEligibility {
+        do {
+            try request.validate()
+        } catch let err as EcholetIPC.ValidationError {
+            return .rejected(reason: "invalidPayload: \(err)")
+        } catch {
+            return .rejected(reason: "invalidPayload")
+        }
+
+        guard request.appEpoch == self.appEpoch else {
+            return .rejected(reason: "staleEpoch request=\(request.appEpoch) active=\(self.appEpoch)")
+        }
+
+        guard !self.coldBootArmed else {
+            return .rejected(reason: "coldBootFenceActive")
+        }
+
+        // Intent fence: a mock may only answer the CURRENT intent. Anything
+        // strictly older than the watermark can never overwrite a newer
+        // session's or STOP's response slot.
+        guard request.intentSequence >= self.lastIntentSequence else {
+            return .rejected(reason: "staleIntent mockIntent=\(request.intentSequence) watermark=\(self.lastIntentSequence)")
+        }
+
+        guard request.command == .start else {
+            return .rejected(reason: "nonStartCommand \(request.command.rawValue)")
+        }
+
+        if request.intentSequence == self.lastIntentSequence {
+            // Equal watermark: only refining the exact most-recently-applied
+            // START request is allowed (e.g. mock .completed after real
+            // .listening). A different same-intent request is superseded.
+            guard request.requestId == self.lastAppliedRequestId else {
+                return .rejected(reason: "supersededSameIntent requestId=\(request.requestId) lastApplied=\(self.lastAppliedRequestId ?? "nil")")
+            }
+            return .eligible
+        }
+
+        // Newer intent not yet applied by the live intake: mirror admission
+        // ordering without mutating any state.
+        if let activeId = self.activeSessionId {
+            if activeId == request.sessionId {
+                return .rejected(reason: "sessionAlreadyStarted active=\(activeId)")
+            }
+            if request.sequence != 1 && self.sessionState != .ended {
+                return .rejected(reason: "activeSessionConflict incoming=\(request.sessionId) active=\(activeId)")
+            }
+        }
+        return .eligible
+    }
     }
 }

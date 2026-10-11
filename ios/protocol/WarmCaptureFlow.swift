@@ -169,6 +169,17 @@ public final class WarmCaptureFlowCoordinator {
         return responseRevision
     }
 
+    // MARK: - DEBUG Mock Response Eligibility Probe (read-only, non-mutating)
+    /// Delegates to the admission gate's read-only eligibility probe so the
+    /// DEBUG mock submit path can test the CURRENT request identity under the
+    /// same serialization domain as the live intake without applying state.
+    public func evaluateMockResponseEligibility(_ request: EcholetIPC.KeyboardRequest) -> EcholetAdmission.Gate.MockResponseEligibility {
+        guard let gate = admissionGate else {
+            return .rejected(reason: "admissionGateUnavailable")
+        }
+        return gate.evaluateMockResponseEligibility(request)
+    }
+
     // MARK: - Checked Cancellation Generation Advance
     /// Checked (non-wrapping) increment of the cancellation generation.
     /// On overflow this latches the terminal fail-closed state: no further mic
