@@ -421,6 +421,24 @@ public final class WarmIPCService {
             return
         }
 
+        // J5 warm-live heartbeat: while the native recorder is genuinely
+        // running, refresh the warm-live record on the single-writer queue at
+        // the bounded poll cadence (also runs while background recording is
+        // scheduled, because AppDelegate retains polling in that state). A
+        // user returning to the keyboard a minute later still sees a
+        // positively fresh active recorder instead of a falsely "stale" one
+        // (this was the dead-loop trigger in the first device run: aged
+        // records made the keyboard re-attempt opening the app while the mic
+        // was live the whole time).
+        if self.flowCoordinator.isWarmStandbyHardwareActive {
+            _ = EcholetLaunch.writeWarmLive(
+                appEpoch: AppDelegate.sharedEpoch,
+                recorderActive: true,
+                nowMs: WarmIPCService.currentTimeMs(),
+                defaults: defaults
+            )
+        }
+
         guard let requestData = defaults.data(forKey: EcholetIPC.keyboardRequestKey) else {
             return
         }

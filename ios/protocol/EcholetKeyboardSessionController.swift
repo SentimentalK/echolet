@@ -510,6 +510,7 @@ public final class EcholetKeyboardSessionController {
             log("OPEN_RESULT(evidence_warm_live)")
             launchContext = nil
             setPhase(.ready)
+            beginStart(reason: "warm_live_evidence")
             return
         }
 
