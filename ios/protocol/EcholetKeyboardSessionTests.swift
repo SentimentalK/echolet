@@ -158,6 +158,8 @@ enum EcholetKeyboardSessionTests {
         testLivePartialStreaming()
         testFinalReconcilesStreamedPartial()
         testNoSpeechFinalRemovesPartial()
+        testPreparedDemandURLMatchesDemandRecord()
+        testGuardedPartialDeletionOnCursorMismatch()
 
         if failures.isEmpty {
             print("EcholetKeyboardSessionTests: ALL PASS")
@@ -683,6 +685,57 @@ enum EcholetKeyboardSessionTests {
         }
         // Session was closed truthfully (fail closed) and is startable again.
         expectEqual(c.isPrimaryButtonInteractive, true, "testStartAckTimeout(4)")
+    }
+
+    static func testPreparedDemandURLMatchesDemandRecord() {
+        let h = FakeHarness()
+        let c = h.controller()
+        // Ensure prepared demand URL is minted synchronously
+        let url = c.ensurePreparedDemandURL()
+        expectTrue(url != nil, "testPreparedDemandURLMatchesDemandRecord(1)")
+        expectEqual(c.preparedDemandURL, url, "testPreparedDemandURLMatchesDemandRecord(2)")
+
+        let demand = EcholetLaunch.readDemand(defaults: h.defaults)
+        expectTrue(demand != nil, "testPreparedDemandURLMatchesDemandRecord(3)")
+        if let demand = demand, let url = url, let parsed = EcholetLaunch.parseDictationPrepareURL(url) {
+            expectEqual(parsed.nonce, demand.nonce, "testPreparedDemandURLMatchesDemandRecord(4)")
+        } else {
+            recordFailure("testPreparedDemandURLMatchesDemandRecord(4)", "missing demand/url parsed")
+        }
+
+        // When warm live mic exists, appear clears preparedDemandURL and adopts directly
+        let h2 = FakeHarness()
+        h2.writeWarmLive(epoch: h2.appEpoch, active: true, tsMs: h2.now)
+        let c2 = h2.controller()
+        c2.handleAppeared()
+        expectTrue(c2.preparedDemandURL == nil, "testPreparedDemandURLMatchesDemandRecord(5)")
+        expectEqual(c2.phase, EcholetKeyboardSessionController.Phase.starting, "testPreparedDemandURLMatchesDemandRecord(6)")
+    }
+
+    static func testGuardedPartialDeletionOnCursorMismatch() {
+        let h = FakeHarness()
+        h.writeWarmLive(epoch: h.appEpoch, active: true, tsMs: h.now)
+        let c = h.controller()
+        c.handleAppeared()
+        let req = h.lastRequest()!
+        h.writeResponse(sessionId: req.sessionId, ackReq: req.requestId, ackSeq: req.sequence, rev: 1, state: .listening)
+        c.handleTimerTick()
+
+        // Provide docContext before input matching initial partial
+        h.fingerprints.append(("foo", nil, nil))
+        h.writeResponse(sessionId: req.sessionId, ackReq: req.requestId, ackSeq: req.sequence, rev: 2, state: .processing, text: "foo")
+        c.handleTimerTick()
+        expectEqual(h.insertedTexts, ["foo"], "testGuardedPartialDeletionOnCursorMismatch(1)")
+
+        // Simulate divergent partial: previous "foo", next "bar" -> expects to delete 3 ("foo")
+        // But simulate cursor moved elsewhere: docContext before is now "unrelated text" (does NOT end with "foo")
+        h.fingerprints.append(("unrelated text", nil, nil))
+        h.writeResponse(sessionId: req.sessionId, ackReq: req.requestId, ackSeq: req.sequence, rev: 3, state: .processing, text: "bar")
+        c.handleTimerTick()
+
+        // deleteBackward should be GUARDED and NOT called!
+        expectEqual(h.deleteBackwardCounts, [] as [Int], "testGuardedPartialDeletionOnCursorMismatch(2)")
+        expectTrue(h.logs.contains("STREAM_DELETE_GUARDED(tail_mismatch_or_cursor_moved)"), "testGuardedPartialDeletionOnCursorMismatch(3)")
     }
 }
 

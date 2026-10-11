@@ -1,4 +1,24 @@
 import UIKit
+import SwiftUI
+
+/// SwiftUI Link button for idle Start Listening navigation on iOS/iPadOS.
+/// Visual styling strictly matches the dark UIKit Start Listening button:
+/// font: bold 17pt, white text, 10pt corner radius, dark background (white 0.15), 46pt height.
+private struct StartListeningLinkView: View {
+    let url: URL
+
+    var body: some View {
+        Link(destination: url) {
+            Text("Start Listening")
+                .font(.system(size: 17, weight: .bold))
+                .foregroundColor(.white)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .frame(height: 46)
+        .background(Color(white: 0.15))
+        .cornerRadius(10)
+    }
+}
 
 /// Echolet Voice Keyboard (J5 single-button).
 ///
@@ -33,6 +53,8 @@ class KeyboardViewController: UIInputViewController {
     // MARK: - UI Components
     private let statusLabel = UILabel()
     private let primaryButton = UIButton(type: .custom)
+    private var startHostingController: UIHostingController<StartListeningLinkView>?
+    private var startHostingContainer = UIView()
     private let hintLabel = UILabel()
     private let nextKeyboardButton = UIButton(type: .system)
     private let globeRow = UIStackView()
@@ -168,6 +190,13 @@ class KeyboardViewController: UIInputViewController {
         primaryButton.widthAnchor.constraint(equalTo: mainStack.widthAnchor).isActive = true
         primaryButton.heightAnchor.constraint(equalToConstant: 46).isActive = true
 
+        // SwiftUI Link container for idle Start Listening navigation
+        startHostingContainer.translatesAutoresizingMaskIntoConstraints = false
+        startHostingContainer.isHidden = true
+        mainStack.addArrangedSubview(startHostingContainer)
+        startHostingContainer.widthAnchor.constraint(equalTo: mainStack.widthAnchor).isActive = true
+        startHostingContainer.heightAnchor.constraint(equalToConstant: 46).isActive = true
+
         // Compact honest hint: manual fallback instruction + privacy note
         hintLabel.font = .systemFont(ofSize: 10)
         hintLabel.textColor = .secondaryLabel
@@ -197,6 +226,8 @@ class KeyboardViewController: UIInputViewController {
     private func renderDisplay() {
         guard let controller = controller else {
             statusLabel.text = "App Group Unavailable: Entitlement Missing"
+            primaryButton.isHidden = false
+            startHostingContainer.isHidden = true
             primaryButton.isEnabled = false
             primaryButton.setTitle("Start Listening", for: .normal)
             primaryButton.setTitleColor(UIColor(white: 1.0, alpha: 0.4), for: .normal)
@@ -204,14 +235,24 @@ class KeyboardViewController: UIInputViewController {
             return
         }
 
-        primaryButton.setEnabled(interactive: controller.isPrimaryButtonInteractive)
-        primaryButton.setTitle(controller.primaryButtonLabel, for: .normal)
-        if controller.shouldShowRedStopButton {
-            primaryButton.backgroundColor = .systemRed
-        } else if controller.isPrimaryButtonInteractive {
-            primaryButton.backgroundColor = UIColor(white: 0.15, alpha: 1.0) // dark Start
+        let showSwiftUILink = (controller.phase == .ready && !controller.freshWarmLiveExists() && controller.preparedDemandURL != nil)
+
+        if showSwiftUILink, let url = controller.preparedDemandURL {
+            primaryButton.isHidden = true
+            startHostingContainer.isHidden = false
+            updateSwiftUILinkHosting(url: url)
         } else {
-            primaryButton.backgroundColor = .systemGray3
+            primaryButton.isHidden = false
+            startHostingContainer.isHidden = true
+            primaryButton.setEnabled(interactive: controller.isPrimaryButtonInteractive)
+            primaryButton.setTitle(controller.primaryButtonLabel, for: .normal)
+            if controller.shouldShowRedStopButton {
+                primaryButton.backgroundColor = .systemRed
+            } else if controller.isPrimaryButtonInteractive {
+                primaryButton.backgroundColor = UIColor(white: 0.15, alpha: 1.0) // dark Start
+            } else {
+                primaryButton.backgroundColor = .systemGray3
+            }
         }
 
         statusLabel.numberOfLines = 2
@@ -232,6 +273,26 @@ class KeyboardViewController: UIInputViewController {
             statusLabel.text = "Finalizing…"
         case .blocked(let reason):
             statusLabel.text = "Blocked: \(reason)"
+        }
+    }
+
+    private func updateSwiftUILinkHosting(url: URL) {
+        if let existing = startHostingController {
+            existing.rootView = StartListeningLinkView(url: url)
+        } else {
+            let hosting = UIHostingController(rootView: StartListeningLinkView(url: url))
+            hosting.view.translatesAutoresizingMaskIntoConstraints = false
+            hosting.view.backgroundColor = .clear
+            addChild(hosting)
+            startHostingContainer.addSubview(hosting.view)
+            NSLayoutConstraint.activate([
+                hosting.view.topAnchor.constraint(equalTo: startHostingContainer.topAnchor),
+                hosting.view.leadingAnchor.constraint(equalTo: startHostingContainer.leadingAnchor),
+                hosting.view.trailingAnchor.constraint(equalTo: startHostingContainer.trailingAnchor),
+                hosting.view.bottomAnchor.constraint(equalTo: startHostingContainer.bottomAnchor)
+            ])
+            hosting.didMove(toParent: self)
+            self.startHostingController = hosting
         }
     }
 

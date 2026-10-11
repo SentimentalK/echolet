@@ -106,6 +106,8 @@ public final class EcholetKeyboardSessionController {
     public private(set) var autoLaunchUnsupportedReason: String?
     public private(set) var lastInsertedText: String?
     public private(set) var insertCount: Int = 0
+    /// Synchronously pre-minted containing-app URL for SwiftUI Link hosting.
+    public private(set) var preparedDemandURL: URL?
 
     private struct ActiveSession {
         let epoch: String
@@ -185,6 +187,35 @@ public final class EcholetKeyboardSessionController {
         env.log?(event)
     }
 
+    // MARK: - Pre-minted launch demand for SwiftUI Link
+    /// Synchronously pre-mints and writes a DemandRecord so a SwiftUI `Link`
+    /// button destination URL is always valid and backed by an AppGroup
+    /// DemandRecord before the user taps the Link.
+    @discardableResult
+    public func ensurePreparedDemandURL() -> URL? {
+        if let existing = preparedDemandURL, let ctx = launchContext, existing == ctx.url {
+            let now = env.nowMs()
+            if now >= ctx.startedAtMs && now - ctx.startedAtMs < EcholetLaunch.defaultDemandTtlMs {
+                return existing
+            }
+        }
+        let nonce = UUID().uuidString
+        let now = env.nowMs()
+        guard let url = try? EcholetLaunch.makeDictationPrepareURL(nonce: nonce, tsMs: now) else {
+            preparedDemandURL = nil
+            return nil
+        }
+        let demand = EcholetLaunch.DemandRecord(
+            nonce: nonce,
+            createdAtMs: now,
+            ttlMs: EcholetLaunch.defaultDemandTtlMs
+        )
+        _ = EcholetLaunch.writeDemand(demand, defaults: env.defaults)
+        launchContext = LaunchContext(nonce: nonce, url: url, startedAtMs: now, autoStartIssued: false)
+        preparedDemandURL = url
+        return url
+    }
+
     // MARK: - Appearance lifecycle
 
     /// Recognition of REAL warm readiness happens here: if a positively
@@ -198,21 +229,25 @@ public final class EcholetKeyboardSessionController {
         // already written and the app may be mid-prepare (or the user may
         // have just opened it manually — the foreground hand path).
         if let ctx = launchContext, env.nowMs() - ctx.startedAtMs <= EcholetLaunch.defaultDemandTtlMs {
+            preparedDemandURL = ctx.url
             if phase == .ready {
                 setPhase(.opening)
                 log("OPEN_RESUMED(inflight_launch)")
             }
         } else if phase == .ready {
             if freshWarmLiveExists() {
+                preparedDemandURL = nil
                 log("OPEN_SKIPPED(warm_live_fresh)")
                 beginStart(reason: "auto_adopt_warm")
             } else {
+                ensurePreparedDemandURL()
                 attemptLaunch(auto: true)
             }
         }
         // Expired launch context evaporates truthfully.
         if let ctx = launchContext, env.nowMs() - ctx.startedAtMs > EcholetLaunch.defaultDemandTtlMs {
             launchContext = nil
+            preparedDemandURL = nil
             log("BLOCKED(launch_nonce_expired)")
             if phase == .opening {
                 setPhase(.ready)
@@ -228,6 +263,7 @@ public final class EcholetKeyboardSessionController {
         cancelActiveSession(reason: "keyboard_hidden")
         if let ctx = launchContext, env.nowMs() - ctx.startedAtMs > EcholetKeyboardSessionController.openEvidenceTimeoutMs {
             launchContext = nil
+            preparedDemandURL = nil
         }
         setPhase(.ready)
     }
@@ -275,8 +311,9 @@ public final class EcholetKeyboardSessionController {
             createdAtMs: now,
             ttlMs: EcholetLaunch.defaultDemandTtlMs
         )
-        EcholetLaunch.writeDemand(demand, defaults: env.defaults)
+        _ = EcholetLaunch.writeDemand(demand, defaults: env.defaults)
         launchContext = LaunchContext(nonce: nonce, url: url, startedAtMs: now, autoStartIssued: false)
+        preparedDemandURL = url
         setPhase(.opening)
         log("OPEN_ATTEMPT(auto=\(auto))")
 
@@ -295,6 +332,7 @@ public final class EcholetKeyboardSessionController {
     private func failOpen(reason: String) {
         autoLaunchUnsupportedReason = reason
         launchContext = nil
+        preparedDemandURL = nil
         if phase == .opening {
             setPhase(.ready)
         }
@@ -514,6 +552,7 @@ public final class EcholetKeyboardSessionController {
         if phase == .opening, freshWarmLiveExists() {
             log("OPEN_RESULT(evidence_warm_live)")
             launchContext = nil
+            preparedDemandURL = nil
             setPhase(.ready)
             beginStart(reason: "warm_live_evidence")
             return
@@ -537,6 +576,7 @@ public final class EcholetKeyboardSessionController {
         // warmReady evidence authorizes the START regardless of the current
         // opening presentation state; evidence is consumed exactly once.
         launchContext = nil
+        preparedDemandURL = nil
         setPhase(.ready)
         beginStart(reason: "warm_ready_evidence")
     }
@@ -690,7 +730,12 @@ public final class EcholetKeyboardSessionController {
             let common = commonPrefixCount(previouslyInserted, partial)
             let deleteCount = previouslyInserted.count - common
             if deleteCount > 0 {
-                env.deleteBackward(deleteCount)
+                let tailToDelete = String(previouslyInserted.suffix(deleteCount))
+                if safeToDeleteTail(expectedTail: tailToDelete, count: deleteCount) {
+                    env.deleteBackward(deleteCount)
+                } else {
+                    log("STREAM_DELETE_GUARDED(tail_mismatch_or_cursor_moved)")
+                }
             }
             let remainder = String(partial.dropFirst(common))
             if !remainder.isEmpty {
@@ -713,7 +758,12 @@ public final class EcholetKeyboardSessionController {
             let common = commonPrefixCount(previouslyInserted, finalText)
             let deleteCount = previouslyInserted.count - common
             if deleteCount > 0 {
-                env.deleteBackward(deleteCount)
+                let tailToDelete = String(previouslyInserted.suffix(deleteCount))
+                if safeToDeleteTail(expectedTail: tailToDelete, count: deleteCount) {
+                    env.deleteBackward(deleteCount)
+                } else {
+                    log("FINAL_DELETE_GUARDED(tail_mismatch_or_cursor_moved)")
+                }
             }
             let remainder = String(finalText.dropFirst(common))
             if !remainder.isEmpty {
@@ -728,8 +778,23 @@ public final class EcholetKeyboardSessionController {
     /// touching unrelated user text.
     private func removeStreamedPartial() {
         guard let previouslyInserted = lastLivePartial, previouslyInserted.count > 0 else { return }
-        env.deleteBackward(previouslyInserted.count)
+        if safeToDeleteTail(expectedTail: previouslyInserted, count: previouslyInserted.count) {
+            env.deleteBackward(previouslyInserted.count)
+        } else {
+            log("REMOVE_PARTIAL_GUARDED(tail_mismatch_or_cursor_moved)")
+        }
         lastLivePartial = nil
+    }
+
+    /// Suffix guard: if docFingerprint.before is known, only perform deleteBackward
+    /// if the document text immediately preceding the insertion point ends with
+    /// the expected tail to be deleted.
+    private func safeToDeleteTail(expectedTail: String, count: Int) -> Bool {
+        guard let before = env.docFingerprint().before else {
+            // When editor context before input is unavailable (nil), permit deletion
+            return true
+        }
+        return before.hasSuffix(expectedTail)
     }
 
     private func commonPrefixCount(_ a: String, _ b: String) -> Int {
