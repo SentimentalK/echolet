@@ -50,12 +50,28 @@ class AppStatusViewController: UIViewController, AudioCaptureDelegate, WarmIPCSe
     private let demoResponseButton = UIButton(type: .system)
     private let statusNoteLabel = UILabel()
 
+    // J4-E2E On-Device ASR section
+    private let asrSectionLabel = UILabel()
+    private let asrModelLabel = UILabel()
+    private let loadModelButton = UIButton(type: .system)
+    private let liveStatusView = UITextView()
+    private let startLiveButton = UIButton(type: .system)
+    private let stopLiveButton = UIButton(type: .system)
+    private let prepareWarmButton = UIButton(type: .system)
+    private let disarmWarmButton = UIButton(type: .system)
+    private let wavRegressionButton = UIButton(type: .system)
+
+    private var liveAsrSessionId: String?
+    private var asrFinalTranscriptsShownCount = 0
+
     override func viewDidLoad() {
         super.viewDidLoad()
         setupUI()
+        setupAsrUI()
         initializeIPC()
         AudioCaptureController.shared.delegate = self
         WarmIPCService.shared.delegate = self
+        EcholetAsrService.shared.delegate = self
         refreshIPCStatus()
     }
 
@@ -331,8 +347,7 @@ class AppStatusViewController: UIViewController, AudioCaptureDelegate, WarmIPCSe
     }
 
     // MARK: - AudioCaptureDelegate
-    func audioCaptureController(_ controller: AudioCaptureController, didUpdateStatus status: AudioCaptureController.Status) {
-        switch status {
+    func audioCaptureController(_ controller: AudioCaptureController, didUpdateStatus status: AudioCaptureController.Status) {        switch status {
         case .recording:
             micStatusLabel.text = "Microphone Status: ACTIVE RECORDING (Hardware Tap On)"
             micStatusLabel.textColor = .systemGreen
@@ -422,6 +437,10 @@ class AppStatusViewController: UIViewController, AudioCaptureDelegate, WarmIPCSe
     func warmIPCService(_ service: WarmIPCService, didEncounterBlockedState reason: String) {
         lastRequestLabel.text = "Warm IPC Blocked:\n\(reason)"
         lastRequestLabel.textColor = .systemRed
+        // A blocked terminal state implies the warm/keyboard lifecycle settled;
+        // recover the J4-E2E warm prepare affinity for an honest retry.
+        prepareWarmButton.isEnabled = true
+        disarmWarmButton.isEnabled = false
     }
 
     // MARK: - Manual IPC Refresh & Mock Response
@@ -496,5 +515,378 @@ class AppStatusViewController: UIViewController, AudioCaptureDelegate, WarmIPCSe
                 self.lastRequestLabel.text = "Mock response NOT written: \(rejectionReason ?? "unknown rejection")"
             }
         }
+    }
+
+    // ============================================================
+    // MARK: - J4-E2E On-Device ASR (single shared pipeline)
+    // ============================================================
+
+    private func setupAsrUI() {
+        // Model + live dictation section
+        asrSectionLabel.text = "On-Device ASR (J4-E2E offline)"
+        asrSectionLabel.font = .boldSystemFont(ofSize: 15)
+        asrSectionLabel.textAlignment = .center
+
+        asrModelLabel.numberOfLines = 0
+        asrModelLabel.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+        asrModelLabel.text = "Model: bundling check pending..."
+
+        loadModelButton.setTitle("Load Offline Model ( sherpa-onnx zh-en )", for: .normal)
+        loadModelButton.titleLabel?.font = .boldSystemFont(ofSize: 13)
+        loadModelButton.backgroundColor = .systemIndigo
+        loadModelButton.setTitleColor(.white, for: .normal)
+        loadModelButton.layer.cornerRadius = 8
+        loadModelButton.addTarget(self, action: #selector(didTapLoadModel), for: .touchUpInside)
+
+        liveStatusView.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+        liveStatusView.isEditable = false
+        liveStatusView.isScrollEnabled = true
+        liveStatusView.layer.borderColor = UIColor.systemGray4.cgColor
+        liveStatusView.layer.borderWidth = 1.0
+        liveStatusView.layer.cornerRadius = 6
+        liveStatusView.text = "ASR: no session. Recognized text appears here."
+        liveStatusView.heightAnchor.constraint(equalToConstant: 120).isActive = true
+
+        // Live Dictation row
+        startLiveButton.setTitle("Start Live Dictation", for: .normal)
+        startLiveButton.titleLabel?.font = .boldSystemFont(ofSize: 13)
+        startLiveButton.backgroundColor = .systemTeal
+        startLiveButton.setTitleColor(.white, for: .normal)
+        startLiveButton.layer.cornerRadius = 8
+        startLiveButton.addTarget(self, action: #selector(didTapStartLiveDictation), for: .touchUpInside)
+
+        stopLiveButton.setTitle("Stop & Finalize Live", for: .normal)
+        stopLiveButton.titleLabel?.font = .boldSystemFont(ofSize: 13)
+        stopLiveButton.backgroundColor = .systemOrange
+        stopLiveButton.setTitleColor(.white, for: .normal)
+        stopLiveButton.layer.cornerRadius = 8
+        stopLiveButton.addTarget(self, action: #selector(didTapStopLiveDictation), for: .touchUpInside)
+        stopLiveButton.isEnabled = false
+
+        let liveRow = UIStackView(arrangedSubviews: [startLiveButton, stopLiveButton])
+        liveRow.axis = .horizontal
+        liveRow.spacing = 10
+        liveRow.distribution = .fillEqually
+
+        // Warm dictation row
+        prepareWarmButton.setTitle("Prepare Warm Dictation for Notes", for: .normal)
+        prepareWarmButton.titleLabel?.font = .boldSystemFont(ofSize: 13)
+        prepareWarmButton.backgroundColor = .systemBlue
+        prepareWarmButton.setTitleColor(.white, for: .normal)
+        prepareWarmButton.layer.cornerRadius = 8
+        prepareWarmButton.addTarget(self, action: #selector(didTapPrepareWarm), for: .touchUpInside)
+
+        disarmWarmButton.setTitle("Disarm / End Warm Mic", for: .normal)
+        disarmWarmButton.titleLabel?.font = .boldSystemFont(ofSize: 13)
+        disarmWarmButton.backgroundColor = .systemGray4
+        disarmWarmButton.setTitleColor(.label, for: .normal)
+        disarmWarmButton.layer.cornerRadius = 8
+        disarmWarmButton.addTarget(self, action: #selector(didTapDisarmWarm), for: .touchUpInside)
+        disarmWarmButton.isEnabled = false
+
+        let warmRow = UIStackView(arrangedSubviews: [prepareWarmButton, disarmWarmButton])
+        warmRow.axis = .horizontal
+        warmRow.spacing = 10
+        warmRow.distribution = .fillEqually
+
+        // WAV regression row
+        wavRegressionButton.setTitle("Run Pinned WAV Regression (no mic)", for: .normal)
+        wavRegressionButton.titleLabel?.font = .boldSystemFont(ofSize: 13)
+        wavRegressionButton.backgroundColor = .systemPurple
+        wavRegressionButton.setTitleColor(.white, for: .normal)
+        wavRegressionButton.layer.cornerRadius = 8
+        wavRegressionButton.addTarget(self, action: #selector(didTapWavRegression), for: .touchUpInside)
+
+        stackView.addArrangedSubview(asrSectionLabel)
+        stackView.addArrangedSubview(asrModelLabel)
+        stackView.addArrangedSubview(loadModelButton)
+        stackView.addArrangedSubview(liveStatusView)
+        stackView.addArrangedSubview(liveRow)
+        stackView.addArrangedSubview(warmRow)
+        stackView.addArrangedSubview(wavRegressionButton)
+    }
+
+    // MARK: Shared ASR actions
+    @objc private func didTapLoadModel() {
+        appendLiveStatusLine("ASR: loading offline model (one-time on-device)...")
+        loadModelButton.isEnabled = false
+        EcholetAsrService.shared.loadModelIfNeeded { [weak self] ok, errorCode in
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                if ok {
+                    self.appendLiveStatusLine("ASR: OFFLINE MODEL LOADED (on-device only).")
+                } else {
+                    self.appendLiveStatusLine("ASR: MODEL LOAD FAIL — \(errorCode ?? "unknown")")
+                    self.loadModelButton.isEnabled = true
+                }
+            }
+        }
+    }
+
+    @objc private func didTapStartLiveDictation() {
+        // Foreground REAL MIC → REAL ASR through the SHARED service pipeline
+        // used by warm keyboard mode. Reserved manualTest ownership keeps the
+        // microphone ownership check identical to the J3A manual test.
+        startLiveButton.isEnabled = false
+        loadModelButton.isEnabled = false
+        EcholetAsrService.shared.loadModelIfNeeded { [weak self] ok, errorCode in
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                guard ok else {
+                    self.appendLiveStatusLine("ASR: model load fail — \(errorCode ?? "unknown")")
+                    self.startLiveButton.isEnabled = true
+                    self.loadModelButton.isEnabled = true
+                    return
+                }
+                WarmIPCService.shared.registerManualStartCapture { [weak self] shouldProceed, busyReason in
+                    guard let self = self else { return }
+                    DispatchQueue.main.async {
+                        if shouldProceed {
+                            AudioCaptureController.shared.startCapture(includePCM: true) { [weak self] result in
+                                guard let self = self else { return }
+                                DispatchQueue.main.async {
+                                    switch result {
+                                    case .success(let generation):
+                                        let sessionId = "live-\(UUID().uuidString.prefix(8))"
+                                        self.liveAsrSessionId = sessionId
+                                        EcholetAsrService.shared.beginSession(
+                                            sessionId: sessionId,
+                                            kind: .liveDictation,
+                                            expectedGeneration: generation
+                                        ) { ok, errorCode in
+                                            DispatchQueue.main.async {
+                                                if !ok {
+                                                    self.appendLiveStatusLine("ASR session failed: \(errorCode ?? "unknown")")
+                                                    self.stopLiveButton.isEnabled = false
+                                                    self.startLiveButton.isEnabled = true
+                                                }
+                                            }
+                                        }
+                                        self.appendLiveStatusLine("ASR: live dictation session session-prefix=\(sessionId.prefix(8)) gen=\(generation). SPEAK COMPLETELY.")
+                                        self.stopLiveButton.isEnabled = true
+                                        self.startMicButton.isEnabled = false
+                                    case .failure(let failure):
+                                        self.appendLiveStatusLine("Mic start failed: \(failure.localizedDescription)")
+                                        self.stopLiveButton.isEnabled = false
+                                        self.startLiveButton.isEnabled = true
+                                        // Release manual ownership so retry works.
+                                        WarmIPCService.shared.registerManualCaptureStopped()
+                                    }
+                                }
+                            }
+                        } else {
+                            self.appendLiveStatusLine("Mic busy: \(busyReason ?? "unavailable")")
+                            self.startLiveButton.isEnabled = true
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    @objc private func didTapStopLiveDictation() {
+        stopLiveButton.isEnabled = false
+        stopMicButton.isEnabled = false
+        guard let liveSessionId = liveAsrSessionId else {
+            appendLiveStatusLine("ASR: no live session to finalize (bus error semantics).")
+            startLiveButton.isEnabled = true
+            appendLiveStatusLine("ASR: starting live session failed; mic released.")
+            WarmIPCService.shared.registerManualCaptureStopped()
+            return
+        }
+        appendLiveStatusLine("ASR: finalizing session id_prefix=\(String(liveSessionId.prefix(8)))...")
+        WarmIPCService.shared.registerManualCaptureStopped()
+        EcholetAsrService.shared.finalizeSession(sessionId: liveSessionId) { [weak self] finalText in
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                self.sessionFinalizeCompletion(finalText)
+            }
+        }
+    }
+
+    private func sessionFinalizeCompletion(_ finalText: String?) {
+        if let finalText = finalText, !finalText.isEmpty {
+            appendLiveStatusLine("ASR FINAL (live): \(finalText)")
+            asrFinalTranscriptsShownCount += 1
+            // Insert into the contained test editor so the recognized phrase
+            // is verifiable against manual expectations in one read-through.
+            if testTextView.text.isEmpty || testTextView.text == "Tap here to test keyboard input..." {
+                testTextView.text = finalText
+            } else {
+                testTextView.text = testTextView.text + "\n" + finalText
+            }
+        } else if let finalText = finalText {
+            appendLiveStatusLine("ASR FINAL (live): empty/no speech — truthful empty transcript.")
+        } else {
+            appendLiveStatusLine("ASR FINAL (live): FAIL/CANCELLED (no final transcript available).")
+        }
+        liveAsrSessionId = nil
+        startLiveButton.isEnabled = true
+        loadModelButton.isEnabled = true
+        startMicButton.isEnabled = true
+    }
+
+    @objc private func didTapPrepareWarm() {
+        prepareWarmButton.isEnabled = false
+        loadModelButton.isEnabled = false
+        appendLiveStatusLine("WARM: preparing warm dictation for Notes (foreground-only)...")
+        WarmIPCService.shared.prepareWarmDictation()
+    }
+
+    @objc private func didTapDisarmWarm() {
+        WarmIPCService.shared.setUserArmMicrophone(false)
+        appendLiveStatusLine("WARM: disarm requested. Mic FULL STOP after stop completes.")
+        prepareWarmButton.isEnabled = true
+        disarmWarmButton.isEnabled = false
+    }
+
+    @objc private func didTapWavRegression() {
+        wavRegressionButton.isEnabled = false
+        EcholetAsrService.shared.loadModelIfNeeded { [weak self] ok, errorCode in
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                guard ok else {
+                    self.appendLiveStatusLine("ASR: model load fail — \(errorCode ?? "unknown")")
+                    self.wavRegressionButton.isEnabled = true
+                    return
+                }
+                guard let wavPath = Bundle.main.path(forResource: "0", ofType: "wav", inDirectory: "bilingual-zh-en/test_wavs"),
+                      let samples = Self.read16BitPcmMonoWav(path: wavPath) else {
+                    self.appendLiveStatusLine("WAV regression: pinned wav not found or unparsable in bundled model dir.")
+                    self.wavRegressionButton.isEnabled = true
+                    return
+                }
+                EcholetAsrService.shared.runPinnedWavRegression(samples16k: samples) { text, err in
+                    DispatchQueue.main.async {
+                        if let text = text {
+                            self.appendLiveStatusLine("WAV REGRESSION (offline deterministic): FINAL=\"\(text)\"")
+                        } else {
+                            self.appendLiveStatusLine("WAV REGRESSION FAIL: \(err ?? "unknown")")
+                        }
+                        self.wavRegressionButton.isEnabled = true
+                    }
+                }
+            }
+        }
+    }
+
+    private func appendLiveStatusLine(_ line: String) {
+        let stamp = Date().addingTimeInterval(0)
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm:ss"
+        liveStatusView.text = liveStatusView.text + "\n[GEN \(formatter.string(from: stamp))] " + line
+        let truncated = liveStatusView.text.count > 4000
+        if truncated {
+            let tailCount = liveStatusView.text.count - 4000
+            liveStatusView.text = "...(older)... " + String(liveStatusView.text.suffix(tailCount))
+        }
+    }
+}
+
+// ============================================================
+// MARK: - EcholetAsrServiceDelegate (main thread only)
+// ============================================================
+
+extension AppStatusViewController: EcholetAsrService.Delegate {
+    func asrService(_ service: EcholetAsrService, didChangeModelState state: EcholetAsrService.ModelState) {
+        asrModelLabel.text = "ASR model state: \(state.rawValue) (offline-only, bundled)"
+        if state == .loaded {
+            loadModelButton.isEnabled = false
+        } else {
+            loadModelButton.isEnabled = state != .loading
+        }
+        print("[ASR-UI] model state: \(state.rawValue)")
+    }
+
+    func asrService(_ service: EcholetAsrService, didUpdatePartialText partial: String, sessionId: String) {
+        appendLiveStatusLine("ASR partial: \(partial)")
+    }
+
+    func asrService(_ service: EcholetAsrService, sessionDidStart sessionId: String, kind: EcholetAsrService.SessionKind) {
+        if kind == .warmKeyboard {
+            appendLiveStatusLine("ASR: WARM keyboard ASR stream session begun id_prefix=\(sessionId.prefix(8)) (one shared system used for both modes)")
+        }
+    }
+
+    func asrService(_ service: EcholetAsrService, sessionDidFail sessionId: String, errorCode: String) {
+        appendLiveStatusLine("ASR session FAILED: id_prefix=\(sessionId.prefix(8)) code=\(errorCode)")
+        if liveAsrSessionId == sessionId {
+            liveAsrSessionId = nil
+            startLiveButton.isEnabled = true
+            stopLiveButton.isEnabled = false
+            WarmIPCService.shared.registerManualCaptureStopped()
+        }
+    }
+
+    func asrService(_ service: EcholetAsrService, sessionDidDispose sessionId: String, reason: String) {
+        appendLiveStatusLine("ASR session disposed: id_prefix=\(sessionId.prefix(8)) reason=\(reason)")
+        if liveAsrSessionId == sessionId {
+            liveAsrSessionId = nil
+            startLiveButton.isEnabled = true
+            stopLiveButton.isEnabled = false
+        }
+    }
+}
+
+// ============================================================
+// MARK: - WarmIPCServiceDelegate warm standby notification
+// ============================================================
+
+extension AppStatusViewController {
+    func warmIPCService(_ service: WarmIPCService, didChangeWarmStandbyActive active: Bool) {
+        if active {
+            appendLiveStatusLine("WARM: warm dictation recording ACTIVE (foreground prepared). Switch to Notes now.")
+            disarmWarmButton.isEnabled = true
+            prepareWarmButton.isEnabled = false
+        } else {
+            appendLiveStatusLine("WARM: warm dictation recorder INACTIVE.")
+            disarmWarmButton.isEnabled = false
+            prepareWarmButton.isEnabled = true
+        }
+    }
+}
+
+// ============================================================
+// MARK: - Pinned 16-bit PCM mono WAV reader (no framework deps)
+// ============================================================
+
+extension AppStatusViewController {
+    static func read16BitPcmMonoWav(path: String) -> [Float]? {
+        guard let data = FileManager.default.contents(atPath: path),
+              data.count >= 44,
+              data.starts(with: Array("RIFF".utf8)),
+              data[8..<12].elementsEqual(Array("WAVE".utf8)) else { return nil }
+        var pos = 12
+        var pcmOffset: Int?
+        var pcmLength = 0
+        var blockAlign = 0
+        while pos + 8 <= data.count {
+            let chunkId = String(bytes: data[pos..<pos+4], encoding: .ascii)
+            let chunkSize = Int(data[pos+4]) | Int(data[pos+5]) << 8
+                | Int(data[pos+6]) << 16 | Int(data[pos+7]) << 24
+            if chunkId == "fmt " {
+                let audioFmt = Int(data[pos+8]) | Int(data[pos+9]) << 8
+                let channels = Int(data[pos+10]) | Int(data[pos+11]) << 8
+                blockAlign = Int(data[pos+16]) | Int(data[pos+17]) << 8
+                let bits = Int(data[pos+22]) | Int(data[pos+23]) << 8
+                guard audioFmt == 1, channels == 1, bits == 16 else { return nil }
+            } else if chunkId == "data" {
+                pcmOffset = pos + 8
+                pcmLength = min(chunkSize, data.count - pos - 8)
+            }
+            pos += 8 + chunkSize + (chunkSize % 2)
+        }
+        guard let pcmOffset, blockAlign > 0,
+              pcmLength > 0, data.count >= pcmOffset + pcmLength else { return nil }
+        let count = pcmLength / 2
+        var out = [Float](repeating: 0, count: count)
+        let scale: Float = 1.0 / 32768.0
+        for i in 0..<count {
+            let lo = data[pcmOffset + 2 * i]
+            let hi = data[pcmOffset + 2 * i + 1]
+            let v = Int16(bitPattern: UInt16(lo) | (UInt16(hi) << 8))
+            out[i] = Float(Int(v)) * scale
+        }
+        return out
     }
 }

@@ -1,6 +1,52 @@
 import Foundation
 import AVFoundation
 
+/// Immutable per-tap PCM handoff context (J4-E2E).
+///
+/// Created once per PCM-gated hardware start on `stateQueue`, strongly held by
+/// the tap closure for the whole tap lifetime. Owns:
+/// - a lock-free bounded SPSC float ring (~2 s at the native rate), whose
+///   push path never allocates/blocks/locks (memcpy + atomic release store);
+/// - a preallocated mono downmix scratch (enough for the 1024-frame tap
+///   buffers with margin).
+///
+/// The tap never performs per-sample allocation, locks, dispatch, timers, or
+/// FFI inference — the ring push is the ONLY native call from the realtime
+/// thread. Context teardown (scratch deallocate + ring destroy) happens in
+/// deinit when the tap closure is removed by stop.
+final class EcholetCapturePCMContext {
+
+    let generation: UInt64
+    let ring: UnsafeMutableRawPointer
+    let scratchPtr: UnsafeMutablePointer<Float>
+    let scratchFrames = 4096
+
+    init?(generation: UInt64, nativeSampleRate: Double) {
+        self.generation = generation
+        // 2 seconds at the native rate (bounded; fail closed if clamped).
+        let capacity = UInt64(max(96_000, Int(nativeSampleRate * 2.0)))
+        guard let ring = EcholetAsrService.ffi_ring_create(capacity) else { return nil }
+        self.ring = ring
+        self.scratchPtr = UnsafeMutablePointer<Float>.allocate(capacity: scratchFrames)
+        scratchPtr.initialize(repeating: 0, count: scratchFrames)
+    }
+
+    deinit {
+        EcholetAsrService.ffi_ring_destroy(ring)
+        scratchPtr.deallocate()
+    }
+
+    /// Realtime-safe push (mono downmix + lock-free bounded ring write).
+    func push(buffer: AVAudioPCMBuffer) {
+        EcholetAsrService.tapPushMonoToRing(
+            ring: ring,
+            scratch: scratchPtr,
+            scratchCapacity: scratchFrames,
+            buffer: buffer
+        )
+    }
+}
+
 /// Delegate protocol for observing real microphone capture events from `AudioCaptureController`.
 ///
 /// NOTE: Status callbacks are rate-limited (~4Hz) and always dispatched to the main thread.
@@ -270,15 +316,25 @@ public final class AudioCaptureController: NSObject {
     ///
     /// - Parameters:
     ///   - expectedGeneration: Optional generation to fence against stale caller triggers.
+    ///   - includePCM: When true, the tap additionally performs an allocation-free
+    ///     mono downmix into the tap-owned preallocated scratch and pushes it
+    ///     into the tap-owned lock-free bounded SPSC ring (ASR handoff).
+    ///     Nothing in the tap does allocation, dispatch, lock, or inference.
     ///   - completion: Callback executed on stateQueue indicating whether hardware start succeeded.
     public func startCapture(
         expectedGeneration: UInt64? = nil,
+        includePCM: Bool = false,
         completion: ((Result<UInt64, CaptureError>) -> Void)? = nil
     ) {
         stateQueue.async { [weak self] in
             guard let self = self else {
                 completion?(.failure(.cancelledBeforeStart))
                 return
+            }
+
+            // Terminate any active PCM publication from a previous tap.
+            if includePCM {
+                EcholetAsrService.shared.publishTapRing(nil)
             }
 
             // Issue unique monotonic generation token via production lifecycle gate
@@ -359,6 +415,22 @@ public final class AudioCaptureController: NSObject {
             let bufferSize: AVAudioFrameCount = 1024
             inputNode.removeTap(onBus: 0) // Defensive cleanup
 
+            // Optional per-tap PCM context: immutable, preallocated; owned by
+            // the tap closure for its lifetime. The realtime callback only
+            // ever touches this immutable context (alloc-free push).
+            var pcmTapContext: EcholetCapturePCMContext?
+            if includePCM {
+                if let ctx = EcholetCapturePCMContext(generation: issuedGen, nativeSampleRate: sampleRate) {
+                    pcmTapContext = ctx
+                } else {
+                    self.notifyError(.engineConfigurationFailed("ASR ring allocation failed"))
+                    self.stopInternal(targetStatus: .failed)
+                    self.publishStateChange()
+                    completion?(.failure(.engineConfigurationFailed("ASR ring allocation failed")))
+                    return
+                }
+            }
+
             // Closure captures dedicated meterContext strongly for the tap lifetime and weak self, NEVER reads mutable controller fields
             let tapHandler = MeterContext.makeTapHandler(
                 context: meterContext,
@@ -368,11 +440,15 @@ public final class AudioCaptureController: NSObject {
                     controller.handleMetricSnapshot(snapshot)
                 }
             )
+            let strongPcmContext = pcmTapContext
             inputNode.installTap(onBus: 0, bufferSize: bufferSize, format: inputFormat) { buffer, _ in
                 AudioCaptureController.processAudioBuffer(
                     buffer: buffer,
                     tapHandler: tapHandler
                 )
+                if let pcmContext = strongPcmContext {
+                    pcmContext.push(buffer: buffer)
+                }
             }
 
             self.isTapInstalled = true
@@ -386,6 +462,11 @@ public final class AudioCaptureController: NSObject {
                 let ackResult = self.lifecycleGate.acknowledgeStartSuccess(for: issuedGen)
                 switch ackResult {
                 case .success(let activeGen):
+                    if let ctx = pcmTapContext {
+                        EcholetAsrService.shared.publishTapRing(
+                            .init(ring: ctx.ring, generation: activeGen, nativeSampleRate: sampleRate)
+                        )
+                    }
                     self.publishStateChange()
                     completion?(.success(activeGen))
                 case .failure(let err):
@@ -446,6 +527,8 @@ public final class AudioCaptureController: NSObject {
     private func stopInternal(targetStatus: Status) {
         // Advance generation on lifecycle gate first so any in-flight callbacks/snapshots are instantly fenced
         _ = self.lifecycleGate.stop(targetState: targetStatus)
+        // Publish clear PCM tap state (bounded SPSC + scratch die with the tap)
+        EcholetAsrService.shared.publishTapRing(nil)
 
         // Halt native engine and remove tap
         if let engine = audioEngine {

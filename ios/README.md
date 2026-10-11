@@ -215,3 +215,70 @@ Open decisions the coordinator/user still needs to make (next gate):
 4. **Signing/persistence**: free team profile expiry (2026-10-17) affects
    any long-lived sideload install; paid Developer Program or profile
    refresh cadence is a user/product choice, unchanged by this probe.
+
+---
+
+## 2026-10-11 — J4-E2E: on-device warm dictation vertical slice
+
+### What was added (source only; no binaries/models committed)
+- `ios/ios-native/src/lib.rs`: added lock-free bounded SPSC float ring FFI
+  (`echolet_ios_ring_create/push/pop/clear/destroy/dropped_total`) and
+  `echolet_ios_stream_flush` (trailing-silence tail flush → final text).
+  Realtime contract: the AVAudioEngine tap calls ONLY `ring_push` (memset
+  log2 memcpy + atomic release store; no allocation/locks/sync-queues/FFI
+  inference).
+- `ios/App/EcholetAsrService.swift`: app-side serial ASR worker.
+  - `asrQueue` owns recognizer + every stream FFI call (create/feed/read/
+    flush/destroy). Sessions are fenced against the exact capture
+    generation; stale rings fail closed. The recognizer loads once and is
+    destroyed only at stream teardown boundaries.
+  - PCM path: tap → ring (lock-free) → asrQueue drain → `AVAudioConverter`
+    native-rate → 16 kHz mono → stream_feed. Bounded overflow drops are
+    logged. No PCM persistence, no network, transcripts only via delegate.
+- `ios/App/AudioCaptureController.swift`: opt-in `startCapture(includePCM:)`
+  wraps an allocation-free mono downmix + bounded ring push per tap. Meter
+  semantics (J3A) untouched. `EcholetCapturePCMContext` lifetime matches the
+  tap (scratch + ring allocated at start, freed at stop).
+- `ios/App/WarmIPCService.swift` + `ios/protocol/WarmCaptureFlow.swift`:
+  - New explicit `.warmStandby` capture owner: Prepare (foreground, user
+    tap) → mic permission → ONE warm recorder runs; keyboard START adopts
+    the same hardware via `adoptWarmStandbyAsr` (NO restart, no second tap);
+    pre-START ring backlog is discarded at the ring boundary.
+  - Keyboard STOP (Finish) acks the exact stop requestId/sequence and
+    publishes the REAL final recognizer text via a single-writer provider;
+    cancel/disarm/replacement paths dispose ASR without fabricating text.
+  - Session replacement while warm hardware is live adopts the replacement
+    from the same recorder (warm continuity).
+- `ios/Keyboard/KeyboardViewController.swift`: Finish/Commit button (START
+  seq+1, fresh requestId, session held for final transcript Consume).
+- `ios/project.yml`: deployment target 15.1 (ORT requirement); EcholetApp
+  links pinned `libecholet_ios.a` + `libonnxruntime.a` device static
+  archives and bundles the frozen local `bilingual-zh-en` model folder as a
+  non-repo folder resource. Keyboard stays native-lib-free.
+
+### Rebuild + audit recipe (fresh checkout, no hidden steps)
+1. `cargo build --release --manifest-path ios/ios-native/Cargo.toml --target aarch64-apple-ios`
+2. `./ios/scripts/build-ios-native.sh` (stages + sha-verifies pinned sherpa
+   v1.13.6 / ORT 1.27.1 device statics into `.local-runtime/ios-native/lib`)
+3. Place the frozen `bilingual-zh-en` model dir at
+   `.local-runtime/models/bilingual-zh-en` (manifest id field must match).
+4. `cd ios && xcodegen generate`
+5. `xcodebuild -project Echolet.xcodeproj -scheme EcholetApp -destination 'generic/platform=iOS' -derivedDataPath DerivedData build`
+6. Pure Swift CLI protocol tests:
+   `swiftc` each of `AdmissionTests`, `AdversarialTests`,
+   `CaptureLifecycleTests`, `IPCCodecSmoke`, `WarmCaptureFlowTests` with
+   `EcholetIPC.swift EcholetAdmission.swift CaptureLifecycleGate.swift
+   WarmCaptureFlow.swift` (same pattern as prior jobs) — all must exit 0.
+7. Install on your own sideloaded iPad:
+   `xcrun devicectl device install app --device <ID> .../EcholetApp.app`
+
+### Manual acceptance (physical; human-owned)
+1. Open Echolet > "Load Offline Model" (or first Prepare) — state:
+   `ASR: OFFLINE MODEL LOADED (on-device only)`.
+2. Test A (app foreground): Start Live Dictation → speak (zh/en) → Stop &
+   Finalize Live → REAL phrase must render in the ASR box and the editor.
+3. Test B (warm keyboard): Prepare Warm Dictation → ACTIVE indicator →
+   switch to Notes → Echolet keyboard → Start → speak → Finish → Consume
+   Response → recognized transcript inserted ONCE.
+4. Test C (cancel safety): cancel or rearm afterwards → mic stops (status
+   `STOPPED`), no stale transcript reuse, no leftover recording session.

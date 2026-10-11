@@ -613,7 +613,7 @@ func consumeCleanupGeneration(_ cleanup: WarmCaptureFlowCoordinator.HardwareStar
 extension WarmCaptureFlowCoordinator.CaptureOwner {
     var captureOwnerSessionId: String? {
         switch self {
-        case .none: return nil
+        case .none, .warmStandby: return nil
         case .manualTest: return "manualTest"
         case .keyboard(let sessionId, _): return sessionId
         }
@@ -641,5 +641,206 @@ func replayTokenGuarded(_ coordinator: WarmCaptureFlowCoordinator) {
 struct WarmCaptureFlowTestsMain {
     static func main() {
         testWarmCaptureFlowSuite()
+        testWarmStandbySuite()
+        testWarmStopTranscriptSuite()
     }
+}
+
+// ============================================================
+// J4-E2E Warm standby adoption, disarm fencing and STOP transcript
+// ============================================================
+
+func testWarmStandbySuite() {
+    print("[TEST] Running J4-E2E warm standby suite...")
+    do {
+        let epoch = "epoch-warm-1151"
+        let gate = try EcholetAdmission.Gate(appEpoch: epoch, coldBootArmed: false)
+        let coordinator = WarmCaptureFlowCoordinator(appEpoch: epoch, admissionGate: gate)
+        _ = coordinator.setUserArmMicrophone(true)
+
+        // 1. Prepare warm standby claims ownership but does NOT touch
+        // hardware and does not mint keyboard session responses.
+        let prepareEffects = coordinator.prepareWarmStandbyCapture()
+        assertFlow(prepareEffects.contains { if case .requestWarmPermission = $0 { return true } else { return false } }, "Warm prepare requests warm permission (not gate-fenced keyboard path)")
+        assertFlow(coordinator.captureOwner == .warmStandby, "Warm standby owns capture")
+        assertFlow(coordinator.isMicrophoneArmedByUser, "Warm prepare arms the mic")
+
+        guard case let .requestWarmPermission(warmToken)? = prepareEffects.first(where: { if case .requestWarmPermission = $0 { return true } else { return false } }) else {
+            fatalError("warm permission token missing")
+        }
+
+        // Manual test start during warm standby is rejected busy (no state change).
+        let manualBusy = coordinator.handleManualStartCaptureInitiated()
+        assertFlow(!manualBusy.shouldProceed, "Manual capture rejected busy under warm standby")
+        assertFlow(coordinator.captureOwner == .warmStandby, "Warm ownership intact after busy manual attempt")
+
+        // 2. Permission granted -> hardware start effect.
+        let warmStartEffects = coordinator.handleWarmStandbyPermissionCallback(token: warmToken, granted: true)
+        assertFlow(warmStartEffects.contains { if case .startHardwareWarmStandby = $0 { return true } else { return false } }, "Warm permission grants hardware start effect")
+
+        // 3. Hardware start confirmation -> warm standby hardware active.
+        let (warmDoneEffects, warmCleanup) = coordinator.handleWarmStandbyHardwareStartCompletion(token: warmToken, result: .success(7001))
+        assertFlow(warmCleanup == nil, "Warm standby success does not mint cleanup")
+        assertFlow(coordinator.isWarmStandbyHardwareActive, "Warm hardware active state recorded")
+        assertFlow(warmDoneEffects.contains { if case .notifyWarmStandbyActive(let active) = $0 { return active } else { return false } }, "Warm active notification emitted")
+
+        // 4. Keyboard START while warm recorder running MUST adopt, NOT
+        // restart hardware and NEVER re-request permission.
+        let adoptReq = try EcholetIPC.KeyboardRequest(appEpoch: epoch, intentSequence: 10, sessionId: "warm-session-adopt", sequence: 1, requestId: "req-warm-adopt", command: .start)
+        let adoptEffects = coordinator.handleIncomingRequest(adoptReq)
+        assertFlow(adoptEffects.contains { if case .adoptWarmStandbyAsr = $0 { return true } else { return false } }, "Keyboard START adopts warm standby via ASR adoption effect")
+        assertFlow(adoptEffects.contains { if case .writeResponse(_, _, _, let state, _, _, _) = $0 { return state == .preparing } else { return false } }, "Adoption prepares response before ASR bound")
+        assertFlow(!adoptEffects.contains { if case .startHardware = $0 { return true } else { return false } }, "Adoption NEVER restarts hardware")
+        assertFlow(!adoptEffects.contains { if case .requestPermission = $0 { return true } else { return false } }, "Adoption NEVER re-requests permission")
+        assertFlow(coordinator.captureOwner == .keyboard(sessionId: "warm-session-adopt", intentSequence: 10), "Keyboard owner set by adoption")
+        assertFlow(coordinator.activeSessionToken?.sessionId == "warm-session-adopt", "Active session token set by adoption")
+        assertFlow(coordinator.isWarmStandbyHardwareActive, "Warm hardware continues (not stopped/reopened)")
+
+        // Adoption success: keyboard response slot turns listening.
+        let adoptToken = coordinator.activeSessionToken!
+        let adoptDoneEffects = coordinator.handleWarmAsrAdoptionCompleted(token: adoptToken, success: true, errorCode: nil)
+        assertFlow(adoptDoneEffects.contains { if case .writeResponse(_, _, _, let state, _, _, _) = $0 { return state == .listening } else { return false } }, "Adoption completion publishes listening")
+
+        // Adoption failure path surfaces blocked honestly and keeps warm
+        // hardware alive for a retry.
+        let failReq = try EcholetIPC.KeyboardRequest(appEpoch: epoch, intentSequence: 12, sessionId: "warm-session-fail", sequence: 1, requestId: "req-warm-fail", command: .start)
+        let failAdoptEffects = coordinator.handleIncomingRequest(failReq)
+        assertFlow(failAdoptEffects.contains { if case .adoptWarmStandbyAsr = $0 { return true } else { return false } }, "Second warm START also adopts (session replacement semantics)")
+        let failToken = coordinator.activeSessionToken!
+        let failDoneEffects = coordinator.handleWarmAsrAdoptionCompleted(token: failToken, success: false, errorCode: "asr_model_not_loaded")
+        assertFlow(failDoneEffects.contains { if case .writeResponse(_, _, _, let state, _, _, let errorCode) = $0 { return state == .blocked && errorCode == "asr_model_not_loaded" } else { return false } }, "Adoption failure publishes honest blocked state")
+        assertFlow(coordinator.isWarmStandbyHardwareActive, "Warm hardware still active after failed adoption (retry possible)")
+
+        // 5. STOP with fresh intent collects transcript via provider.
+        let finalText = "中国 recognizer 中文 final transcript"
+        coordinator.stopFinalTranscriptProvider = { sessionId in
+            guard sessionId == "warm-session-fail" else { return nil }
+            return finalText
+        }
+        let stopReq = try EcholetIPC.KeyboardRequest(appEpoch: epoch, intentSequence: 13, sessionId: "warm-session-fail", sequence: 2, requestId: "req-warm-finish-stop", command: .stop)
+        let stopEffects = coordinator.handleIncomingRequest(stopReq)
+        assertFlow(stopEffects.contains { if case .stopHardwareKeyboard(let d) = $0 { return d.reason == "keyboard_stop" && d.requestId == "req-warm-finish-stop" } else { return false } }, "Admitted keyboard STOP mints exact stop directive")
+
+        guard case let .stopHardwareKeyboard(stopDirective)? = stopEffects.first(where: { if case .stopHardwareKeyboard = $0 { return true } else { return false } }) else {
+            fatalError("stop directive missing")
+        }
+        let completionEffects = coordinator.handleHardwareStopCompletion(directive: stopDirective)
+        guard case let .writeResponse(_, ackReq, ackSeq, .completed, recognizedText, isFinal, _)? = completionEffects.first(where: { if case .writeResponse = $0 { return true } else { return false } }) else {
+            fatalError("completed response missing")
+        }
+        assertFlow(ackReq == "req-warm-finish-stop", "Completed ACKs the STOP requestId")
+        assertFlow(ackSeq == 2, "Completed ACKs the STOP sequence")
+        assertFlow(isFinal, "Completed response is final")
+        assertFlow(recognizedText == finalText, "Completed response carries REAL final transcript via provider")
+
+        // 6. Warm standby cleared after the keyboard stop transition.
+        assertFlow(!coordinator.isWarmStandbyHardwareActive, "Warm standby hardware state cleared after keyboard stop")
+        assertFlow(coordinator.activeSessionToken == nil, "No active session after stop")
+    } catch {
+        assertFlow(false, "testWarmStandbySuite threw: \(error)")
+    }
+
+    // 7. Disarm in warm standby stops hardware and clears ownership.
+    do {
+        let epoch = "epoch-warm-1152"
+        let gate = try EcholetAdmission.Gate(appEpoch: epoch, coldBootArmed: false)
+        let coordinator = WarmCaptureFlowCoordinator(appEpoch: epoch, admissionGate: gate)
+        _ = coordinator.setUserArmMicrophone(true)
+        let prepareEffects = coordinator.prepareWarmStandbyCapture()
+        guard case let .requestWarmPermission(token2)? = prepareEffects.first(where: { if case .requestWarmPermission = $0 { return true } else { return false } }) else {
+            fatalError("second warm token missing")
+        }
+        _ = coordinator.handleWarmStandbyPermissionCallback(token: token2, granted: true)
+        _ = coordinator.handleWarmStandbyHardwareStartCompletion(token: token2, result: .success(7002))
+        assertFlow(coordinator.isWarmStandbyHardwareActive, "Second warm standby hardware active")
+        let disarmEffects = coordinator.setUserArmMicrophone(false)
+        assertFlow(disarmEffects.contains { if case .stopHardwareManual = $0 { return true } else { return false } }, "Disarm in warm standby stops hardware")
+        assertFlow(coordinator.captureOwner == .none, "Warm standby ownership cleared by disarm")
+        assertFlow(!coordinator.isWarmStandbyHardwareActive, "Warm hardware state cleared by disarm")
+
+        // Warm standby + readiness after disarm: keyboard START follows the
+        // standard permission/hardware path (NOT adoption).
+        let coldReq = try EcholetIPC.KeyboardRequest(appEpoch: epoch, intentSequence: 20, sessionId: "cold-session", sequence: 1, requestId: "req-cold-start", command: .start)
+        _ = coordinator.setUserArmMicrophone(true)
+        let coldEffects = coordinator.handleIncomingRequest(coldReq)
+        assertFlow(coldEffects.contains { if case .requestPermission = $0 { return true } else { return false } }, "Non-warm keyboard START re-requests permission")
+        assertFlow(!coldEffects.contains { if case .adoptWarmStandbyAsr = $0 { return true } else { return false } }, "Non-warm keyboard START does not adopt ASR")
+    } catch {
+        assertFlow(false, "disarm-cold-start threw: \(error)")
+    }
+
+    print("[TEST] J4-E2E warm standby suite PASSED.")
+}
+
+func testWarmStopTranscriptSuite() {
+    print("[TEST] Running J4-E2E stop transcript provider suite...")
+    do {
+        // Provider absent -> completed response carries nil text + honest
+        // error code (never mock text).
+        let epoch = "epoch-stop-1153"
+        let gate = try EcholetAdmission.Gate(appEpoch: epoch, coldBootArmed: false)
+        let coordinator = WarmCaptureFlowCoordinator(appEpoch: epoch, admissionGate: gate)
+        _ = coordinator.setUserArmMicrophone(true)
+
+        let start = try EcholetIPC.KeyboardRequest(appEpoch: epoch, intentSequence: 30, sessionId: "stop-session", sequence: 1, requestId: "req-stop-start", command: .start)
+        // Reach an ACTIVE keyboard capture through the standard path:
+        // admit START -> permission granted -> hardware start success.
+        let startEffects = coordinator.handleIncomingRequest(start)
+        assertFlow(startEffects.contains { if case .requestPermission = $0 { return true } else { return false } }, "standard START requests permission")
+        let startToken = coordinator.pendingStartToken!
+        _ = coordinator.handlePermissionCallback(token: startToken, granted: true)
+        let (startDone, _) = coordinator.handleHardwareStartCompletion(token: startToken, result: .success(5001))
+        assertFlow(startDone.contains { if case .writeResponse(_, _, _, let state, _, _, _) = $0 { return state == .listening } else { return false } }, "active keyboard capture established")
+        assertFlow(coordinator.activeSessionToken?.sessionId == "stop-session", "keyboard session token established")
+        let stopReq = try EcholetIPC.KeyboardRequest(appEpoch: epoch, intentSequence: 31, sessionId: "stop-session", sequence: 2, requestId: "req-stop-stop", command: .stop)
+        let stopEffects = coordinator.handleIncomingRequest(stopReq)
+        guard case let .stopHardwareKeyboard(stopDirective)? = stopEffects.first(where: { if case .stopHardwareKeyboard = $0 { return true } else { return false } }) else {
+            fatalError("stop directive missing (no provider)")
+        }
+        let completionEffects = coordinator.handleHardwareStopCompletion(directive: stopDirective)
+        guard case let .writeResponse(_, ackReq1, ackSeq1, .completed, recognizedText, _, errorCode)? = completionEffects.first(where: { if case .writeResponse = $0 { return true } else { return false } }) else {
+            fatalError("completed response missing (no provider)")
+        }
+        assertFlow(ackReq1 == "req-stop-stop" && ackSeq1 == 2, "tombstone-free exact ACK")
+        assertFlow(recognizedText == nil, "No provider -> nil text (honest, never mock)")
+        assertFlow(errorCode == "asr_final_transcript_unavailable", "No provider -> explicit unavailable errorCode")
+
+        // Provider returning an empty string means genuine no-speech.
+        coordinator.stopFinalTranscriptProvider = { sessionId in
+            guard sessionId == "empty-session" else { return nil }
+            return ""
+        }
+        // Establish a NEW active session (standard path) then STOP it.
+        // The prior ended session still holds the gate active slot, so the
+        // second START is a REPLACEMENT: complete its barrier first.
+        let finishStop2 = try EcholetIPC.KeyboardRequest(appEpoch: epoch, intentSequence: 32, sessionId: "empty-session", sequence: 1, requestId: "req-empty-start-2", command: .start)
+        let start2Effects = coordinator.handleIncomingRequest(finishStop2)
+        guard case let .stopHardwareKeyboard(replaceStop)? = start2Effects.first(where: { if case .stopHardwareKeyboard = $0 { return true } else { return false } }) else {
+            assertFlow(false, "replacement stop directive missing")
+            return
+        }
+        let barrierEffects = coordinator.handleHardwareStopCompletion(directive: replaceStop)
+        assertFlow(barrierEffects.contains { if case .requestPermission = $0 { return true } else { return false } }, "Replacement barrier released to permission")
+        let start2Token = coordinator.pendingStartToken!
+        _ = coordinator.handlePermissionCallback(token: start2Token, granted: true)
+        _ = coordinator.handleHardwareStartCompletion(token: start2Token, result: .success(5002))
+        _ = coordinator.handlePermissionCallback(token: start2Token, granted: true)
+        _ = coordinator.handleHardwareStartCompletion(token: start2Token, result: .success(5002))
+        assertFlow(coordinator.activeSessionToken?.sessionId == "empty-session", "second session established")
+        let stop2Req = try EcholetIPC.KeyboardRequest(appEpoch: epoch, intentSequence: 33, sessionId: "empty-session", sequence: 2, requestId: "req-empty-stop-2", command: .stop)
+        let stop2Effects = coordinator.handleIncomingRequest(stop2Req)
+        guard case let .stopHardwareKeyboard(stopDirective2)? = stop2Effects.first(where: { if case .stopHardwareKeyboard = $0 { return true } else { return false } }) else {
+            fatalError("stop directive missing (empty provider)")
+        }
+        let done2 = coordinator.handleHardwareStopCompletion(directive: stopDirective2)
+        guard case let .writeResponse(_, _, _, .completed, recognizedText2, _, errorCode2)? = done2.first(where: { if case .writeResponse = $0 { return true } else { return false } }) else {
+            fatalError("completed response missing (empty provider)")
+        }
+        assertFlow(recognizedText2 == "", "Empty provider -> honest empty text")
+        assertFlow(errorCode2 == nil, "Empty provider has no error code")
+    } catch {
+        assertFlow(false, "testWarmStopTranscriptSuite threw: \(error)")
+    }
+
+    print("[TEST] J4-E2E stop transcript provider suite PASSED.")
 }

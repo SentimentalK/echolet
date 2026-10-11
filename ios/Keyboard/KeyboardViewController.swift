@@ -19,9 +19,9 @@ class KeyboardViewController: UIInputViewController {
     private struct ActiveSession {
         let epoch: String
         let sessionId: String
-        let requestId: String
-        let sequence: UInt64
         let intentSequence: UInt64
+        var requestId: String
+        var sequence: UInt64
         var lastAcceptedRevision: UInt64
     }
 
@@ -32,6 +32,7 @@ class KeyboardViewController: UIInputViewController {
     private let statusLabel = UILabel()
     private let disclaimerLabel = UILabel()
     private let actionButton = UIButton(type: .system)
+    private let finishButton = UIButton(type: .system)
     private let cancelButton = UIButton(type: .system)
     private let nextKeyboardButton = UIButton(type: .system)
     private let pollResponseButton = UIButton(type: .system)
@@ -104,7 +105,7 @@ class KeyboardViewController: UIInputViewController {
         actionRow.spacing = 12
         actionRow.distribution = .fillEqually
 
-        actionButton.setTitle("Start Test", for: .normal)
+        actionButton.setTitle("Start", for: .normal)
         actionButton.titleLabel?.font = .boldSystemFont(ofSize: 14)
         actionButton.backgroundColor = .systemBlue
         actionButton.setTitleColor(.white, for: .normal)
@@ -112,6 +113,21 @@ class KeyboardViewController: UIInputViewController {
         actionButton.contentEdgeInsets = UIEdgeInsets(top: 8, left: 16, bottom: 8, right: 16)
         actionButton.addTarget(self, action: #selector(didTapActionButton), for: .touchUpInside)
         actionRow.addArrangedSubview(actionButton)
+
+        // J4-E2E explicit Finish/Commit: NEVER reuse Stop-as-finish via
+        // Cancel. Finish allocates a fresh intent, sends STOP with the SAME
+        // sessionId, sequence+1, a NEW requestId, and keeps the local session
+        // alive (expected ACK identity updated to the STOP) until the final
+        // real transcript arrives via Consume Response.
+        finishButton.setTitle("Finish", for: .normal)
+        finishButton.titleLabel?.font = .systemFont(ofSize: 14)
+        finishButton.backgroundColor = .systemGreen
+        finishButton.setTitleColor(.white, for: .normal)
+        finishButton.layer.cornerRadius = 8
+        finishButton.contentEdgeInsets = UIEdgeInsets(top: 8, left: 16, bottom: 8, right: 16)
+        finishButton.addTarget(self, action: #selector(didTapFinishButton), for: .touchUpInside)
+        finishButton.isEnabled = false
+        actionRow.addArrangedSubview(finishButton)
 
         cancelButton.setTitle("Stop / Cancel", for: .normal)
         cancelButton.titleLabel?.font = .systemFont(ofSize: 14)
@@ -154,6 +170,7 @@ class KeyboardViewController: UIInputViewController {
         guard let defaults = sharedDefaults else {
             statusLabel.text = "App Group Unavailable: Entitlement Missing"
             actionButton.isEnabled = false
+            finishButton.isEnabled = false
             pollResponseButton.isEnabled = false
             return
         }
@@ -161,18 +178,70 @@ class KeyboardViewController: UIInputViewController {
         guard let appEpoch = defaults.string(forKey: EcholetIPC.appEpochKey), !appEpoch.isEmpty else {
             statusLabel.text = "App Not Ready: Open Containing App Once to Set Epoch"
             actionButton.isEnabled = false
+            finishButton.isEnabled = false
             pollResponseButton.isEnabled = false
             return
         }
 
         if let active = activeSession {
-            statusLabel.text = "Session Active (\(active.sessionId.prefix(8))...)\nWaiting for Containing App Mock Response"
+            statusLabel.text = "Session Active (\(active.sessionId.prefix(8))...)\nSpeak, then tap Finish; next tap Consume Response"
             actionButton.isEnabled = false
+            finishButton.isEnabled = true
             pollResponseButton.isEnabled = true
         } else {
             statusLabel.text = "Ready (Epoch: \(appEpoch.prefix(8))...)"
             actionButton.isEnabled = true
+            finishButton.isEnabled = false
             pollResponseButton.isEnabled = false
+        }
+    }
+
+    // MARK: - J4-E2E Finish / Commit (explicit STOP intent with tracked ACK)
+    @objc private func didTapFinishButton() {
+        guard let active = activeSession, let defaults = sharedDefaults else {
+            statusLabel.text = "No active session to finish."
+            return
+        }
+
+        guard let nextIntentSeq = reserveNextIntentSequence(in: defaults) else {
+            statusLabel.text = "Error: intent sequence counter overflowed. Fail closed."
+            return
+        }
+
+        let stopRequestId = UUID().uuidString
+        let stopSequence = active.sequence + 1
+        do {
+            let stopRequest = try EcholetIPC.KeyboardRequest(
+                appEpoch: active.epoch,
+                intentSequence: nextIntentSeq,
+                sessionId: active.sessionId,
+                sequence: stopSequence,
+                requestId: stopRequestId,
+                command: .stop,
+                clientTimestampMs: UInt64(Date().timeIntervalSince1970 * 1000)
+            )
+            let data = try EcholetIPC.makeEncoder().encode(stopRequest)
+            defaults.set(data, forKey: EcholetIPC.keyboardRequestKey)
+            defaults.synchronize()
+
+            let notificationName = CFNotificationName(EcholetIPC.darwinNotificationRequest as CFString)
+            CFNotificationCenterPostNotification(
+                CFNotificationCenterGetDarwinNotifyCenter(),
+                notificationName,
+                nil,
+                nil,
+                true
+            )
+
+            // Keep the local session ALIVE but update the expected correlated
+            // ACK identity to this Finish STOP (requestId + sequence). The
+            // session is closed ONLY after the final transcript is consumed.
+            activeSession?.requestId = stopRequestId
+            activeSession?.sequence = stopSequence
+            updateStatusDisplay()
+            statusLabel.text = "Finalized (?) — waiting for App transcript (Consume Response)..."
+        } catch {
+            statusLabel.text = "Failed to create stop request: \(error.localizedDescription)"
         }
     }
 
@@ -224,9 +293,9 @@ class KeyboardViewController: UIInputViewController {
             self.activeSession = ActiveSession(
                 epoch: currentEpoch,
                 sessionId: newSessionId,
+                intentSequence: nextIntentSeq,
                 requestId: newRequestId,
                 sequence: 1,
-                intentSequence: nextIntentSeq,
                 lastAcceptedRevision: 0
             )
 

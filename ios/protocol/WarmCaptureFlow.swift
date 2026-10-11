@@ -23,6 +23,7 @@ public final class WarmCaptureFlowCoordinator {
 
     public enum CaptureOwner: Equatable {
         case none
+        case warmStandby
         case keyboard(sessionId: String, intentSequence: UInt64)
         case manualTest
     }
@@ -121,6 +122,11 @@ public final class WarmCaptureFlowCoordinator {
         case notifyStopAdmitted(sessionId: String, intentSequence: UInt64)
         case notifyBlocked(reason: String)
         case notifyRejected(reason: String)
+        // J4-E2E warm standby (app-owned warm capture for keyboard adoption).
+        case requestWarmPermission(token: SessionToken)
+        case startHardwareWarmStandby(token: SessionToken)
+        case adoptWarmStandbyAsr(token: SessionToken)
+        case notifyWarmStandbyActive(active: Bool)
     }
 
     // Process & Gate state
@@ -133,6 +139,17 @@ public final class WarmCaptureFlowCoordinator {
     public private(set) var pendingStartToken: SessionToken?
     public private(set) var pendingReplacementStartToken: SessionToken?
     public private(set) var isWaitingForHardwareStopToStartReplacement: Bool = false
+
+    // J4-E2E warm standby state (app-owned recording BEFORE keyboard START)
+    public private(set) var warmStandbyToken: SessionToken?
+    /// True only while the warm standby recorder hardware is genuinely
+    /// running (set on confirmed hardware start, cleared on stop paths).
+    public private(set) var isWarmStandbyHardwareActive: Bool = false
+
+    // Stop final transcript. Injected set-only provider (single-owner queue);
+    // consumed exactly once per stop ACK write. Pure Foundation stays free of
+    // any ASR dependency; the provider is supplied by WarmIPCService.
+    public var stopFinalTranscriptProvider: ((String) -> String?)?
 
     // Hardware stop identity tracking (single-writer, exact operation matching)
     public private(set) var pendingStopAcknowledgmentDirective: HardwareStopDirective?
@@ -243,6 +260,18 @@ public final class WarmCaptureFlowCoordinator {
             isWaitingForHardwareStopToStartReplacement = false
             pendingReplacementStopDirective = nil
 
+            // J4-E2E: disarm while WARM STANDBY capture is active stops the
+            // app-owned warm recorder and ends standby ownership. No hidden
+            // audio session survives the explicit Disarm.
+            if case .warmStandby = captureOwner {
+                captureOwner = .none
+                warmStandbyToken = nil
+                isWarmStandbyHardwareActive = false
+                effects.append(.stopHardwareManual)
+                effects.append(.notifyWarmStandbyActive(active: false))
+                return effects
+            }
+
             // If keyboard session is active, cancel it and request stop
             if let active = activeSessionToken {
                 activeSessionToken = nil
@@ -285,6 +314,11 @@ public final class WarmCaptureFlowCoordinator {
     ///   keyboard stop has truly completed.
     /// - Otherwise manual capture claims ownership and manual UI keeps full control.
     public func handleManualStartCaptureInitiated() -> (shouldProceed: Bool, busyReason: String?, effects: [FlowEffect]) {
+        // J4-E2E: manual test NEVER coexists with warm standby recording.
+        if case .warmStandby = captureOwner {
+            return (false, "warm dictation prepare active", [.notifyBlocked(reason: "Microphone BUSY: warm dictation prepare is active. Disarm it first.")])
+        }
+
         // If manual capture is already active, no-op (already app-owned)
         if case .manualTest = captureOwner {
             return (false, nil, [])
@@ -316,6 +350,146 @@ public final class WarmCaptureFlowCoordinator {
             return [.stopHardwareManual]
         }
         return []
+    }
+
+    // MARK: - J4-E2E Warm Standby Capture (explicit user prepare/disarm)
+
+    /// Arms the microphone and claims WARM STANDBY ownership. Hardware start
+    /// is deferred to the executor behind `.startHardwareWarmStandby` after
+    /// permission grants. No App Group response is written for standby (the
+    /// keyboard session owns response slots after adoption only).
+    public func prepareWarmStandbyCapture() -> [FlowEffect] {
+        guard !isCancellationGenerationFailClosed else {
+            return [.notifyBlocked(reason: "Capture generation counter overflowed; microphone permanently disabled (fail-closed).")]
+        }
+
+        // Busy guards: any other capture lifecycle blocks warm standby prep.
+        if isWaitingForHardwareStopToStartReplacement ||
+           pendingReplacementStartToken != nil ||
+           pendingStartToken != nil ||
+           activeSessionToken != nil {
+            return [.notifyBlocked(reason: "Microphone BUSY: a keyboard capture is starting or active. Try again after it completes.")]
+        }
+        if case .keyboard = captureOwner { return [.notifyBlocked(reason: "Microphone BUSY: keyboard capture is still finalizing.")] }
+        if case .manualTest = captureOwner { return [.notifyBlocked(reason: "Microphone BUSY: manual audio test active. Stop it first.")] }
+
+        advanceCancelGeneration()
+        guard !isCancellationGenerationFailClosed else {
+            return [.notifyBlocked(reason: "Capture generation overflow; microphone disabled (fail-closed).")]
+        }
+
+        isMicrophoneArmedByUser = true
+        captureOwner = .warmStandby
+        let warmToken = SessionToken(
+            appEpoch: appEpoch,
+            sessionId: "warm-standby-\(UUID().uuidString.prefix(8))",
+            intentSequence: 0,
+            requestId: "warm-standby",
+            sequence: 1,
+            cancelGeneration: monotonicCancelGeneration
+        )
+        warmStandbyToken = warmToken
+        return [
+            .notifyWarmStandbyActive(active: false),
+            .requestWarmPermission(token: warmToken)
+        ]
+    }
+
+    /// Permission completion for the WARM STANDBY token (NOT gate-fenced:
+    /// standby is a direct user action in the app, not a keyboard request).
+    public func handleWarmStandbyPermissionCallback(token: SessionToken, granted: Bool) -> [FlowEffect] {
+        guard !isCancellationGenerationFailClosed,
+              token.cancelGeneration == monotonicCancelGeneration,
+              captureOwner == .warmStandby,
+              warmStandbyToken == token else {
+            return []
+        }
+        if granted {
+            return [.startHardwareWarmStandby(token: token)]
+        }
+        captureOwner = .none
+        warmStandbyToken = nil
+        return [.notifyBlocked(reason: "Microphone permission denied (warm dictation prepare)")]
+    }
+
+    /// Hardware start completion for the WARM STANDBY token.
+    /// On success the warm recorder is genuinely running; on failure standby
+    /// ownership is released. Stale completion (disarmed meanwhile) triggers a
+    /// generation-bound conditional cleanup handled by the executor.
+    public func handleWarmStandbyHardwareStartCompletion(
+        token: SessionToken,
+        result: Result<UInt64, Error>
+    ) -> (effects: [FlowEffect], cleanup: HardwareStartCleanupDirective?) {
+        guard !isCancellationGenerationFailClosed,
+              token.cancelGeneration == monotonicCancelGeneration,
+              captureOwner == .warmStandby,
+              warmStandbyToken == token else {
+            if case .success(let nativeGeneration) = result {
+                return ([], HardwareStartCleanupDirective(nativeGeneration: nativeGeneration, token: token))
+            }
+            return ([], nil)
+        }
+
+        switch result {
+        case .success:
+            isWarmStandbyHardwareActive = true
+            return ([.notifyWarmStandbyActive(active: true)], nil)
+        case .failure(let err):
+            captureOwner = .none
+            warmStandbyToken = nil
+            isWarmStandbyHardwareActive = false
+            return (
+                [
+                    .notifyWarmStandbyActive(active: false),
+                    .notifyBlocked(reason: "Warm dictation capture failed: \(err.localizedDescription)")
+                ],
+                nil
+            )
+        }
+    }
+
+    /// ASR stream adoption completion (post-keyboard START). On success the
+    /// keyboard response slot turns `listening`; on failure the keyboard
+    /// session is collapsed into `blocked` while warm hardware stays live
+    /// (the warm recorder continues recording the pending session).
+    public func handleWarmAsrAdoptionCompleted(
+        token: SessionToken,
+        success: Bool,
+        errorCode: String?
+    ) -> [FlowEffect] {
+        guard activeSessionToken == token,
+              case .keyboard(sessionId: token.sessionId, _) = captureOwner else {
+            return []
+        }
+        if success {
+            return [
+                .writeResponse(
+                    sessionId: token.sessionId,
+                    requestId: token.requestId,
+                    sequence: token.sequence,
+                    state: .listening,
+                    recognizedText: nil,
+                    isFinal: false,
+                    errorCode: nil
+                ),
+                .notifyStartAdmitted(sessionId: token.sessionId, intentSequence: token.intentSequence)
+            ]
+        }
+        // Reality check: model missing / stream open failed. Given the warm
+        // recorder is already live, surface an honest blocked state and keep
+        // the warm capture running for an immediate retry.
+        return [
+            .writeResponse(
+                sessionId: token.sessionId,
+                requestId: token.requestId,
+                sequence: token.sequence,
+                state: .blocked,
+                recognizedText: nil,
+                isFinal: true,
+                errorCode: errorCode ?? "asr_adoption_failed"
+            ),
+            .notifyBlocked(reason: "ASR stream adoption failed: \(errorCode ?? "unknown")")
+        ]
     }
 
     // MARK: - Incoming Request Intake
@@ -430,11 +604,67 @@ public final class WarmCaptureFlowCoordinator {
                 cancelGeneration: monotonicCancelGeneration
             )
 
+            // J4-E2E WARM STANDBY ADOPTION:
+            // The app-owned warm recorder is ALREADY capturing (explicit user
+            // preparation in the foreground). The keyboard START must NOT
+            // stop/reopen the native mic and must NOT add a second tap. The
+            // existing hardware becomes the keyboard-owned dictation session:
+            // ASR stream adoption discards pre-START backlog at the ring
+            // boundary and then begins the fresh keyed stream session.
+            if case .warmStandby = captureOwner, isWarmStandbyHardwareActive {
+                pendingStartToken = nil
+                activeSessionToken = startToken
+                captureOwner = .keyboard(sessionId: request.sessionId, intentSequence: request.intentSequence)
+                warmStandbyToken = nil
+
+                effects.append(.writeResponse(
+                    sessionId: request.sessionId,
+                    requestId: request.requestId,
+                    sequence: request.sequence,
+                    state: .preparing,
+                    recognizedText: nil,
+                    isFinal: false,
+                    errorCode: nil
+                ))
+                effects.append(.adoptWarmStandbyAsr(token: startToken))
+                return effects
+            }
+
             // Check if this replaces a prior session
             if case .replacedPriorSession = admission {
                 let priorActive = activeSessionToken
                 activeSessionToken = nil
                 pendingStartToken = nil
+
+                // J4-E2E WARM CONTINUITY: when the app-owned warm recorder is
+                // still running, session replacement MUST adopt B from the
+                // same running hardware — never stop/restart the recorder
+                // (no replacement barrier) and never mint a stop for A
+                // against the shared recorder.
+                if isWarmStandbyHardwareActive {
+                    pendingReplacementStartToken = nil
+                    isWaitingForHardwareStopToStartReplacement = false
+                    pendingReplacementStopDirective = nil
+                    activeSessionToken = startToken
+                    captureOwner = .keyboard(sessionId: request.sessionId, intentSequence: request.intentSequence)
+                    warmStandbyToken = nil
+
+                    effects.append(.writeResponse(
+                        sessionId: request.sessionId,
+                        requestId: request.requestId,
+                        sequence: request.sequence,
+                        state: .preparing,
+                        recognizedText: nil,
+                        isFinal: false,
+                        errorCode: nil
+                    ))
+                    if let retiredToken = priorActive {
+                        effects.append(.notifyStopAdmitted(sessionId: retiredToken.sessionId, intentSequence: retiredToken.intentSequence))
+                    }
+                    effects.append(.adoptWarmStandbyAsr(token: startToken))
+                    return effects
+                }
+
                 pendingReplacementStartToken = startToken
                 isWaitingForHardwareStopToStartReplacement = true
 
@@ -724,14 +954,27 @@ public final class WarmCaptureFlowCoordinator {
         }
         pendingStopAcknowledgmentDirective = nil
 
+        // J4-E2E: hardware stopped via a keyboard stop transition ends any
+        // warm standby bookkeeping (session adopted from warm capture).
+        warmStandbyToken = nil
+        isWarmStandbyHardwareActive = false
+
+        // FINAL recognized text for an admitted keyboard STOP (Finish) is
+        // injected by WarmIPCService right before the completed response is
+        // published, ACKing the exact Stop requestId/sequence. NO mock
+        // strings are allowed here — the provider returns the REAL decoder
+        // result, an empty string for genuine no-speech, or nil after an
+        // ASR error.
+        let finalText = stopFinalTranscriptProvider?(directive.sessionId)
+
         effects.append(.writeResponse(
             sessionId: directive.sessionId,
             requestId: directive.requestId,
             sequence: directive.sequence,
             state: .completed,
-            recognizedText: nil,
+            recognizedText: finalText,
             isFinal: true,
-            errorCode: nil
+            errorCode: finalText == nil ? "asr_final_transcript_unavailable" : nil
         ))
         effects.append(.notifyStopAdmitted(sessionId: directive.sessionId, intentSequence: directive.intentSequence))
         return effects

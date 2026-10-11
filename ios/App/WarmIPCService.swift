@@ -7,6 +7,7 @@ public protocol WarmIPCServiceDelegate: AnyObject {
     func warmIPCService(_ service: WarmIPCService, didAdmitStopSession sessionId: String, intentSequence: UInt64)
     func warmIPCService(_ service: WarmIPCService, didRejectRequest description: String)
     func warmIPCService(_ service: WarmIPCService, didEncounterBlockedState reason: String)
+    func warmIPCService(_ service: WarmIPCService, didChangeWarmStandbyActive active: Bool)
 }
 
 /// App-process-owned warm IPC coordinator service.
@@ -51,11 +52,30 @@ public final class WarmIPCService {
         self.sharedDefaults = UserDefaults(suiteName: AppDelegate.appGroupId)
         initializeGate()
         setupDarwinObserver()
+        setupStopTranscriptProvider()
     }
 
     deinit {
         teardownDarwinObserver()
         stopPolling()
+    }
+
+    // MARK: - Stop Final Transcript (J4-E2E)
+    //
+    // The producer of the stop-transcript provider lives on the SAME single
+    // writer queue (`ipcQueue`): Stop ASR finalize happens EXACTLY once per
+    // admitted keyboard STOP before the hardware stop completion is allowed
+    // to publish the completed response snapshot.
+    private let pendingFinalTranscriptsLock = NSLock()
+    private var pendingFinalTranscripts: [String: String] = [:]
+
+    private func setupStopTranscriptProvider() {
+        self.flowCoordinator.stopFinalTranscriptProvider = { [weak self] sessionId in
+            guard let self = self else { return nil }
+            self.pendingFinalTranscriptsLock.lock()
+            defer { self.pendingFinalTranscriptsLock.unlock() }
+            return self.pendingFinalTranscripts.removeValue(forKey: sessionId)
+        }
     }
 
     public func initializeGate() {
@@ -113,6 +133,26 @@ public final class WarmIPCService {
             guard let self = self else { return }
             let effects = self.flowCoordinator.setUserArmMicrophone(armed)
             self.executeFlowEffects(effects, triggeringRequestId: nil, triggeringSessionId: nil, triggeringSequence: nil)
+        }
+    }
+
+    /// J4-E2E: explicit user-initiated warm dictation prepare. Requires the
+    /// app foreground; loads the offline model, then claims warm standby
+    /// ownership (mic permission + one running recorder + bounded discard
+    /// handoff for the keyboard START adoption).
+    public func prepareWarmDictation() {
+        EcholetAsrService.shared.loadModelIfNeeded { [weak self] _, errorCode in
+            guard let self = self else { return }
+            self.ipcQueue.async {
+                let effects = self.flowCoordinator.prepareWarmStandbyCapture()
+                // If the model is still missing, honest startup failure is
+                // surfaced by the ASR adoption path (fail closed); here the
+                // permission/gate machinery drives the warm standby flow.
+                self.executeFlowEffects(effects, triggeringRequestId: nil, triggeringSessionId: nil, triggeringSequence: nil)
+                if let errorCode = errorCode, self.flowCoordinator.captureOwner != .warmStandby {
+                    self.notifyBlocked("ASR model unavailable: \(errorCode)")
+                }
+            }
         }
     }
 
@@ -211,7 +251,7 @@ public final class WarmIPCService {
                 break
 
             case .writeResponse(let sessionId, let requestId, let sequence, let state, let text, let isFinal, let errorCode):
-                self.writeResponseSnapshotOnQueue(
+                let _ = self.writeResponseSnapshotOnQueue(
                     sessionId: sessionId,
                     acknowledgedRequestId: requestId,
                     acknowledgedSequence: sequence,
@@ -262,18 +302,33 @@ public final class WarmIPCService {
                 }
 
             case .stopHardwareKeyboard(let directive):
-                // Hardware stop completion callback reenters ipcQueue carrying the
-                // exact stop directive identity for ACK correlation.
-                AudioCaptureController.shared.stopCapture { [weak self] in
-                    guard let self = self else { return }
-                    self.ipcQueue.async {
-                        let stopEffects = self.flowCoordinator.handleHardwareStopCompletion(directive: directive)
-                        self.executeFlowEffects(
-                            stopEffects,
-                            triggeringRequestId: directive.requestId,
-                            triggeringSessionId: directive.sessionId,
-                            triggeringSequence: directive.sequence
-                        )
+                // J4-E2E: FINAL real ASR transcript must be collected BEFORE
+                // the completed response snapshot. Admitted keyboard STOP
+                // (reason "keyboard_stop") finalizes the ASR session
+                // (drain ring → trailing-silence flush → final decode →
+                // destroy stream) FIRST, stores the real result, and only
+                // then stops the hardware and ACKs completion. Cancel /
+                // disarm / replacement stops dispose the ASR session
+                // truthfully without fabricating transcript text. A stale
+                // or unrelated stop can never collide with a newer session.
+                if directive.reason == "keyboard_stop" {
+                    self.collectFinalTranscriptThenStopHardware(directive: directive)
+                } else {
+                    EcholetAsrService.shared.disposeSession(
+                        sessionId: directive.sessionId,
+                        reason: "stop_effect_reason_\(directive.reason)"
+                    )
+                    AudioCaptureController.shared.stopCapture { [weak self] in
+                        guard let self = self else { return }
+                        self.ipcQueue.async {
+                            let stopEffects = self.flowCoordinator.handleHardwareStopCompletion(directive: directive)
+                            self.executeFlowEffects(
+                                stopEffects,
+                                triggeringRequestId: directive.requestId,
+                                triggeringSessionId: directive.sessionId,
+                                triggeringSequence: directive.sequence
+                            )
+                        }
                     }
                 }
 
@@ -291,6 +346,107 @@ public final class WarmIPCService {
 
             case .notifyRejected(let reason):
                 self.notifyRejected(reason)
+
+            // J4-E2E warm standby effects
+            case .requestWarmPermission(let token):
+                AudioCaptureController.shared.requestMicrophonePermission { [weak self] granted in
+                    guard let self = self else { return }
+                    self.ipcQueue.async {
+                        let permEffects = self.flowCoordinator.handleWarmStandbyPermissionCallback(token: token, granted: granted)
+                        self.executeFlowEffects(
+                            permEffects,
+                            triggeringRequestId: nil,
+                            triggeringSessionId: nil,
+                            triggeringSequence: nil
+                        )
+                    }
+                }
+
+            case .startHardwareWarmStandby(let token):
+                AudioCaptureController.shared.startCapture(includePCM: true) { [weak self] result in
+                    guard let self = self else { return }
+                    self.ipcQueue.async {
+                        let (warmEffects, warmCleanup) = self.flowCoordinator.handleWarmStandbyHardwareStartCompletion(
+                            token: token,
+                            result: result.mapError { $0 as Error }
+                        )
+                        if let cleanup = warmCleanup {
+                            AudioCaptureController.shared.stopCaptureIfGeneration(
+                                expectedGeneration: cleanup.nativeGeneration
+                            )
+                        }
+                        self.executeFlowEffects(
+                            warmEffects,
+                            triggeringRequestId: nil,
+                            triggeringSessionId: nil,
+                            triggeringSequence: nil
+                        )
+                    }
+                }
+
+            case .adoptWarmStandbyAsr(let token):
+                // Bind the keyboard session to an EXACT ASR session token on
+                // the single ASR worker; stale/mismatched capture generations
+                // fail closed inside the service. Adoption discards the
+                // pre-START ring backlog at the ring boundary.
+                EcholetAsrService.shared.beginSession(
+                    sessionId: token.sessionId,
+                    kind: .warmKeyboard,
+                    expectedGeneration: AudioCaptureController.shared.activeGeneration
+                ) { [weak self] succeed, errorCode in
+                    guard let self = self else { return }
+                    self.ipcQueue.async {
+                        let adoptEffects = self.flowCoordinator.handleWarmAsrAdoptionCompleted(
+                            token: token,
+                            success: succeed,
+                            errorCode: errorCode
+                        )
+                        self.executeFlowEffects(
+                            adoptEffects,
+                            triggeringRequestId: token.requestId,
+                            triggeringSessionId: token.sessionId,
+                            triggeringSequence: token.sequence
+                        )
+                    }
+                }
+
+            case .notifyWarmStandbyActive(let active):
+                DispatchQueue.main.async { [weak self] in
+                    guard let self = self else { return }
+                    self.delegate?.warmIPCService(self, didChangeWarmStandbyActive: active)
+                }
+            }
+        }
+    }
+
+    // MARK: - Final Transcript Collection Then Hardware Stop (ipcQueue owned)
+    //
+    // Collects the REAL final recognizer text for an admitted keyboard STOP,
+    // stopping the native capture exactly once in the process: the ASR final
+    // text drain happens first (worker queue), then the Stop is issued and a
+    // hardware completion ACKs the exact directive identity through the
+    // coordinator.
+    private func collectFinalTranscriptThenStopHardware(directive: WarmCaptureFlowCoordinator.HardwareStopDirective) {
+        EcholetAsrService.shared.finalizeSession(sessionId: directive.sessionId) { [weak self] finalText in
+            guard let self = self else { return }
+            self.ipcQueue.async { [weak self] in
+                guard let self = self else { return }
+                // De-duped store: only ONE response slot per stop directive.
+                self.pendingFinalTranscriptsLock.lock()
+                self.pendingFinalTranscripts[directive.sessionId] = finalText
+                self.pendingFinalTranscriptsLock.unlock()
+                AudioCaptureController.shared.stopCapture { [weak self] in
+                    guard let self = self else { return }
+                    self.ipcQueue.async {
+                        let stopEffects = self.flowCoordinator.handleHardwareStopCompletion(directive: directive)
+                        self.executeFlowEffects(
+                            stopEffects,
+                            triggeringRequestId: directive.requestId,
+                            triggeringSessionId: directive.sessionId,
+                            triggeringSequence: directive.sequence
+                        )
+                    }
+                }
             }
         }
     }

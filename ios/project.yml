@@ -2,38 +2,60 @@ name: Echolet
 options:
   bundleIdPrefix: com.mainstayx.echolet
   deploymentTarget:
-    iOS: "15.0"
+    iOS: "15.1"
   xcodeVersion: "16.2"
 
 settings:
   SWIFT_VERSION: "5.10"
-  IPHONEOS_DEPLOYMENT_TARGET: "15.0"
+  IPHONEOS_DEPLOYMENT_TARGET: "15.1"
   TARGETED_DEVICE_FAMILY: "1,2" # 1 = iPhone, 2 = iPad
+  # Frozen local J4A signing identity (same Personal Team as ios/probe/project.yml)
+  DEVELOPMENT_TEAM: 668LTD8W55
+  CODE_SIGN_STYLE: Automatic
 
 targets:
   EcholetApp:
     type: application
     platform: iOS
-    deploymentTarget: "15.0"
+    deploymentTarget: "15.1"
     sources:
       - path: App
       - path: protocol/EcholetIPC.swift
       - path: protocol/EcholetAdmission.swift
       - path: protocol/CaptureLifecycleGate.swift
       - path: protocol/WarmCaptureFlow.swift
+      # J4-E2E: frozen local zh-en model folder bundled as a non-repo folder
+      # resource (git-ignored). Never committed; only the exact frozen
+      # bilingual-zh-en dir recognized by its model.json id marker.
+      - path: ../.local-runtime/models/bilingual-zh-en
+        type: folder
+        buildPhase: resources
     settings:
       PRODUCT_BUNDLE_IDENTIFIER: com.mainstayx.echolet.app
       INFOPLIST_FILE: App/Info.plist
+      GENERATE_INFOPLIST_FILE: NO
       CODE_SIGN_ENTITLEMENTS: App/EcholetApp.entitlements
       TARGETED_DEVICE_FAMILY: "1,2"
       SWIFT_VERSION: "5.10"
+      # J4-E2E: link the pinned static sherpa-onnx / onnxruntime arm64 device
+      # archives and the Rust echolet_ios C-ABI bridge into the containing
+      # app ONLY. NEVER linked into the Keyboard extension.
+      ECHOLET_IOS_SHERPA_LIB_DIR: "$(SRCROOT)/../.local-runtime/ios-native/lib"
+      ECHOLET_IOS_BRIDGE_LIB_DIR: "$(SRCROOT)/ios-native/target/aarch64-apple-ios/release"
+      OTHER_LDFLAGS:
+        - "-lecholet_ios"
+        - "-lonnxruntime"
+        - "-lc++"
+      LIBRARY_SEARCH_PATHS:
+        - "$(ECHOLET_IOS_SHERPA_LIB_DIR)"
+        - "$(ECHOLET_IOS_BRIDGE_LIB_DIR)"
     dependencies:
       - target: EcholetKeyboard
 
   EcholetKeyboard:
     type: app-extension
     platform: iOS
-    deploymentTarget: "15.0"
+    deploymentTarget: "15.1"
     sources:
       - path: Keyboard
       - path: protocol/EcholetIPC.swift
@@ -41,6 +63,7 @@ targets:
     settings:
       PRODUCT_BUNDLE_IDENTIFIER: com.mainstayx.echolet.app.keyboard
       INFOPLIST_FILE: Keyboard/Info.plist
+      GENERATE_INFOPLIST_FILE: NO
       CODE_SIGN_ENTITLEMENTS: Keyboard/EcholetKeyboard.entitlements
       TARGETED_DEVICE_FAMILY: "1,2"
       SWIFT_VERSION: "5.10"
