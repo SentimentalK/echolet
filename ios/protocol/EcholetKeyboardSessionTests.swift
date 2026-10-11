@@ -29,12 +29,12 @@ enum EcholetKeyboardSessionTests {
             openCallsRaw
         }
         var openCallsRaw: [(url: URL, auto: Bool)] = []
-        var openResultOverride: EcholetKeyboardSessionController.OpenAttemptResult?
+        var nextOpenResult: EcholetKeyboardSessionController.OpenAttemptResult = .initiated
         var insertedTexts: [String] = []
+        var deleteBackwardCounts: [Int] = []
         var fingerprints: [(before: String?, after: String?, selected: String?)] = [(nil, nil, nil)]
         var logs: [String] = []
         let defaults: UserDefaults
-        var nextOpenResult: EcholetKeyboardSessionController.OpenAttemptResult = .initiated
 
         init(appGroup: String = "test.echolet.session.\(UUID().uuidString)") {
             defaults = UserDefaults(suiteName: appGroup)!
@@ -64,6 +64,10 @@ enum EcholetKeyboardSessionTests {
                     guard let self = self, !text.isEmpty else { return false }
                     self.insertedTexts.append(text)
                     return true
+                },
+                deleteBackward: { [weak self] count in
+                    guard let self = self else { return }
+                    self.deleteBackwardCounts.append(count)
                 },
                 docFingerprint: { [weak self] in self?.fingerprint ?? (nil, nil, nil) },
                 log: { [weak self] event in self?.logs.append(event) }
@@ -151,6 +155,9 @@ enum EcholetKeyboardSessionTests {
         testPermissionFailureBlockedResponse()
         testOpenTimeoutUnsupported()
         testStartAckTimeout()
+        testLivePartialStreaming()
+        testFinalReconcilesStreamedPartial()
+        testNoSpeechFinalRemovesPartial()
 
         if failures.isEmpty {
             print("EcholetKeyboardSessionTests: ALL PASS")
@@ -543,6 +550,110 @@ enum EcholetKeyboardSessionTests {
         } else {
             recordFailure("testPermissionFailureBlockedResponse(2)", "expected blocked phase, got \(c.phase)")
         }
+    }
+
+    static func testLivePartialStreaming() {
+        let h = FakeHarness()
+        h.writeWarmLive(epoch: h.appEpoch, active: true, tsMs: h.now)
+        let c = h.controller()
+        c.handleAppeared()
+        guard let req = h.lastRequest() else {
+            recordFailure("testLivePartialStreaming", "no start request")
+            return
+        }
+        h.writeResponse(sessionId: req.sessionId, ackReq: req.requestId, ackSeq: req.sequence, rev: 1, state: .listening)
+        c.handleTimerTick()
+        expectTrue(c.phase == .listening, "testLivePartialStreaming(1)")
+
+        // Cumulative partials stream in real time, rewriting only tails.
+        h.writeResponse(sessionId: req.sessionId, ackReq: req.requestId, ackSeq: req.sequence, rev: 2, state: .processing, text: "你")
+        c.handleTimerTick()
+        expectEqual(h.insertedTexts, ["你"], "testLivePartialStreaming(2)")
+        expectEqual(h.deleteBackwardCounts, [] as [Int], "testLivePartialStreaming(3)")
+
+        h.writeResponse(sessionId: req.sessionId, ackReq: req.requestId, ackSeq: req.sequence, rev: 3, state: .processing, text: "你好")
+        c.handleTimerTick()
+        expectEqual(h.insertedTexts, ["你", "好"], "testLivePartialStreaming(4)")
+
+        h.writeResponse(sessionId: req.sessionId, ackReq: req.requestId, ackSeq: req.sequence, rev: 4, state: .processing, text: "你好世")
+        c.handleTimerTick()
+        expectEqual(h.deleteBackwardCounts, [] as [Int], "testLivePartialStreaming(5)")
+
+        // ASR may diverge: "你好啊" replaces "你好世" (1 deletion + 1 insertion).
+        h.writeResponse(sessionId: req.sessionId, ackReq: req.requestId, ackSeq: req.sequence, rev: 5, state: .processing, text: "你好啊")
+        c.handleTimerTick()
+        expectEqual(h.deleteBackwardCounts.last, 1, "testLivePartialStreaming(6)")
+        expectEqual(h.insertedTexts.last, "啊", "testLivePartialStreaming(7)")
+
+        // Partial state stays listening (red Stop remains).
+        expectTrue(c.phase == .listening, "testLivePartialStreaming(8)")
+
+        // No speech final with only partial: partial removed.
+        h.writeResponse(sessionId: req.sessionId, ackReq: req.requestId, ackSeq: req.sequence, rev: 6, state: .completed, text: "", isFinal: true)
+        c.handleTimerTick()
+        expectEqual(h.deleteBackwardCounts.last, 3, "testLivePartialStreaming(9)")
+        expectTrue(c.phase == .ready, "testLivePartialStreaming(10)")
+    }
+
+    static func testFinalReconcilesStreamedPartial() {
+        let h = FakeHarness()
+        h.writeWarmLive(epoch: h.appEpoch, active: true, tsMs: h.now)
+        let c = h.controller()
+        c.handleAppeared()
+        guard let req = h.lastRequest() else {
+            recordFailure("testFinalReconcilesStreamedPartial", "no start request")
+            return
+        }
+        h.writeResponse(sessionId: req.sessionId, ackReq: req.requestId, ackSeq: req.sequence, rev: 1, state: .listening)
+        c.handleTimerTick()
+        h.writeResponse(sessionId: req.sessionId, ackReq: req.requestId, ackSeq: req.sequence, rev: 2, state: .processing, text: "hello wor")
+        c.handleTimerTick()
+        c.handleStopTap()
+        guard let stopReq = h.lastRequest() else {
+            recordFailure("testFinalReconcilesStreamedPartial(2)", "no stop request")
+            return
+        }
+        // Final extends the streamed partial: only the tail "ld!" is added.
+        h.writeResponse(sessionId: stopReq.sessionId, ackReq: stopReq.requestId, ackSeq: stopReq.sequence, rev: 3, state: .completed, text: "hello world!", isFinal: true)
+        c.handleTimerTick()
+        expectEqual(h.insertedTexts, ["hello wor", "ld!"], "testFinalReconcilesStreamedPartial(3)")
+        expectEqual(h.deleteBackwardCounts, [] as [Int], "testFinalReconcilesStreamedPartial(4)")
+        expectTrue(c.phase == .ready, "testFinalReconcilesStreamedPartial(5)")
+        // Replay cannot duplicate.
+        c.consumePendingResponse()
+        expectEqual(h.insertedTexts.count, 2, "testFinalReconcilesStreamedPartial(6)")
+        // Full streamed-and-identical final: nothing appended.
+        let h2 = FakeHarness()
+        h2.writeWarmLive(epoch: h2.appEpoch, active: true, tsMs: h2.now)
+        let c2 = h2.controller()
+        c2.handleAppeared()
+        let req2 = h2.lastRequest()!
+        h2.writeResponse(sessionId: req2.sessionId, ackReq: req2.requestId, ackSeq: req2.sequence, rev: 1, state: .listening)
+        c2.handleTimerTick()
+        h2.writeResponse(sessionId: req2.sessionId, ackReq: req2.requestId, ackSeq: req2.sequence, rev: 2, state: .processing, text: "你好世界")
+        c2.handleTimerTick()
+        c2.handleStopTap()
+        let stopReq2 = h2.lastRequest()!
+        h2.writeResponse(sessionId: stopReq2.sessionId, ackReq: stopReq2.requestId, ackSeq: stopReq2.sequence, rev: 3, state: .completed, text: "你好世界", isFinal: true)
+        c2.handleTimerTick()
+        expectEqual(h2.insertedTexts, ["你好世界"], "testFinalReconcilesStreamedPartial(7)")
+        expectEqual(h2.deleteBackwardCounts, [] as [Int], "testFinalReconcilesStreamedPartial(8)")
+    }
+
+    static func testNoSpeechFinalRemovesPartial() {
+        let h = FakeHarness()
+        h.writeWarmLive(epoch: h.appEpoch, active: true, tsMs: h.now)
+        let c = h.controller()
+        c.handleAppeared()
+        let req = h.lastRequest()!
+        h.writeResponse(sessionId: req.sessionId, ackReq: req.requestId, ackSeq: req.sequence, rev: 1, state: .listening)
+        c.handleTimerTick()
+        h.writeResponse(sessionId: req.sessionId, ackReq: req.requestId, ackSeq: req.sequence, rev: 2, state: .processing, text: "abc")
+        c.handleTimerTick()
+        h.writeResponse(sessionId: req.sessionId, ackReq: req.requestId, ackSeq: req.sequence, rev: 3, state: .completed, text: "", isFinal: true)
+        c.handleTimerTick()
+        expectEqual(h.deleteBackwardCounts.last, 3, "testNoSpeechFinalRemovesPartial(1)")
+        expectTrue(c.phase == .ready, "testNoSpeechFinalRemovesPartial(2)")
     }
 
     static func testOpenTimeoutUnsupported() {

@@ -67,6 +67,12 @@ class KeyboardViewController: UIInputViewController {
                 self.textDocumentProxy.insertText(text)
                 return true
             },
+            deleteBackward: { [weak self] count in
+                guard let self = self, count > 0 else { return }
+                for _ in 0..<count {
+                    self.textDocumentProxy.deleteBackward()
+                }
+            },
             docFingerprint: { [weak self] in
                 (
                     before: self?.textDocumentProxy.documentContextBeforeInput,
@@ -236,6 +242,11 @@ class KeyboardViewController: UIInputViewController {
     // MARK: - Actions
 
     @objc private func didTapPrimary() {
+        if let controller = controller {
+            print("[Echolet-KBD-UI] PRIMARY_TAP(phase=\(controller.phase))")
+        } else {
+            print("[Echolet-KBD-UI] PRIMARY_TAP(no_controller)")
+        }
         controller?.handlePrimaryButtonTap()
         renderDisplay()
     }

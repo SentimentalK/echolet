@@ -60,6 +60,9 @@ public final class EcholetKeyboardSessionController {
         /// attempt was synchronously rejected.
         public let openHost: (URL) -> OpenAttemptResult
         public let insertText: (String) -> Bool
+        /// J5 live partials: deletes N trailing characters (usually our own
+        /// previous partial), one grapheme per call, before re-insertion.
+        public let deleteBackward: (Int) -> Void
         /// Editor identity probe; nil == nil compares as "same (unknown)".
         /// The controller records it at session start and at the real
         /// `.listening` ACK, and fails closed at insert time on mismatch.
@@ -72,6 +75,7 @@ public final class EcholetKeyboardSessionController {
             currentAppEpoch: @escaping () -> String?,
             openHost: @escaping (URL) -> OpenAttemptResult,
             insertText: @escaping (String) -> Bool,
+            deleteBackward: @escaping (Int) -> Void,
             docFingerprint: @escaping () -> (before: String?, after: String?, selected: String?),
             log: ((String) -> Void)? = nil
         ) {
@@ -80,6 +84,7 @@ public final class EcholetKeyboardSessionController {
             self.currentAppEpoch = currentAppEpoch
             self.openHost = openHost
             self.insertText = insertText
+            self.deleteBackward = deleteBackward
             self.docFingerprint = docFingerprint
             self.log = log
         }
@@ -606,6 +611,13 @@ public final class EcholetKeyboardSessionController {
             setPhase(.listening)
             return false
         }
+
+        // J5 live partial: bounded cumulative recognized text streamed in
+        // real time (.processing, non-final, ACK of the exact START identity).
+        if response.state == .processing, let partial = response.recognizedText, !partial.isEmpty {
+            applyLivePartial(partial)
+            return false
+        }
         if !response.isFinal {
             // Non-final intermediate revision: watermark recorded only.
             return false
@@ -622,12 +634,16 @@ public final class EcholetKeyboardSessionController {
         if response.state == .completed {
             let finalText = response.recognizedText ?? ""
             if finalText.isEmpty {
+                // Truthful empty/no-speech: remove any streamed partial so
+                // nothing fabricated is left in the host editor.
+                removeStreamedPartial()
                 activeSession = nil
                 setPhase(.ready)
                 log("STOP_ACK(empty_no_speech)")
                 return false
             }
             if activeSession?.finalTextInserted == true {
+                lastLivePartial = nil
                 activeSession = nil
                 setPhase(.ready)
                 log("STOP_ACK(duplicate_suppressed)")
@@ -643,21 +659,89 @@ public final class EcholetKeyboardSessionController {
                     return false
                 }
             }
-            let inserted = env.insertText(finalText)
+            let inserted = reconcileOrInsertFinal(finalText)
             if inserted {
                 activeSession?.finalTextInserted = true
                 lastInsertedText = finalText
                 insertCount += 1
-                log("INSERT_FINAL_ONCE(chars=\(finalText.count))")
+                log("INSERT_FINAL_ONCE(chars=\(finalText.count),streamed=\(lastLivePartial != nil))")
             } else {
                 log("INSERT_SUPPRESSED(proxy_refused)")
             }
+            lastLivePartial = nil
             activeSession = nil
             setPhase(.ready)
             return inserted
         }
 
         return false
+    }
+
+    // MARK: - J5 real-time streaming helper
+
+    private var lastLivePartial: String?
+
+    /// Streams a cumulative ASR partial into the host editor: computes the
+    /// common prefix with the previously streamed text, deletes the diverged
+    /// tail, and inserts only the new remainder. Own churn keeps the recorded
+    /// editor identity up to date so the final-insert gate does not false-trip.
+    private func applyLivePartial(_ partial: String) {
+        if let previouslyInserted = lastLivePartial {
+            let common = commonPrefixCount(previouslyInserted, partial)
+            let deleteCount = previouslyInserted.count - common
+            if deleteCount > 0 {
+                env.deleteBackward(deleteCount)
+            }
+            let remainder = String(partial.dropFirst(common))
+            if !remainder.isEmpty {
+                _ = env.insertText(remainder)
+            }
+        } else {
+            _ = env.insertText(partial)
+        }
+        lastLivePartial = partial
+        activeSession?.documentFingerprint = DocumentFingerprint(probe: env.docFingerprint)
+        log("LIVE_PARTIAL(chars=\(partial.count))")
+    }
+
+    /// Final reconciliation: if the final transcript extends/equals the last
+    /// streamed partial, only divergent tails are rewritten; otherwise the
+    /// full final text is inserted once. Returns whether a write happened.
+    private func reconcileOrInsertFinal(_ finalText: String) -> Bool {
+        if let previouslyInserted = lastLivePartial {
+            lastLivePartial = nil
+            let common = commonPrefixCount(previouslyInserted, finalText)
+            let deleteCount = previouslyInserted.count - common
+            if deleteCount > 0 {
+                env.deleteBackward(deleteCount)
+            }
+            let remainder = String(finalText.dropFirst(common))
+            if !remainder.isEmpty {
+                return env.insertText(remainder)
+            }
+            return true
+        }
+        return env.insertText(finalText)
+    }
+
+    /// Removes any leftover streamed partial (no-speech final) without
+    /// touching unrelated user text.
+    private func removeStreamedPartial() {
+        guard let previouslyInserted = lastLivePartial, previouslyInserted.count > 0 else { return }
+        env.deleteBackward(previouslyInserted.count)
+        lastLivePartial = nil
+    }
+
+    private func commonPrefixCount(_ a: String, _ b: String) -> Int {
+        var i = a.startIndex
+        var j = b.startIndex
+        var count = 0
+        while i < a.endIndex && j < b.endIndex && a[i] == b[j] {
+            i = a.index(after: i)
+            j = b.index(after: j)
+            count += 1
+        }
+        return count
     }
 
     // MARK: - Request writer + Darwin hint

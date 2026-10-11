@@ -58,6 +58,13 @@ final class EcholetAsrService {
 
     weak var delegate: Delegate?
 
+    /// J5 live-partial forwarding hook (main thread). WarmIPCService uses
+    /// this as an ADDITIONAL channel (the UIKit delegate slot is owned by the
+    /// status view controller) to persist bounded cumulative partial
+    /// transcripts into the App Group response slot while a keyboard session
+    /// is actively listening. Never persists audio; only short text.
+    public var partialTextObserver: ((_ sessionId: String, _ partial: String) -> Void)?
+
     /// Serial worker that owns ALL recognizer/stream state and FFI access.
     let asrQueue = DispatchQueue(label: "com.echolet.asr.worker", qos: .userInitiated)
 
@@ -431,6 +438,7 @@ final class EcholetAsrService {
                         DispatchQueue.main.async { [weak self] in
                             guard let self = self else { return }
                             self.delegate?.asrService(self, didUpdatePartialText: text, sessionId: pipeline.sessionId)
+                            self.partialTextObserver?(pipeline.sessionId, text)
                         }
                     }
                 }

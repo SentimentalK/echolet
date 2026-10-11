@@ -55,6 +55,7 @@ public final class WarmIPCService {
         initializeGate()
         setupDarwinObserver()
         setupStopTranscriptProvider()
+        setupLivePartialForwarding()
     }
 
     deinit {
@@ -77,6 +78,47 @@ public final class WarmIPCService {
             self.pendingFinalTranscriptsLock.lock()
             defer { self.pendingFinalTranscriptsLock.unlock() }
             return self.pendingFinalTranscripts.removeValue(forKey: sessionId)
+        }
+    }
+
+    // MARK: - J5 Live Partial Streaming (keyboard-visible real-time text)
+    //
+    // While an ADOPTED keyboard session is genuinely listening, bounded
+    // cumulative ASR partials are forwarded into the App Group response slot
+    // (state .processing, isFinal false, ACK of the START identity, strictly
+    // monotonic revision) so the keyboard can stream the text into the host
+    // editor live instead of waiting for the final transcript.
+    // Rate-limited to ~2.5 Hz with latest-partial flush; snapshot writes run
+    // exclusively on `ipcQueue`.
+    private var pendingPartialBySession: [String: String] = [:]
+    private var partialFlushScheduled: Set<String> = []
+
+    private func setupLivePartialForwarding() {
+        EcholetAsrService.shared.partialTextObserver = { [weak self] sessionId, partial in
+            guard let self = self else { return }
+            self.ipcQueue.async {
+                guard self.flowCoordinator.activeSessionToken?.sessionId == sessionId else { return }
+                self.pendingPartialBySession[sessionId] = partial // latest wins
+                guard !self.partialFlushScheduled.contains(sessionId) else { return }
+                self.partialFlushScheduled.insert(sessionId)
+                self.ipcQueue.asyncAfter(deadline: .now() + 0.4) { [weak self] in
+                    guard let self = self else { return }
+                    self.partialFlushScheduled.remove(sessionId)
+                    guard let token = self.flowCoordinator.activeSessionToken,
+                          token.sessionId == sessionId,
+                          let text = self.pendingPartialBySession.removeValue(forKey: sessionId),
+                          let defaults = self.sharedDefaults else { return }
+                    let _ = self.writeResponseSnapshotOnQueue(
+                        sessionId: sessionId,
+                        acknowledgedRequestId: token.requestId,
+                        acknowledgedSequence: token.sequence,
+                        state: .processing,
+                        recognizedText: text,
+                        isFinal: false,
+                        errorCode: nil
+                    )
+                }
+            }
         }
     }
 
