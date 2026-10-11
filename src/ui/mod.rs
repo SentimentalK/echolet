@@ -8,7 +8,7 @@
 //! They render immutable projected [`ControlSurfaceState`] and emit explicit [`SurfaceAction`].
 
 pub mod control_surface;
-#[cfg(not(target_os = "android"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 pub mod desktop;
 
 pub use control_surface::{
@@ -17,5 +17,5 @@ pub use control_surface::{
     ModelGroupPresentation, ModelLanguagePresentation, ModelPresentation, ModelPrimaryAction,
     RuntimeState, SurfaceAction,
 };
-#[cfg(not(target_os = "android"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 pub use control_surface::dispatch_surface_action;

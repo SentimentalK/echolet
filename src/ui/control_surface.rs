@@ -25,13 +25,13 @@
 //!   product behavior. They render immutable projected [`ControlSurfaceState`]
 //!   and emit explicit [`SurfaceAction`] variants.
 
-#[cfg(not(target_os = "android"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 use crate::actions::AppAction;
 use crate::config::EcholetConfig;
 use crate::models::DownloadStatus;
 use crate::models::language::language_code_label;
 use crate::models::registry::{LanguageTier, ModelRegistry, RegistryModelEntry};
-#[cfg(not(target_os = "android"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 use crossbeam_channel::Sender;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -116,7 +116,7 @@ pub enum SurfaceAction {
     Quit,
 }
 
-#[cfg(not(target_os = "android"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 impl From<SurfaceAction> for AppAction {
     fn from(action: SurfaceAction) -> Self {
         match action {
@@ -142,7 +142,7 @@ impl From<SurfaceAction> for AppAction {
 
 /// Dispatches a platform-neutral [`SurfaceAction`] to the application event channel
 /// through the canonical mapping boundary.
-#[cfg(not(target_os = "android"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 pub fn dispatch_surface_action(tx: &Sender<AppAction>, action: SurfaceAction) {
     let _ = tx.send(action.into());
 }

@@ -29,9 +29,10 @@ zstd = "0.13"
 
 # Desktop-only dependencies: cpal/Slint UI, model download tooling and the
 # remaining desktop app plumbing. They must not be compiled into the Android
-# library build. On every non-Android target this table resolves exactly like
-# the previous unconditional [dependencies], so desktop behavior is unchanged.
-[target.'cfg(not(target_os = "android"))'.dependencies]
+# library build or the iOS device build. On the three desktop triplets this
+# table resolves exactly like the previous unconditional [dependencies], so
+# desktop behavior is unchanged.
+[target.'cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))'.dependencies]
 cpal = "0.15"
 clap = { version = "4.5", features = ["derive"] }
 ctrlc = "3.4"

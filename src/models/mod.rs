@@ -5,16 +5,16 @@ pub mod progress;
 pub mod registry;
 
 // Desktop-only model acquisition and installation management.
-#[cfg(not(target_os = "android"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 pub mod download;
-#[cfg(not(target_os = "android"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 pub mod manager;
 
 pub use crate::config::EcholetConfig;
 pub use installer::{install_model_from_archive, sha256_file};
-#[cfg(not(target_os = "android"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 pub use download::{download_and_install_model, download_and_install_model_with_progress};
-#[cfg(not(target_os = "android"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 pub use manager::{InstalledModel, ModelManager};
 pub use manifest::ModelManifest;
 pub use progress::{ArchiveFormat, DownloadStatus, InstallPhase, ProgressThrottle};

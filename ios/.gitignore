@@ -4,3 +4,5 @@
 .DS_Store
 DerivedData/
 build/
+# iOS Rust native bridge build artifacts (reproducible via cargo)
+ios-native/target/

@@ -10,23 +10,23 @@ pub mod paths;
 pub mod session;
 
 // Desktop-only application/UI/platform layers. These pull in cpal, Slint &&
-// OS-specific integrations, none of which may enter the Android build.
-#[cfg(not(target_os = "android"))]
+// OS-specific integrations, none of which may enter the Android or iOS builds.
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 pub mod actions;
-#[cfg(not(target_os = "android"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 pub mod app;
-#[cfg(not(target_os = "android"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 pub mod audio;
-#[cfg(not(target_os = "android"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 pub mod beep;
-#[cfg(not(target_os = "android"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 pub mod diagnostics;
-#[cfg(not(target_os = "android"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 pub mod history;
-#[cfg(not(target_os = "android"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 pub mod log;
-#[cfg(not(target_os = "android"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 pub mod platform;
-#[cfg(not(target_os = "android"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 pub mod state;
 pub mod ui;

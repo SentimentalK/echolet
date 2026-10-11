@@ -1,0 +1,41 @@
+name: EcholetNativeProbe
+options:
+  bundleIdPrefix: com.mainstayx.echolet
+  deploymentTarget:
+    iOS: "15.0"
+  xcodeVersion: "16.2"
+
+settings:
+  SWIFT_VERSION: "5.10"
+  IPHONEOS_DEPLOYMENT_TARGET: "15.0"
+  TARGETED_DEVICE_FAMILY: "1,2"
+  # Native probe opt-in artifacts (git-ignored local cache):
+  #   ECHOLET_IOS_SHERPA_LIB_DIR  default: repo/.local-runtime/ios-native/lib
+  #   ECHOLET_IOS_BRIDGE_LIB_DIR  default: repo/ios/ios-native/<mode> build output
+  ECHOLET_IOS_SHERPA_LIB_DIR: "$(SRCROOT)/../../.local-runtime/ios-native/lib"
+  ECHOLET_IOS_BRIDGE_LIB_DIR: "$(SRCROOT)/../ios-native/target/aarch64-apple-ios/release"
+
+targets:
+  EcholetNativeProbe:
+    type: application
+    platform: iOS
+    deploymentTarget: "15.0"
+    sources:
+      - path: Probe
+      - path: ../../.local-runtime/models/bilingual-zh-en
+        type: folder
+        buildPhase: resources
+    settings:
+      PRODUCT_BUNDLE_IDENTIFIER: com.mainstayx.echolet.app.test
+      INFOPLIST_FILE: Probe/Info.plist
+      GENERATE_INFOPLIST_FILE: NO
+      SWIFT_VERSION: "5.10"
+      DEVELOPMENT_TEAM: 668LTD8W55
+      CODE_SIGN_STYLE: Automatic
+      OTHER_LDFLAGS:
+        - "-lecholet_ios"
+        - "-lonnxruntime"
+        - "-lc++"
+      LIBRARY_SEARCH_PATHS:
+        - "$(ECHOLET_IOS_SHERPA_LIB_DIR)"
+        - "$(ECHOLET_IOS_BRIDGE_LIB_DIR)"

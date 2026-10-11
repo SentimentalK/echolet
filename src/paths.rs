@@ -67,13 +67,13 @@ pub fn bundled_models_dir() -> PathBuf {
 ///
 /// Android has no meaningful $HOME; the ECHOLET_* overrides remain authoritative
 /// and the `dirs` crate stays desktop-only.
-#[cfg(not(target_os = "android"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 fn home_dir() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from(env::var("HOME").unwrap_or_else(|_| ".".into())))
 }
 
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", target_os = "ios"))]
 fn home_dir() -> PathBuf {
     PathBuf::from(env::var("HOME").unwrap_or_else(|_| ".".into()))
 }
@@ -109,7 +109,7 @@ pub fn history_dir() -> PathBuf {
 ///
 /// Android has no legacy desktop configuration to migrate; the search list is
 /// empty because the `dirs` crate is desktop-only.
-#[cfg(not(target_os = "android"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 pub fn legacy_config_paths() -> Vec<PathBuf> {
     let mut paths = Vec::new();
     if let Some(cfg) = dirs::config_dir() {
@@ -121,7 +121,7 @@ pub fn legacy_config_paths() -> Vec<PathBuf> {
     paths
 }
 
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", target_os = "ios"))]
 pub fn legacy_config_paths() -> Vec<PathBuf> {
     Vec::new()
 }

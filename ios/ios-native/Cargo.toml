@@ -1,0 +1,16 @@
+[package]
+name = "echolet_ios"
+version = "0.1.0"
+edition = "2021"
+
+# iPhoneOS device arm64 static bridge: the resulting libecholet_ios.a is
+# linked directly into the EcholetApp target (never the Keyboard extension).
+# `cargo test` on the host is impossible for this crate because the Sherpa
+# C-API staticlink is an iPhoneOS artifact; the probe lifecycle is exercised
+# through the Swift Debug probe instead.
+[lib]
+name = "echolet_ios"
+crate-type = ["staticlib"]
+
+[dependencies]
+echolet = { path = "../.." }

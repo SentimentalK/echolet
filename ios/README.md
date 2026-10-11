@@ -87,3 +87,62 @@ xcodebuild -project ios/Echolet.xcodeproj -scheme EcholetApp -destination 'gener
    ```bash
    xcrun devicectl device install app --device <DEVICE_UUID> <PATH_TO_APP_BUNDLE>
    ```
+
+---
+
+## 2026-10-10 — J4A: iOS arm64 native ASR bridge feasibility probe (STATUS)
+
+Native Rust↔Sherpa-onnx toolchain linkage for iPhoneOS (aarch64) is now wired
+and verified at link/bundle level; product keyboard ASR remains future work.
+
+### What exists now
+- `Cargo.toml` / `src/lib.rs` / `src/{ui,paths,models}`: desktop-only modules
+  (`actions`, `app`, `audio`, cpal/Slint/`dirs` …) are now gated to
+  `any(linux|macos|windows)` instead of `not(android)`, so the iOS Rust build
+  no longer imports desktop layers. `paths.rs` home-dir fallbacks also cover
+  `ios`. Android/desktop semantics unchanged.
+- `build.rs`: new `ios` branch links **static** archives
+  (`libsherpa-onnx-c-api.a`) from `.local-runtime/ios-native/lib` with
+  `-lc++`, Foundation/CoreFoundation/Accelerate frameworks. The macOS dylib,
+  Android `.so`, Linux and Windows paths are untouched.
+- `ios/ios-native` (new crate, `staticlib` for iPhoneOS only): thin C bridge
+  `echolet_ios_probe_version`, `echolet_ios_recognizer_create`, `…stream_create`,
+  `…stream_feed`, `…stream_read`, and the paired `…_destroy` functions — all
+  backed by the real shared-core `echolet::asr::OnlineRecognizer` (real sherpa
+  C API, panic-guarded, explicit ownership, NULL/length validation, no PCM
+  persistence). Built via
+  `cargo build --release --manifest-path ios/ios-native/Cargo.toml --target aarch64-apple-ios`.
+- `ios/scripts/build-ios-native.sh`: stages and checksum-verifies the pinned
+  official prebuilt device (ios-arm64) static xcframeworks —
+  sherpa-onnx **v1.13.6** (`sherpa-onnx-v1.13.6-ios-static.xcframework.zip`,
+  sha256 `0b8c880357e653af18c5f9c6e8b3c045e85b98403c00ff25692a1261d31aa332`,
+  from the `xcframework` release tag referenced by the pinned repo's own
+  Package.swift) and ORT **1.27.1** (`onnxruntime-ios-static-xcframework-1.27.1.xcframework.zip`,
+  sha256 `985deaff345c7bcfbe4979b2daeec09d7a745b1e9cb73f37f4077364eb578e62`).
+  Artifacts land in git-ignored `.local-runtime/ios-native/lib/`.
+- `ios/probe/` (new): opt-in `EcholetNativeProbe` debug app (separate
+  XcodeGen spec, never part of the main `Echolet.xcodeproj`) linking the
+  bridge + sherpa archives and running the probe lifecycle on-device,
+  optionally performing real offline recognition against the bundled
+  `bilingual-zh-en` model folder (X-ASR zh-en 480ms, `echolet-xasr-zh-en-480ms-…`,
+  16 kHz, sha-tracked upstream r1) with the official test wav as input.
+
+### Status gates (as probed 2026-10-10)
+| Gate | Status |
+|---|---|
+| RUST_iOS_COMPILE (root core + bridge, aarch64-apple-ios) | PASS |
+| SHERPA_IOS_NATIVE_LINK (real pinned sherpa/ORT static link, Mach-O arm64) | PASS |
+| SWIFT_APP_FFI_LOAD (probe installs via devicectl; app-load needs one unlock) | PASS/UNVERIFIED |
+| REAL_OFFLINE_MODEL_INFERENCE (on-device, bundled model) | UNVERIFIED (launch blocked while device locked) |
+| iPAD_DEVICE_ASR (mic → transcript dictation) | BLOCKED (future work: audio capture → recognizer) |
+| FULL_DICTATION_E2E (keyboard insertion) | BLOCKED (future work) |
+
+### Reproduce
+```bash
+./ios/scripts/build-ios-native.sh
+cargo build --release --manifest-path ios/ios-native/Cargo.toml --target aarch64-apple-ios
+cd ios/probe && xcodegen generate && xcodebuild -project EcholetNativeProbe.xcodeproj \
+  -scheme EcholetNativeProbe -sdk iphoneos -destination 'generic/platform=iOS' build
+xcrun devicectl device install app --device <UUID> <DerivedData>/…/EcholetNativeProbe.app
+```
+Note: no CI pipeline exists for iOS artifacts; nothing runs automatically.
