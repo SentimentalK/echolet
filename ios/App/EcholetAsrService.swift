@@ -122,10 +122,15 @@ final class EcholetAsrService {
     // MARK: - Active capture tap ring exposure (off-realtime only)
 
     /// Tap-side ring metadata for the currently-running PCM capture.
+    /// The retained context keeps the ring alive until the ASR pipeline that
+    /// adopted it releases its reference (stop/flush consumption happens
+    /// strictly AFTER the tap is detached, so the ring must not die with it).
     struct TapRingState {
-        let ring: UnsafeMutableRawPointer
+        let context: EcholetCapturePCMContext
         let generation: UInt64
         let nativeSampleRate: Double
+
+        var ring: UnsafeMutableRawPointer { context.ring }
     }
 
     private let tapRingLock = NSLock()
@@ -234,18 +239,22 @@ final class EcholetAsrService {
         let sessionId: String
         let kind: SessionKind
         let generation: UInt64
-        let ring: UnsafeMutableRawPointer
+        /// Strong retention: the tap ring survives tap teardown until this
+        /// pipeline's finalize/dispose drains it, then both die together.
+        let tapContext: EcholetCapturePCMContext
+        var ring: UnsafeMutableRawPointer { tapContext.ring }
         let stream: UnsafeMutableRawPointer
         let nativeSampleRate: Double
-        let converter: AVAudioConverter
+        /// Deterministic block-average decimator (e.g. 3:1 for a 48 kHz tap);
+        /// nil only when the tap already delivers exactly 16 kHz.
+        let resampler: EcholetDeterministicResampler?
 
         // Preallocated worker buffers (owned by this pipeline; asrQueue only).
         static let maxNativeChunk = 9600  // 200 ms at 48 kHz
         static let maxOutChunk = 4800     // 300 ms at 16 kHz
         var nativeChunk = [Float]()
+        var resampledChunk = [Float](repeating: 0, count: maxNativeChunk)
         var cStringBuffer = [CChar](repeating: 0, count: 8192)
-        let inputBuffer: AVAudioPCMBuffer?
-        let outputBuffer: AVAudioPCMBuffer?
 
         var ringDroppedAtBegin: UInt64 = 0
         var framesPoppedTotal = 0
@@ -255,34 +264,25 @@ final class EcholetAsrService {
         var pumpCycleCount = 0
         var ended = false
         var pumpTimer: DispatchSourceTimer?
+        var lastLoggedCycle = 0
 
         init(
             sessionId: String,
             kind: SessionKind,
             generation: UInt64,
-            ring: UnsafeMutableRawPointer,
+            tapContext: EcholetCapturePCMContext,
             stream: UnsafeMutableRawPointer,
             nativeSampleRate: Double,
-            converter: AVAudioConverter
+            resampler: EcholetDeterministicResampler?
         ) {
             self.sessionId = sessionId
             self.kind = kind
             self.generation = generation
-            self.ring = ring
+            self.tapContext = tapContext
             self.stream = stream
             self.nativeSampleRate = nativeSampleRate
-            self.converter = converter
+            self.resampler = resampler
             self.nativeChunk = [Float](repeating: 0, count: AsrPipeline.maxNativeChunk)
-            if let inputFormat = AVAudioFormat(standardFormatWithSampleRate: nativeSampleRate, channels: 1) {
-                self.inputBuffer = AVAudioPCMBuffer(pcmFormat: inputFormat, frameCapacity: AVAudioFrameCount(AsrPipeline.maxNativeChunk))
-            } else {
-                self.inputBuffer = nil
-            }
-            if let outputFormat = AVAudioFormat(standardFormatWithSampleRate: 16000, channels: 1) {
-                self.outputBuffer = AVAudioPCMBuffer(pcmFormat: outputFormat, frameCapacity: AVAudioFrameCount(AsrPipeline.maxOutChunk))
-            } else {
-                self.outputBuffer = nil
-            }
         }
     }
 
@@ -333,25 +333,33 @@ final class EcholetAsrService {
                 return
             }
 
-            let inputFormat = AVAudioFormat(standardFormatWithSampleRate: tapRing.nativeSampleRate, channels: 1)
-            let outputFormat = AVAudioFormat(standardFormatWithSampleRate: 16000, channels: 1)
-            guard let inFmt = inputFormat, let outFmt = outputFormat,
-                  let converter = try? AVAudioConverter(from: inFmt, to: outFmt) else {
-                Self.ffi_stream_destroy(stream)
-                print("[EcholetAsr] converter init failed (native_rate=\(tapRing.nativeSampleRate))")
-                self.mainSessionFailure(sessionId: sessionId, errorCode: "asr_converter_init_failed")
-                completion?(false, "asr_converter_init_failed")
-                return
+            // Deterministic resampler for the hardware tap rate → 16 kHz.
+            // A 48 kHz iPad mic gives factor 3 (block mean of 3 samples);
+            // an exact-16 kHz tap (never produced by the hardware-format
+            // tap today) would skip resampling entirely.
+            var resampler: EcholetDeterministicResampler?
+            if abs(tapRing.nativeSampleRate - 16000.0) > 0.5 {
+                guard let built = EcholetDeterministicResampler(
+                    nativeSampleRate: tapRing.nativeSampleRate,
+                    targetSampleRate: 16000.0
+                ) else {
+                    Self.ffi_stream_destroy(stream)
+                    print("[EcholetAsr] unsupported tap sample rate for deterministic resampler: \(tapRing.nativeSampleRate)")
+                    self.mainSessionFailure(sessionId: sessionId, errorCode: "asr_unsupported_capture_rate")
+                    completion?(false, "asr_unsupported_capture_rate")
+                    return
+                }
+                resampler = built
             }
 
             let pipeline = AsrPipeline(
                 sessionId: sessionId,
                 kind: kind,
                 generation: expectedGeneration,
-                ring: tapRing.ring,
+                tapContext: tapRing.context,
                 stream: stream,
                 nativeSampleRate: tapRing.nativeSampleRate,
-                converter: converter
+                resampler: resampler
             )
             pipeline.ringDroppedAtBegin = droppedAtBegin
             self.session = pipeline
@@ -384,39 +392,59 @@ final class EcholetAsrService {
         pipeline.pumpCycleCount += 1
         guard !pipeline.ended else { return }
 
-        let popped = popRingChunk(pipeline)
-        guard popped > 0 else { return }
-        pipeline.framesPoppedTotal += Int(popped)
-
-        let accepted = consumedIntoConverter(pipeline, poppedCount: Int(popped))
-        guard accepted > 0 else {
-            sessionDidFailLocked(pipeline, errorCode: "asr_convert_chain_failed")
-            return
+        // Drain the ring fully this cycle (bounded by ring capacity).
+        var poppedAny = false
+        var guardCycles = 0
+        while guardCycles < 60 {
+            guardCycles += 1
+            let popped = popRingChunk(pipeline)
+            if popped <= 0 {
+                break
+            }
+            poppedAny = true
+            pipeline.framesPoppedTotal += Int(popped)
+            let accepted = consumedIntoConverter(pipeline, poppedCount: Int(popped))
+            if accepted < 0 {
+                // Real error (converter error / feed rejected) → fail closed.
+                sessionDidFailLocked(pipeline, errorCode: "asr_convert_chain_failed")
+                return
+            }
+            // accepted == 0: converter latency-buffered this chunk; continue
+            // draining the rest of the ring (never kill the session here).
         }
 
-        // Fresh audio arrived → bounded partial read. `read` is idempotent
-        // (decode-all-ready + current result); the first pass queries the
-        // required size, the second copies into the bounded buffer.
-        let required = Self.ffi_stream_read(pipeline.stream, nil, 0)
-        if required < 0 {
-            sessionDidFailLocked(pipeline, errorCode: "asr_partial_read_failed")
-        } else if required < Int32(pipeline.cStringBuffer.count) {
-            let got = pipeline.cStringBuffer.withUnsafeMutableBufferPointer { buf -> Int32 in
-                Self.ffi_stream_read(pipeline.stream, buf.baseAddress, Int32(buf.count))
-            }
-            if got >= 0 {
-                let text = String(cString: pipeline.cStringBuffer)
-                if !text.isEmpty {
-                    DispatchQueue.main.async { [weak self] in
-                        guard let self = self else { return }
-                        self.delegate?.asrService(self, didUpdatePartialText: text, sessionId: pipeline.sessionId)
+        if poppedAny {
+            // Fresh audio arrived → bounded partial read. `read` is
+            // idempotent (decode-all-ready + current result); the first pass
+            // queries the required size, the second copies into the bounded
+            // buffer.
+            let required = Self.ffi_stream_read(pipeline.stream, nil, 0)
+            if required < 0 {
+                sessionDidFailLocked(pipeline, errorCode: "asr_partial_read_failed")
+            } else if required < Int32(pipeline.cStringBuffer.count) {
+                let got = pipeline.cStringBuffer.withUnsafeMutableBufferPointer { buf -> Int32 in
+                    Self.ffi_stream_read(pipeline.stream, buf.baseAddress, Int32(buf.count))
+                }
+                if got >= 0 {
+                    let text = String(cString: pipeline.cStringBuffer)
+                    if !text.isEmpty {
+                        DispatchQueue.main.async { [weak self] in
+                            guard let self = self else { return }
+                            self.delegate?.asrService(self, didUpdatePartialText: text, sessionId: pipeline.sessionId)
+                        }
                     }
                 }
+            } else {
+                // Oversize partial: no valid bounded copy exists without
+                // dropping the streaming envelope → fail closed.
+                sessionDidFailLocked(pipeline, errorCode: "asr_partial_oversize")
             }
-        } else {
-            // Oversize partial: no valid bounded copy exists without
-            // dropping the streaming envelope → fail closed.
-            sessionDidFailLocked(pipeline, errorCode: "asr_partial_oversize")
+        }
+
+        // Rough integrability observability: state counts only, ~1 Hz.
+        if pipeline.pumpCycleCount - pipeline.lastLoggedCycle >= 20 {
+            pipeline.lastLoggedCycle = pipeline.pumpCycleCount
+            print("[EcholetAsr] pump id_prefix=\(pipeline.sessionId.prefix(8)) cycles=\(pipeline.pumpCycleCount) popped_total=\(pipeline.framesPoppedTotal) converted_16k=\(pipeline.framesConvertedTotal) fed_total=\(pipeline.framesFedTotal) rate=\(pipeline.nativeSampleRate) tap_max_buf=\(pipeline.tapContext.maxTapBufferFrames) tap_oversize_drops=\(pipeline.tapContext.rejectedOversizePushes)")
         }
     }
 
@@ -429,65 +457,47 @@ final class EcholetAsrService {
         }
     }
 
-    /// Converts one native chunk → 16k mono and feeds the recognizer stream.
+    /// Reduces one native chunk → 16k mono via the deterministic resampler
+    /// and feeds the recognizer stream. Returns the number of frames fed at
+    /// 16 kHz, or -1 on a real error.
     private func consumedIntoConverter(_ pipeline: AsrPipeline, poppedCount: Int) -> Int {
-        guard let inputBuffer = pipeline.inputBuffer,
-              let outputBuffer = pipeline.outputBuffer,
-              let inFloats = inputBuffer.floatChannelData?[0],
-              let outFloats = outputBuffer.floatChannelData?[0] else {
-            return -1
+        guard poppedCount > 0 else { return 0 }
+
+        // Zero-copy handoff through the preallocated resampled buffer.
+        var fed = 0
+        func feedChunk(pointer: UnsafePointer<Float>, count: Int) {
+            // feedStream() itself records the fed count; converted mirrors it
+            // at the 16 kHz boundary exactly once (no double counting).
+            feedStream(pipeline, samples: UnsafeMutablePointer(mutating: pointer), count: count, sr: 16000)
+            pipeline.framesConvertedTotal += count
+            fed = count
         }
 
-        inputBuffer.frameLength = AVAudioFrameCount(poppedCount)
-
-        var served = false
-        var conversionError: NSError?
-        var consumed = 0
-        pipeline.nativeChunk.withUnsafeBufferPointer { chunkBuf in
-            if let chunkBase = chunkBuf.baseAddress {
-                inFloats.update(from: chunkBase, count: poppedCount)
-            }
-        }
-
-        // `convert` is non-throwing (reports via the `error:` argument) and
-        // returns a status; the produced frame count is in
-        // `outputBuffer.frameLength`. The provider returns the whole chunk
-        // once, then signals end-of-input.
-        let status = pipeline.converter.convert(
-            to: outputBuffer,
-            error: &conversionError,
-            withInputFrom: { (_, _) -> AVAudioPCMBuffer in
-                if served {
-                    // End-of-input marker: zero-frame buffers for this
-                    // call only.
-                    inputBuffer.frameLength = 0
-                    return inputBuffer
+        if let resampler = pipeline.resampler {
+            pipeline.nativeChunk.withUnsafeBufferPointer { chunkBuf in
+                guard let base = chunkBuf.baseAddress else { return }
+                pipeline.resampledChunk.withUnsafeMutableBufferPointer { outBuf in
+                    let produced = resampler.process(chunkBuf, srcCount: poppedCount, out: outBuf)
+                    if produced > 0, let outBase = outBuf.baseAddress {
+                        feedChunk(pointer: outBase, count: produced)
+                    }
                 }
-                served = true
-                return inputBuffer
             }
-        )
-        let convertedFrames = Int(outputBuffer.frameLength)
-        if let err = conversionError {
-            print("[EcholetAsr] converter error: \(err.localizedDescription) (status=\(status.rawValue))")
-            sessionDidFailLocked(pipeline, errorCode: "asr_convert_error")
-            return -1
-        }
-        if convertedFrames > 0 {
-            feedStream(pipeline, samples: outFloats, count: convertedFrames, sr: 16000)
-            pipeline.framesConvertedTotal += convertedFrames
-            consumed = convertedFrames
-        }
-        // converted == 0 without error: converter latency-buffered the
-        // input; nothing to feed this cycle (bounded behavior).
-        if pipeline.framesConvertedTotal > 0 {
-            let dropped = Self.ffi_ring_dropped_total(pipeline.ring)
-            if dropped > pipeline.lastObservedDropped {
-                print("[EcholetAsr] ring overflow drop detected delta=\(dropped - pipeline.lastObservedDropped)")
-                pipeline.lastObservedDropped = dropped
+        } else {
+            // Tap already at 16 kHz: feed the popped chunk as-is.
+            pipeline.nativeChunk.withUnsafeBufferPointer { chunkBuf in
+                if let base = chunkBuf.baseAddress {
+                    feedChunk(pointer: base, count: poppedCount)
+                }
             }
         }
-        return consumed
+
+        let dropped = Self.ffi_ring_dropped_total(pipeline.ring)
+        if dropped > pipeline.lastObservedDropped {
+            print("[EcholetAsr] ring overflow drop detected delta=\(dropped - pipeline.lastObservedDropped)")
+            pipeline.lastObservedDropped = dropped
+        }
+        return fed
     }
 
     private func feedStream(_ pipeline: AsrPipeline, samples: UnsafeMutablePointer<Float>, count: Int, sr: Int32) {

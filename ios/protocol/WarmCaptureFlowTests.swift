@@ -643,7 +643,74 @@ struct WarmCaptureFlowTestsMain {
         testWarmCaptureFlowSuite()
         testWarmStandbySuite()
         testWarmStopTranscriptSuite()
+        testDeterministicResamplerSuite()
     }
+}
+
+// ============================================================
+// J4-E2E deterministic block-average resampler (3:1, 2:1, ==1)
+// ============================================================
+
+func testDeterministicResamplerSuite() {
+    print("[TEST] Running J4-E2E deterministic resampler suite...")
+
+    // 3:1 block-mean decimation with partial trailing block carry.
+    do {
+        let r = EcholetDeterministicResampler(nativeSampleRate: 48000, targetSampleRate: 16000)!
+        var src: [Float] = []
+        for i in 0..<10 { src.append(Float(i)) }  // 10 samples: 3 blocks + 1 leftover
+        var out = [Float](repeating: 0, count: src.count + 4)
+        let written = src.withUnsafeBufferPointer { srcBuf in
+            out.withUnsafeMutableBufferPointer { outBuf in
+                r.process(srcBuf, srcCount: src.count, out: outBuf)
+            }
+        }
+        assertFlow(written == 3, "first pass produced 3 frames from 10 samples")
+        // Blocks: 0,1,2 -> 1.0 ; 3,4,5 -> 4.0 ; 6,7,8 -> 7.0 ; leftover [9]
+        assertFlow(out[0] == 1.0 && out[1] == 4.0 && out[2] == 7.0, "block means exact")
+        assertFlow(r.carry.count == 1 && r.carry[0] == 9.0, "leftover sample carried")
+
+        // Second pass completes the pending block.
+        let src2: [Float] = [10.0, 20.0]
+        var out2 = [Float](repeating: 0, count: src2.count + 4)
+        let written2 = src2.withUnsafeBufferPointer { srcBuf in
+            out2.withUnsafeMutableBufferPointer { outBuf in
+                r.process(srcBuf, srcCount: src2.count, out: outBuf)
+            }
+        }
+        assertFlow(written2 == 1, "carry completes to one frame")
+        assertFlow(out2[0] == (9.0 + 10.0 + 20.0) / 3.0, "carry + new samples averaged")
+        assertFlow(r.carry.isEmpty, "carry empty after consume")
+    }
+
+    // 2:1 factor works too.
+    do {
+        let r = EcholetDeterministicResampler(nativeSampleRate: 32000, targetSampleRate: 16000)!
+        let src: [Float] = [2, 4, 6, 8]
+        var out = [Float](repeating: 0, count: src.count + 4)
+        let w = src.withUnsafeBufferPointer { s in
+            out.withUnsafeMutableBufferPointer { o in r.process(s, srcCount: s.count, out: o) }
+        }
+        assertFlow(w == 2, "2:1 produced 2 frames from 4 samples")
+        assertFlow(out[0] == 3.0 && out[1] == 7.0, "2:1 means correct")
+    }
+
+    // Identity factor (tap already 16k) passes through as pure mean of 1.
+    do {
+        let r = EcholetDeterministicResampler(nativeSampleRate: 16000, targetSampleRate: 16000)!
+        let src: [Float] = [0.5, -0.25]
+        var out = [Float](repeating: 0, count: src.count + 4)
+        let w = src.withUnsafeBufferPointer { s in
+            out.withUnsafeMutableBufferPointer { o in r.process(s, srcCount: s.count, out: o) }
+        }
+        assertFlow(w == 2 && out[0] == 0.5 && out[1] == -0.25, "identity factor is a passthrough")
+    }
+
+    // Non-integer ratio impossible rates fail closed at init.
+    assertFlow(EcholetDeterministicResampler(nativeSampleRate: 44100, targetSampleRate: 16000) == nil, "44100 -> 16000 refuses")
+    assertFlow(EcholetDeterministicResampler(nativeSampleRate: 48000, targetSampleRate: 16000) != nil, "48000 -> 16000 accepts")
+
+    print("[TEST] J4-E2E deterministic resampler suite PASSED.")
 }
 
 // ============================================================

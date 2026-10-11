@@ -662,7 +662,7 @@ class AppStatusViewController: UIViewController, AudioCaptureDelegate, WarmIPCSe
                                                 }
                                             }
                                         }
-                                        self.appendLiveStatusLine("ASR: live dictation session session-prefix=\(sessionId.prefix(8)) gen=\(generation). SPEAK COMPLETELY.")
+                                        self.appendLiveStatusLine("ASR LIVE: dictation ACTIVE (session \(sessionId.prefix(8)), tap gen=\(generation)) — SPEAK NOW, then tap 'Stop & Finalize Live'.")
                                         self.stopLiveButton.isEnabled = true
                                         self.startMicButton.isEnabled = false
                                     case .failure(let failure):

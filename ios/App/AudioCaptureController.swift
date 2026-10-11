@@ -19,11 +19,22 @@ final class EcholetCapturePCMContext {
     let generation: UInt64
     let ring: UnsafeMutableRawPointer
     let scratchPtr: UnsafeMutablePointer<Float>
-    let scratchFrames = 4096
+    // AVAudioEngine tap bufferSize is only a HINT: real callback buffers can
+    // be far larger than the requested 1024 frames (commonly thousands of
+    // frames per callback on device). 65536 frames of scratch covers every
+    // observed iOS input callback shape; pushes with larger frames would be
+    // dropped, and the telemetry counter would expose that.
+    let scratchFrames = 65536
+
+    /// Telemetry: largest observed tap buffer in frames (single realtime
+    /// producer; benign arm64 word-size races permitted while DEBUG-only).
+    /// Consumed off the realtime thread for diagnostics (counts only).
+    var maxTapBufferFrames: UInt32 = 0
+    var rejectedOversizePushes: UInt32 = 0
 
     init?(generation: UInt64, nativeSampleRate: Double) {
         self.generation = generation
-        // 2 seconds at the native rate (bounded; fail closed if clamped).
+        // >= 2 seconds at the native rate (bounded; fail closed if clamped).
         let capacity = UInt64(max(96_000, Int(nativeSampleRate * 2.0)))
         guard let ring = EcholetAsrService.ffi_ring_create(capacity) else { return nil }
         self.ring = ring
@@ -38,6 +49,14 @@ final class EcholetCapturePCMContext {
 
     /// Realtime-safe push (mono downmix + lock-free bounded ring write).
     func push(buffer: AVAudioPCMBuffer) {
+        let frames = UInt32(truncatingIfNeeded: buffer.frameLength)
+        if frames > maxTapBufferFrames {
+            maxTapBufferFrames = frames
+        }
+        if frames > UInt32(scratchFrames) {
+            rejectedOversizePushes &+= 1
+            return
+        }
         EcholetAsrService.tapPushMonoToRing(
             ring: ring,
             scratch: scratchPtr,
@@ -404,10 +423,18 @@ public final class AudioCaptureController: NSObject {
             let channelCount = inputFormat.channelCount
             let startUptime = DispatchTime.now().uptimeNanoseconds
 
+            // J4-E2E: the input tap MUST use the hardware format (device
+            // input taps reject arbitrary formats); the 48 kHz → 16 kHz
+            // reduction happens on the ASR worker thread through the
+            // deterministic block-average resampler (pure Foundation,
+            // unit-tested), matching the "AVAudioConverter OR deterministic
+            // tested resampler" contract without realtime-thread allocation.
+            let tapFormat = inputFormat
+
             let meterContext = MeterContext(
                 generation: issuedGen,
-                sampleRate: sampleRate,
-                channelCount: channelCount,
+                sampleRate: tapFormat.sampleRate,
+                channelCount: tapFormat.channelCount,
                 startUptimeNanoseconds: startUptime
             )
 
@@ -420,7 +447,7 @@ public final class AudioCaptureController: NSObject {
             // ever touches this immutable context (alloc-free push).
             var pcmTapContext: EcholetCapturePCMContext?
             if includePCM {
-                if let ctx = EcholetCapturePCMContext(generation: issuedGen, nativeSampleRate: sampleRate) {
+                if let ctx = EcholetCapturePCMContext(generation: issuedGen, nativeSampleRate: tapFormat.sampleRate) {
                     pcmTapContext = ctx
                 } else {
                     self.notifyError(.engineConfigurationFailed("ASR ring allocation failed"))
@@ -441,7 +468,7 @@ public final class AudioCaptureController: NSObject {
                 }
             )
             let strongPcmContext = pcmTapContext
-            inputNode.installTap(onBus: 0, bufferSize: bufferSize, format: inputFormat) { buffer, _ in
+            inputNode.installTap(onBus: 0, bufferSize: bufferSize, format: tapFormat) { buffer, _ in
                 AudioCaptureController.processAudioBuffer(
                     buffer: buffer,
                     tapHandler: tapHandler
@@ -464,7 +491,7 @@ public final class AudioCaptureController: NSObject {
                 case .success(let activeGen):
                     if let ctx = pcmTapContext {
                         EcholetAsrService.shared.publishTapRing(
-                            .init(ring: ctx.ring, generation: activeGen, nativeSampleRate: sampleRate)
+                            .init(context: ctx, generation: activeGen, nativeSampleRate: tapFormat.sampleRate)
                         )
                     }
                     self.publishStateChange()
