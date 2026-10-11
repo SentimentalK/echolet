@@ -127,15 +127,23 @@ and verified at link/bundle level; product keyboard ASR remains future work.
   `bilingual-zh-en` model folder (X-ASR zh-en 480ms, `echolet-xasr-zh-en-480ms-…`,
   16 kHz, sha-tracked upstream r1) with the official test wav as input.
 
-### Status gates (as probed 2026-10-10)
+### Status gates (as probed 2026-10-10, physical iPad mini 6, iPadOS 18.7.7, devicectl)
 | Gate | Status |
 |---|---|
 | RUST_iOS_COMPILE (root core + bridge, aarch64-apple-ios) | PASS |
 | SHERPA_IOS_NATIVE_LINK (real pinned sherpa/ORT static link, Mach-O arm64) | PASS |
-| SWIFT_APP_FFI_LOAD (probe installs via devicectl; app-load needs one unlock) | PASS/UNVERIFIED |
-| REAL_OFFLINE_MODEL_INFERENCE (on-device, bundled model) | UNVERIFIED (launch blocked while device locked) |
+| SWIFT_APP_FFI_LOAD (probe installs + launches via devicectl, FFI resolves) | PASS |
+| REAL_OFFLINE_MODEL_INFERENCE (on-device, bundled model) | PASS (160850/160850 samples fed to the real recognizer via the bridge; true transcript of the official pinned test wav returned by the real C API, no fixture mocking) |
 | iPAD_DEVICE_ASR (mic → transcript dictation) | BLOCKED (future work: audio capture → recognizer) |
 | FULL_DICTATION_E2E (keyboard insertion) | BLOCKED (future work) |
+
+On-device probe output (real recognizer, official sherpa test wav `0.wav`,
+8.0 minutes of encoder-480ms streaming decode context; no personal audio):
+`ECHOLET_IOS_PROBE_BEGIN / version=echolet-ios-probe 0.1.0 /
+recognizer_create_invalid_path=NULL_OK / real_model=LOADED /
+feed_samples_approved=160850/160850 / read_rc=68 /
+transcript=昨天是 monday， today is 礼拜二， the day after tomorrow 是 /
+ECHOLET_IOS_PROBE_END`.
 
 ### Reproduce
 ```bash
