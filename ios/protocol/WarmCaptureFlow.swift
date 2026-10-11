@@ -958,6 +958,8 @@ public final class WarmCaptureFlowCoordinator {
         // warm standby bookkeeping (session adopted from warm capture).
         warmStandbyToken = nil
         isWarmStandbyHardwareActive = false
+        // UI truth: the warm recorder is no longer running.
+        effects.append(.notifyWarmStandbyActive(active: false))
 
         // FINAL recognized text for an admitted keyboard STOP (Finish) is
         // injected by WarmIPCService right before the completed response is
