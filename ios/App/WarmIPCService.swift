@@ -229,56 +229,111 @@ public final class WarmIPCService {
                 return
             }
 
-            // One-shot launch context: consume the demand atomically.
-            _ = EcholetLaunch.consumeDemand(defaults: defaults)
-            self.pendingActivation = PendingActivation(nonce: nonce, startedAtMs: now)
+            self.beginActivationForDemand(nonce: nonce, defaults: defaults, nowMs: now)
+        }
+    }
+
+    /// MANUAL foreground entry (J5 follow-up): the user opened the Echolet
+    /// app themselves after the automatic open was refused. If a FRESH
+    /// unfulfilled keyboard launch demand exists, the app honors it exactly
+    /// like a deep link: same ordered prepare pipeline and hand-shake phase
+    /// publication. Without this, "open Echolet by hand" left the keyboard
+    /// without any acceptance evidence and the whole flow dead-ended.
+    public func activatePendingDemandIfFresh(source: String = "foreground") {
+        ipcQueue.async { [weak self] in
+            guard let self = self, let defaults = self.sharedDefaults else { return }
+            guard let demand = EcholetLaunch.readDemand(defaults: defaults) else { return }
+            let now = WarmIPCService.currentTimeMs()
+            guard EcholetLaunch.isDemandFresh(demand, nowMs: now) else { return }
+            print("[Echolet-APP] APP_FOREGROUND_DEMAND(source=\(source),nonce=\(String(demand.nonce.prefix(8)))…)")
+            self.beginActivationForDemand(nonce: demand.nonce, defaults: defaults, nowMs: now)
+        }
+    }
+
+    /// Shared activation core; MUST run on `ipcQueue` with a validated fresh
+    /// demand decision already made (or the demand unconditionally fresh in
+    /// the foreground hand path).
+    private func beginActivationForDemand(nonce: String, defaults: UserDefaults, nowMs: UInt64) {
+        let now = nowMs
+
+        if let pending = self.pendingActivation, pending.nonce == nonce {
+            print("[Echolet-APP] APP_URI_RECEIVED(duplicate_ignored)")
+            return
+        }
+
+        // Warm-already-truth shortcut: if the native recorder is STILL
+        // hardware-active (warm standby or an adopted keyboard session),
+        // never re-arm/re-prepare above it — simply republish the acceptance
+        // phases for this demand so the keyboard observes warmReady.
+        if self.flowCoordinator.isWarmStandbyHardwareActive {
             EcholetLaunch.writePhase(
                 nonce: nonce,
                 appEpoch: AppDelegate.sharedEpoch,
-                phase: .uriReceived,
+                phase: .micNativeReady,
                 nowMs: now,
                 defaults: defaults
             )
+            EcholetLaunch.writePhase(
+                nonce: nonce,
+                appEpoch: AppDelegate.sharedEpoch,
+                phase: .warmReady,
+                nowMs: now,
+                defaults: defaults
+            )
+            print("[Echolet-APP] MIC_NATIVE_READY(adopted_existing_recorder,nonce=\(String(nonce.prefix(8)))…)")
+            print("[Echolet-APP] RETURN_ATTEMPT(auto_return_unsupported -> manual system return)")
+            return
+        }
 
-            // GUARANTEED ORDERING on the shared single-writer queue:
-            // 1) setUserArmMicrophone(true) first (arming state mutation and
-            //    its effects), 2) the model-dependent warm prepare after the
-            //    arm effects. Both reuse the proven flow machinery; no fork.
-            let armEffects = self.flowCoordinator.setUserArmMicrophone(true)
-            self.executeFlowEffects(armEffects, triggeringRequestId: nil, triggeringSessionId: nil, triggeringSequence: nil)
-            print("[Echolet-APP] MIC_ARMED_ORDERED(before_prepare)")
+        // One-shot launch context: consume the demand atomically.
+        _ = EcholetLaunch.consumeDemand(defaults: defaults)
+        self.pendingActivation = PendingActivation(nonce: nonce, startedAtMs: now)
+        EcholetLaunch.writePhase(
+            nonce: nonce,
+            appEpoch: AppDelegate.sharedEpoch,
+            phase: .uriReceived,
+            nowMs: now,
+            defaults: defaults
+        )
 
-            EcholetAsrService.shared.loadModelIfNeeded { [weak self] ok, errorCode in
-                guard let self = self else { return }
-                self.ipcQueue.async { [self] in
-                    guard let defaults = self.sharedDefaults else { return }
-                    guard let pending = self.pendingActivation, pending.nonce == nonce else { return }
-                    let nowLoad = WarmIPCService.currentTimeMs()
-                    guard ok else {
-                        EcholetLaunch.writePhase(
-                            nonce: nonce,
-                            appEpoch: AppDelegate.sharedEpoch,
-                            phase: .failed,
-                            nowMs: nowLoad,
-                            errorCode: "model_load_\(errorCode ?? "unknown")",
-                            defaults: defaults
-                        )
-                        self.pendingActivation = nil
-                        print("[Echolet-APP] BLOCKED(model_load_\(errorCode ?? "unknown"))")
-                        return
-                    }
+        // GUARANTEED ORDERING on the shared single-writer queue:
+        // 1) setUserArmMicrophone(true) first (arming state mutation and
+        //    its effects), 2) the model-dependent warm prepare after the
+        //    arm effects. Both reuse the proven flow machinery; no fork.
+        let armEffects = self.flowCoordinator.setUserArmMicrophone(true)
+        self.executeFlowEffects(armEffects, triggeringRequestId: nil, triggeringSessionId: nil, triggeringSequence: nil)
+        print("[Echolet-APP] MIC_ARMED_ORDERED(before_prepare)")
+
+        EcholetAsrService.shared.loadModelIfNeeded { [weak self] ok, errorCode in
+            guard let self = self else { return }
+            self.ipcQueue.async { [self] in
+                guard let defaults = self.sharedDefaults else { return }
+                guard let pending = self.pendingActivation, pending.nonce == nonce else { return }
+                let nowLoad = WarmIPCService.currentTimeMs()
+                guard ok else {
                     EcholetLaunch.writePhase(
                         nonce: nonce,
                         appEpoch: AppDelegate.sharedEpoch,
-                        phase: .modelLoaded,
+                        phase: .failed,
                         nowMs: nowLoad,
+                        errorCode: "model_load_\(errorCode ?? "unknown")",
                         defaults: defaults
                     )
-                    print("[Echolet-APP] MODEL_LOAD(ok)")
-                    let effects = self.flowCoordinator.prepareWarmStandbyCapture()
-                    self.executeFlowEffects(effects, triggeringRequestId: nil, triggeringSessionId: nil, triggeringSequence: nil)
-                    self.scheduleActivationTimeout(nonce: nonce)
+                    self.pendingActivation = nil
+                    print("[Echolet-APP] BLOCKED(model_load_\(errorCode ?? "unknown"))")
+                    return
                 }
+                EcholetLaunch.writePhase(
+                    nonce: nonce,
+                    appEpoch: AppDelegate.sharedEpoch,
+                    phase: .modelLoaded,
+                    nowMs: nowLoad,
+                    defaults: defaults
+                )
+                print("[Echolet-APP] MODEL_LOAD(ok)")
+                let effects = self.flowCoordinator.prepareWarmStandbyCapture()
+                self.executeFlowEffects(effects, triggeringRequestId: nil, triggeringSessionId: nil, triggeringSequence: nil)
+                self.scheduleActivationTimeout(nonce: nonce)
             }
         }
     }

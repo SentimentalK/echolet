@@ -167,19 +167,26 @@ enum EcholetKeyboardSessionTests {
         // Second appearance event in the SAME appearance window dedupes.
         c.handleAppeared()
         expectEqual(h.openCallsRaw.count, 1, "testAppearWithNoWarmAutoOpenOnce(2)")
-        // Fresh appearance is a new window: exactly one more attempt.
+        // An in-flight launch context resumes (OPEN_RESUMED), never re-opens.
         c.handleDisappeared()
         c.handleAppeared()
-        expectEqual(h.openCallsRaw.count, 2, "testAppearWithNoWarmAutoOpenOnce(3)")
+        expectEqual(h.openCallsRaw.count, 1, "testAppearWithNoWarmAutoOpenOnce(3)")
+        expectEqual(c.phase, EcholetKeyboardSessionController.Phase.opening, "testAppearWithNoWarmAutoOpenOnce(4)")
+        // Once the demand epoch expires (>45s), a fresh appearance may
+        // measure exactly one new attempt.
+        c.handleDisappeared()
+        h.now += EcholetLaunch.defaultDemandTtlMs + 1
+        c.handleAppeared()
+        expectEqual(h.openCallsRaw.count, 2, "testAppearWithNoWarmAutoOpenOnce(5)")
         // Demand record written for the launch attempt.
         let demand = EcholetLaunch.readDemand(defaults: h.defaults)
-        expectTrue(demand != nil, "testAppearWithNoWarmAutoOpenOnce(4)")
+        expectTrue(demand != nil, "testAppearWithNoWarmAutoOpenOnce(6)")
         // Nonce in URL matches the demand record.
         if let demand = demand, let url = h.openCallsRaw.last?.url,
            let parsed = EcholetLaunch.parseDictationPrepareURL(url) {
-            expectEqual(parsed.nonce, demand.nonce, "testAppearWithNoWarmAutoOpenOnce(5)")
+            expectEqual(parsed.nonce, demand.nonce, "testAppearWithNoWarmAutoOpenOnce(7)")
         } else {
-            recordFailure("testAppearWithNoWarmAutoOpenOnce(5)", "missing demand/url")
+            recordFailure("testAppearWithNoWarmAutoOpenOnce(7)", "missing demand/url")
         }
     }
 

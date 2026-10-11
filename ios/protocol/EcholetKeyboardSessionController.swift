@@ -189,7 +189,15 @@ public final class EcholetKeyboardSessionController {
         autoAttemptDoneForCurrentAppearance = false
         log("KBD_APPEAR")
         _ = consumePendingResponse() // surface state written while hidden
-        if phase == .ready {
+        // Resume an in-flight launch instead of re-attempting: the demand is
+        // already written and the app may be mid-prepare (or the user may
+        // have just opened it manually — the foreground hand path).
+        if let ctx = launchContext, env.nowMs() - ctx.startedAtMs <= EcholetLaunch.defaultDemandTtlMs {
+            if phase == .ready {
+                setPhase(.opening)
+                log("OPEN_RESUMED(inflight_launch)")
+            }
+        } else if phase == .ready {
             if freshWarmLiveExists() {
                 log("OPEN_SKIPPED(warm_live_fresh)")
                 beginStart(reason: "auto_adopt_warm")

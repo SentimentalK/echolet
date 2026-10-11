@@ -19,6 +19,9 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         for context in connectionOptions.urlContexts {
             WarmIPCService.shared.handleDictationActivationURL(context.url, source: "cold_launch")
         }
+        // J5 manual foreground hand: a fresh unfulfilled keyboard demand
+        // (attempted open was refused) is honored the same as a deep link.
+        WarmIPCService.shared.activatePendingDemandIfFresh(source: "cold_connect")
     }
 
     func scene(_ scene: UIScene, openURLContexts URLContexts: Set<UIOpenURLContext>) {
@@ -30,6 +33,8 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
     func sceneWillEnterForeground(_ scene: UIScene) {
         // App became active/foreground: ensure WarmIPCService is polling
         WarmIPCService.shared.startPolling()
+        // Manual foreground hand for pending keyboard launch demands.
+        WarmIPCService.shared.activatePendingDemandIfFresh(source: "foreground")
     }
 
     func sceneDidEnterBackground(_ scene: UIScene) {
