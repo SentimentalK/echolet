@@ -90,7 +90,76 @@ xcodebuild -project ios/Echolet.xcodeproj -scheme EcholetApp -destination 'gener
 
 ---
 
-## 2026-10-10 — J4A: iOS arm64 native ASR bridge feasibility probe (STATUS)
+## 2026-10-11 — J5: single-button keyboard -> auto app prepare -> one-tap stop + auto final insert (STATUS)
+
+### What changed
+- **Keyboard UI** (`Keyboard/KeyboardViewController.swift`): the four test
+  buttons are gone. ONE prominent button now drives the whole flow — dark
+  "Start Listening" while idle, red "Stop Listening" only AFTER a real
+  `.listening` ACK for the exact session, neutral "Starting…/Finalizing…"
+  while pending, plus the required Apple globe key. FINAL transcripts are
+  inserted into the editable host EXACTLY ONCE automatically via
+  `textDocumentProxy` (no manual Finish/Consume in primary UX).
+- **Launch handshake** (`protocol/EcholetLaunch.swift`, pure Foundation):
+  `echolet://dictation/prepare?nonce=<UUID>&ts=<ms>` deep link; App Group
+  records — keyboard-written one-shot `DemandRecord` (nonce+TTL),
+  app-written `PhaseRecord` (uriReceived/modelLoaded/micNativeReady/
+  warmReady/failed, nonce- and process-epoch-fenced, TTL'd), and the
+  app-written `WarmLiveRecord` (native hardware recording truth; the
+  keyboard's authority for "positively fresh active warm mic").
+- **Keyboard core** (`protocol/EcholetKeyboardSessionController.swift`,
+  pure Foundation, CLI-testable): state machine ready -> starting ->
+  listening -> finalizing -> ready/blocked; exact-session v2 START/STOP/
+  CANCEL publication with fresh requestIds and sequence+1 stops; strict
+  response correlation (epoch/session/ACK identity/monotonic revision);
+  bounded polling/timedouts; auto-attempt at most ONCE per fresh keyboard
+  appearance; user-tap attempts stay available; reopen-loop fence after a
+  recent warmReady phase; editor-identity (document fingerprint) fail-closed
+  insert gating; own insertion churn does NOT cancel the session.
+- **App side** (`SceneDelegate.swift`, `WarmIPCService.swift`,
+  `App/Info.plist`): cold-launch + `openURLContexts` entry points; the deep
+  link is honored only for a fresh nonce-matched demand (fan-out/replay
+  fails closed with a truthful failed phase); GUARANTEED ordering on the
+  shared `ipcQueue`: arm mic -> offline model load -> warm standby prepare;
+  micNativeReady/warmReady phases and the warm-live record are published
+  ONLY from the confirmed native hardware start completion; bounded 20s
+  activation timeout publishes an honest failed phase.
+- **Auto return app -> keyboard**: iOS exposes NO public API to
+  programmatically return to the host app's keyboard; the app logs
+  `RETURN_ATTEMPT(auto_return_unsupported)` and the system "Back to previous
+  app" / App Switcher UI is the explicit route. The keyboard auto-STARTs
+  itself once the warm-live record is fresh, so no extra app tap is needed
+  after the cold or warm prepare.
+
+### Honest platform limits (no private APIs used)
+- Keyboard extensions cannot legally open URLs with a guaranteed public
+  API. The implementation uses only `NSExtensionContext.open(_:completionHandler:)`
+  as a measured best effort and, if the OS refuses it (likely on current
+  iOS), reports `AUTO_LAUNCH_UNSUPPORTED_*` and falls back to: user tap
+  attempt + explicit manual-open instruction ("open Echolet from Home, then
+  switch back; the keyboard finishes activation itself").
+- No `LSApplicationWorkspace`, private selectors, hidden entitlements, or
+  responder hacks; the keyboard never touches the microphone itself.
+
+### Pure Foundation CLI tests (same pattern as prior jobs)
+```bash
+P=ios/protocol
+swiftc $P/EcholetIPC.swift $P/EcholetAdmission.swift $P/EcholetLaunch.swift \
+       $P/EcholetKeyboardSessionController.swift $P/EcholetLaunchTests.swift \
+       -o /tmp/echolet_launch_tests && /tmp/echolet_launch_tests
+swiftc $P/EcholetIPC.swift $P/EcholetAdmission.swift $P/EcholetLaunch.swift \
+       $P/EcholetKeyboardSessionController.swift $P/EcholetKeyboardSessionTests.swift \
+       -o /tmp/echolet_session_tests && /tmp/echolet_session_tests
+```
+Covered: auto-attempt-once narration, fresh warm skips open, tapped
+fallback, recent-warmReady reopen fence, cold dead app stale epoch, warmReady
+evidence auto-START once, permission blocked responses, exact STOP ack ->
+insert exactly once (Unicode zh/en), stale/other/out-of-order/duplicate
+response suppression, editor-mismatch fail-closed insert, focus-change
+cancel, insert churn not cancelling, hide-cancel, rapid-tap dedupe, open
+timeout -> AUTO_LAUNCH_UNSUPPORTED, start ack timeout.
+
+### 2026-10-10 — J4A: iOS arm64 native ASR bridge feasibility probe (STATUS)
 
 Native Rust↔Sherpa-onnx toolchain linkage for iPhoneOS (aarch64) is now wired
 and verified at link/bundle level; product keyboard ASR remains future work.
@@ -266,11 +335,25 @@ Open decisions the coordinator/user still needs to make (next gate):
 5. `xcodebuild -project Echolet.xcodeproj -scheme EcholetApp -destination 'generic/platform=iOS' -derivedDataPath DerivedData build`
 6. Pure Swift CLI protocol tests:
    `swiftc` each of `AdmissionTests`, `AdversarialTests`,
-   `CaptureLifecycleTests`, `IPCCodecSmoke`, `WarmCaptureFlowTests` with
-   `EcholetIPC.swift EcholetAdmission.swift CaptureLifecycleGate.swift
-   WarmCaptureFlow.swift` (same pattern as prior jobs) — all must exit 0.
+   `CaptureLifecycleTests`, `IPCCodecSmoke` (with the `fixtures` dir),
+   `WarmCaptureFlowTests`, `EcholetLaunchTests`,
+   `EcholetKeyboardSessionTests` with their matching protocol sources
+   (same pattern as prior jobs) — all must exit 0.
 7. Install on your own sideloaded iPad:
    `xcrun devicectl device install app --device <ID> .../EcholetApp.app`
+
+### Manual acceptance (physical; human-owned) — J5 single-button flow
+1. Echolet app: Prepare Warm Dictation (or let the keyboard open the app) →
+   `WARM: warm dictation recording ACTIVE`.
+2. In any editable host (Notes/Chrome), summon the Echolet keyboard via Globe.
+3. AUTO path: keyboard reappearing over a fresh warm mic auto-sends START
+   without opening the app; shows red "Stop Listening" only after the real
+   mic/ASR ACK. Speak (zh/en), tap Stop once → final transcript inserts ONCE.
+4. TAPPED path: if the keyboard could not open Echolet automatically, a tap
+   attempts the public open; if the OS refuses, follow the on-instruction to
+   open Echolet manually, return, and the keyboard auto-STARTs.
+5. Verify: no reopen loop, no duplicate insertion, mic stops after Stop, and
+   hide/focus change closes the session truthfully.
 
 ### Manual acceptance (physical; human-owned)
 1. Open Echolet > "Load Offline Model" (or first Prepare) — state:

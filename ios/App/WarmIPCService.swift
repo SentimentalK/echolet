@@ -39,6 +39,8 @@ public final class WarmIPCService {
     private var sharedDefaults: UserDefaults?
     private var pollTimer: Timer?
     private var darwinObserverInstalled = false
+    /// J5 activation context; mutated ONLY on `ipcQueue`.
+    private var pendingActivation: PendingActivation?
 
     /// Serial queue to sequence all IPC polling, admission, and response mutations
     public let ipcQueue = DispatchQueue(label: "com.echolet.warmipc.service", qos: .userInitiated)
@@ -153,6 +155,152 @@ public final class WarmIPCService {
                     self.notifyBlocked("ASR model unavailable: \(errorCode)")
                 }
             }
+        }
+    }
+
+    // MARK: - J5 Deep-Link Keyboard Activation (echolet://dictation/prepare)
+
+    /// One awaited activation context (single in-flight launch handshake).
+    /// ALL mutations happen exclusively on `ipcQueue`.
+    private struct PendingActivation {
+        let nonce: String
+        let startedAtMs: UInt64
+    }
+
+    /// Activation timeout: honest failed phase when the prepare never
+    /// reaches a confirmed native recorder within the bound.
+    private static let activationPrepareTimeoutSeconds: Double = 20.0
+    /// Launch demand record age bound applied by the app for one-shot use.
+    private static let demandOneShotTtlMs: UInt64 = EcholetLaunch.defaultDemandTtlMs
+
+    public static func currentTimeMs() -> UInt64 {
+        return UInt64(Date().timeIntervalSince1970 * 1000)
+    }
+
+    /// SceneDelegate entry for `echolet://dictation/prepare?nonce=...&ts=...`.
+    ///
+    /// The keyboard may only REQUEST activation (it has no microphone access
+    /// and no private launch APIs); this app-side entry point is the only
+    /// writer of the launch handshake phase records. Ordering guarantee:
+    /// arming AND the model-dependent warm prepare both execute on the
+    /// shared `ipcQueue`, and the warm-ready phase is published exclusively
+    /// from the confirmed native hardware start completion path.
+    public func handleDictationActivationURL(_ url: URL, source: String) {
+        guard let parsed = EcholetLaunch.parseDictationPrepareURL(url) else {
+            print("[Echolet-APP] LAUNCH_IGNORED(unrelated_url source=\(source))")
+            return
+        }
+        let nonce = parsed.nonce
+        print("[Echolet-APP] APP_URI_RECEIVED(source=\(source),nonce=\(String(nonce.prefix(8)))…)")
+        ipcQueue.async { [weak self] in
+            guard let self = self, let defaults = self.sharedDefaults else { return }
+            let now = WarmIPCService.currentTimeMs()
+
+            // Idempotent duplicate URI delivery for the SAME nonce is a no-op
+            // beyond observation (cold scene connect + openURLContexts can
+            // both deliver the same context).
+            if let pending = self.pendingActivation, pending.nonce == nonce {
+                EcholetLaunch.writePhase(
+                    nonce: nonce,
+                    appEpoch: AppDelegate.sharedEpoch,
+                    phase: .uriReceived,
+                    nowMs: now,
+                    defaults: defaults
+                )
+                print("[Echolet-APP] APP_URI_RECEIVED(duplicate_ignored)")
+                return
+            }
+
+            // The deep link is only honored for a FRESH, nonce-matching
+            // demand that the keyboard wrote immediately before attempting
+            // the open (fan-out fabrication / stale replay fails closed).
+            guard let demand = EcholetLaunch.readDemand(defaults: defaults),
+                  demand.nonce == nonce,
+                  EcholetLaunch.isDemandFresh(demand, nowMs: now) else {
+                EcholetLaunch.writePhase(
+                    nonce: nonce,
+                    appEpoch: AppDelegate.sharedEpoch,
+                    phase: .failed,
+                    nowMs: now,
+                    errorCode: "demand_missing_or_expired",
+                    defaults: defaults
+                )
+                print("[Echolet-APP] BLOCKED(demand_missing_or_expired)")
+                return
+            }
+
+            // One-shot launch context: consume the demand atomically.
+            _ = EcholetLaunch.consumeDemand(defaults: defaults)
+            self.pendingActivation = PendingActivation(nonce: nonce, startedAtMs: now)
+            EcholetLaunch.writePhase(
+                nonce: nonce,
+                appEpoch: AppDelegate.sharedEpoch,
+                phase: .uriReceived,
+                nowMs: now,
+                defaults: defaults
+            )
+
+            // GUARANTEED ORDERING on the shared single-writer queue:
+            // 1) setUserArmMicrophone(true) first (arming state mutation and
+            //    its effects), 2) the model-dependent warm prepare after the
+            //    arm effects. Both reuse the proven flow machinery; no fork.
+            let armEffects = self.flowCoordinator.setUserArmMicrophone(true)
+            self.executeFlowEffects(armEffects, triggeringRequestId: nil, triggeringSessionId: nil, triggeringSequence: nil)
+            print("[Echolet-APP] MIC_ARMED_ORDERED(before_prepare)")
+
+            EcholetAsrService.shared.loadModelIfNeeded { [weak self] ok, errorCode in
+                guard let self = self else { return }
+                self.ipcQueue.async { [self] in
+                    guard let defaults = self.sharedDefaults else { return }
+                    guard let pending = self.pendingActivation, pending.nonce == nonce else { return }
+                    let nowLoad = WarmIPCService.currentTimeMs()
+                    guard ok else {
+                        EcholetLaunch.writePhase(
+                            nonce: nonce,
+                            appEpoch: AppDelegate.sharedEpoch,
+                            phase: .failed,
+                            nowMs: nowLoad,
+                            errorCode: "model_load_\(errorCode ?? "unknown")",
+                            defaults: defaults
+                        )
+                        self.pendingActivation = nil
+                        print("[Echolet-APP] BLOCKED(model_load_\(errorCode ?? "unknown"))")
+                        return
+                    }
+                    EcholetLaunch.writePhase(
+                        nonce: nonce,
+                        appEpoch: AppDelegate.sharedEpoch,
+                        phase: .modelLoaded,
+                        nowMs: nowLoad,
+                        defaults: defaults
+                    )
+                    print("[Echolet-APP] MODEL_LOAD(ok)")
+                    let effects = self.flowCoordinator.prepareWarmStandbyCapture()
+                    self.executeFlowEffects(effects, triggeringRequestId: nil, triggeringSessionId: nil, triggeringSequence: nil)
+                    self.scheduleActivationTimeout(nonce: nonce)
+                }
+            }
+        }
+    }
+
+    /// Bounded, honest prepare timeout: if the native recorder never reaches
+    /// a confirmed hardware-active state for this activation, publish a
+    /// failed phase (the keyboard surfaces it) and clear the context.
+    private func scheduleActivationTimeout(nonce: String) {
+        ipcQueue.asyncAfter(deadline: .now() + Self.activationPrepareTimeoutSeconds) { [weak self] in
+            guard let self = self, let defaults = self.sharedDefaults else { return }
+            guard let pending = self.pendingActivation, pending.nonce == nonce else { return }
+            self.pendingActivation = nil
+            EcholetLaunch.writePhase(
+                nonce: nonce,
+                appEpoch: AppDelegate.sharedEpoch,
+                phase: .failed,
+                nowMs: WarmIPCService.currentTimeMs(),
+                errorCode: "warm_prepare_timeout",
+                defaults: defaults
+            )
+            print("[Echolet-APP] BLOCKED(warm_prepare_timeout)")
+            self.notifyBlocked("Warm prepare timed out for keyboard activation (\(String(nonce.prefix(8)))…)")
         }
     }
 
@@ -411,6 +559,47 @@ public final class WarmIPCService {
                 }
 
             case .notifyWarmStandbyActive(let active):
+                // J5: native hardware truth change is written to the App
+                // Group warm-live record EXACTLY HERE, on ipcQueue (single
+                // writer), keyed to the current process epoch. Keyboard uses
+                // this as its "positively fresh active warm mic" authority.
+                if let defaults = self.sharedDefaults {
+                    _ = EcholetLaunch.writeWarmLive(
+                        appEpoch: AppDelegate.sharedEpoch,
+                        recorderActive: active,
+                        nowMs: WarmIPCService.currentTimeMs(),
+                        defaults: defaults
+                    )
+                }
+                if active, let pending = self.pendingActivation {
+                    // Native recorder observed running: publish proof
+                    // phases AFTER the truth, i.e. only now may the keyboard
+                    // consider the recorder READY.
+                    if let defaults = self.sharedDefaults {
+                        let nowWarm = WarmIPCService.currentTimeMs()
+                        EcholetLaunch.writePhase(
+                            nonce: pending.nonce,
+                            appEpoch: AppDelegate.sharedEpoch,
+                            phase: .micNativeReady,
+                            nowMs: nowWarm,
+                            defaults: defaults
+                        )
+                        EcholetLaunch.writePhase(
+                            nonce: pending.nonce,
+                            appEpoch: AppDelegate.sharedEpoch,
+                            phase: .warmReady,
+                            nowMs: nowWarm,
+                            defaults: defaults
+                        )
+                    }
+                    self.pendingActivation = nil
+                    print("[Echolet-APP] MIC_NATIVE_READY (nonce=\(String(pending.nonce.prefix(8)))…)")
+                    // Honest return attempt: iOS offers no public automatic
+                    // app<->keyboard return on this path; the user's system
+                    // "Back to previous app" UI remains the explicit route.
+                    print("[Echolet-APP] RETURN_ATTEMPT(auto_return_unsupported -> manual system return)")
+                    print("[Echolet-APP] RETURN_RESULT(manual): keyboard auto-STARTs once warm-live is fresh.")
+                }
                 DispatchQueue.main.async { [weak self] in
                     guard let self = self else { return }
                     self.delegate?.warmIPCService(self, didChangeWarmStandbyActive: active)

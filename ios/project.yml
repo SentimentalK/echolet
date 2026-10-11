@@ -25,6 +25,8 @@ targets:
       - path: protocol/CaptureLifecycleGate.swift
       - path: protocol/WarmCaptureFlow.swift
       - path: protocol/DeterministicResampler.swift
+      - path: protocol/EcholetLaunch.swift
+      - path: protocol/EcholetKeyboardSessionController.swift
       # J4-E2E: frozen local zh-en model folder bundled as a non-repo folder
       # resource (git-ignored). Never committed; only the exact frozen
       # bilingual-zh-en dir recognized by its model.json id marker.
@@ -61,6 +63,8 @@ targets:
       - path: Keyboard
       - path: protocol/EcholetIPC.swift
       - path: protocol/EcholetAdmission.swift
+      - path: protocol/EcholetLaunch.swift
+      - path: protocol/EcholetKeyboardSessionController.swift
     settings:
       PRODUCT_BUNDLE_IDENTIFIER: com.mainstayx.echolet.app.keyboard
       INFOPLIST_FILE: Keyboard/Info.plist

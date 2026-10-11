@@ -1,458 +1,265 @@
 import UIKit
 
-/// Echolet Custom Keyboard Input View Controller (Scaffold & Test Fixture).
+/// Echolet Voice Keyboard (J5 single-button).
 ///
-/// Complies with Apple custom keyboard requirements:
-/// - Provides `advanceToNextInputMode()` globe/next keyboard key.
-/// - Minimal status and user action buttons ("Start Test", "Stop / Cancel").
-/// - Explicitly labeled "DEMO / No Microphone".
-/// - Strictly gates mock transcript insertion using session correlation, app epoch,
-///   acknowledged sequence, monotonic revision, and editor-context validation.
-/// - Invalidates live session on textWillChange / textDidChange focus switches.
-/// - Fails closed if App Group entitlements are missing or unavailable.
+/// One prominent primary button for the entire flow:
+/// * Dark "Start Listening" while idle — tapping begins an exact-session
+///   v2 START when a genuinely warm recorder is already live, or (bounded,
+///   once per fresh appearance automatically / on every tap otherwise)
+///   attempts to foreground the Echolet containing app through the only
+///   public extension-safe open seam and shows neutral "Starting…" while
+///   the prepare handshake progresses.
+/// * Red "Stop Listening" exclusively AFTER a real `.listening` ACK for the
+///   current session; sends exact STOP (fresh requestId, sequence+1).
+/// * Neutral "Finalizing…" while waiting for the correlated final transcript
+///   which is then inserted into the editable host EXACTLY ONCE via
+///   `textDocumentProxy` (no manual Consume gesture in primary UX).
+/// * A required Apple globe/next-keyboard key.
+///
+/// All decision logic lives in the pure Foundation
+/// `EcholetKeyboardSessionController` (CLI-testable); this controller is the
+/// iOS wiring: App Group defaults, textDocumentProxy, extension open seam,
+/// bounded response polling. Strictly no microphone access here and no
+/// private/hidden APIs — if the OS refuses the automatic open, the UI says
+/// so honestly and the keyboard keeps working on the tap/manual path.
 class KeyboardViewController: UIInputViewController {
 
     static let appGroupId = "group.com.mainstayx.echolet.dev"
-    static let intentSequenceStorageKey = "echolet.keyboard.intent_sequence_counter"
 
-    // MARK: - Active Session State
-    private struct ActiveSession {
-        let epoch: String
-        let sessionId: String
-        let intentSequence: UInt64
-        var requestId: String
-        var sequence: UInt64
-        var lastAcceptedRevision: UInt64
-    }
-
-    private var activeSession: ActiveSession?
+    // MARK: - Core session controller + App Group store
     private var sharedDefaults: UserDefaults?
+    private var controller: EcholetKeyboardSessionController?
 
     // MARK: - UI Components
     private let statusLabel = UILabel()
-    private let disclaimerLabel = UILabel()
-    private let actionButton = UIButton(type: .system)
-    private let finishButton = UIButton(type: .system)
-    private let cancelButton = UIButton(type: .system)
+    private let primaryButton = UIButton(type: .custom)
+    private let hintLabel = UILabel()
     private let nextKeyboardButton = UIButton(type: .system)
-    private let pollResponseButton = UIButton(type: .system)
+    private let globeRow = UIStackView()
+
+    private var pollTimer: Timer?
+
+    // MARK: - Lifecycle
 
     override func viewDidLoad() {
         super.viewDidLoad()
         self.sharedDefaults = UserDefaults(suiteName: Self.appGroupId)
+        buildController()
         setupUI()
+    }
+
+    private func buildController() {
+        guard let defaults = sharedDefaults else {
+            controller = nil
+            return
+        }
+        let env = EcholetKeyboardSessionController.Environment(
+            defaults: defaults,
+            nowMs: { UInt64(Date().timeIntervalSince1970 * 1000) },
+            currentAppEpoch: { [weak defaults] in
+                defaults?.string(forKey: EcholetIPC.appEpochKey)
+            },
+            openHost: { [weak self] url in
+                self?.performHostOpenAttempt(url: url) ?? .failed(reason: "controller_unavailable")
+            },
+            insertText: { [weak self] text in
+                guard let self = self, !text.isEmpty else { return false }
+                self.textDocumentProxy.insertText(text)
+                return true
+            },
+            docFingerprint: { [weak self] in
+                (
+                    before: self?.textDocumentProxy.documentContextBeforeInput,
+                    after: self?.textDocumentProxy.documentContextAfterInput,
+                    selected: self?.textDocumentProxy.selectedText
+                )
+            },
+            log: { event in
+                // Compact DEBUG event log; never logs audio content.
+                print("[Echolet-KBD] \(event)")
+            }
+        )
+        controller = EcholetKeyboardSessionController(environment: env)
     }
 
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
-        updateStatusDisplay()
+        controller?.handleAppeared()
+        startPolling()
+        renderDisplay()
     }
 
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
-        // Invalidate active session on dismiss
-        invalidateSession(reason: "Keyboard dismissed")
+        stopPolling()
+        controller?.handleDisappeared()
+        renderDisplay()
     }
 
     override func textWillChange(_ textInput: UITextInput?) {
         super.textWillChange(textInput)
-        // Focus or selection change: invalidate active session to avoid writing to wrong editor target
-        if activeSession != nil {
-            invalidateSession(reason: "Editor target focus changed")
-        }
+        // Focus switch handling (fail closed on REAL editor changes; keeps
+        // valid sessions through our own insertion churn).
+        controller?.noteTextWillChange()
+        renderDisplay()
     }
 
     override func textDidChange(_ textInput: UITextInput?) {
         super.textDidChange(textInput)
-        updateStatusDisplay()
+        renderDisplay()
+    }
+
+    // MARK: - Public extension open seam (only public API surface)
+
+    private func performHostOpenAttempt(url: URL) -> EcholetKeyboardSessionController.OpenAttemptResult {
+        guard let context = extensionContext else {
+            return .unsupported(reason: "no_extension_context")
+        }
+        guard context.responds(to: NSSelectorFromString("openURL:completionHandler:")) else {
+            return .unsupported(reason: "no_public_open_api")
+        }
+        context.open(url) { [weak self] success in
+            DispatchQueue.main.async {
+                self?.controller?.handleOpenCompletion(success: success, reason: success ? nil : "ext_open_rejected")
+            }
+        }
+        return .initiated
     }
 
     // MARK: - UI Setup
+
     private func setupUI() {
-        view.backgroundColor = .secondarySystemBackground
+        view.backgroundColor = .systemGray5
 
         let mainStack = UIStackView()
         mainStack.translatesAutoresizingMaskIntoConstraints = false
         mainStack.axis = .vertical
         mainStack.alignment = .center
-        mainStack.spacing = 8
+        mainStack.spacing = 6
         view.addSubview(mainStack)
 
         NSLayoutConstraint.activate([
-            mainStack.topAnchor.constraint(equalTo: view.topAnchor, constant: 10),
-            mainStack.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 12),
-            mainStack.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -12),
-            mainStack.bottomAnchor.constraint(lessThanOrEqualTo: view.bottomAnchor, constant: -10)
+            mainStack.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 6),
+            mainStack.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 10),
+            mainStack.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -10),
+            mainStack.bottomAnchor.constraint(lessThanOrEqualTo: view.bottomAnchor, constant: -6)
         ])
 
-        // Status Label
-        statusLabel.font = .systemFont(ofSize: 13, weight: .medium)
+        // Status
+        statusLabel.font = .systemFont(ofSize: 12, weight: .medium)
         statusLabel.textColor = .label
         statusLabel.textAlignment = .center
         statusLabel.numberOfLines = 2
         mainStack.addArrangedSubview(statusLabel)
 
-        // Disclaimer
-        disclaimerLabel.font = .systemFont(ofSize: 11)
-        disclaimerLabel.textColor = .secondaryLabel
-        disclaimerLabel.textAlignment = .center
-        disclaimerLabel.text = "Echolet Voice Keyboard Demo • No Microphone Recording"
-        mainStack.addArrangedSubview(disclaimerLabel)
+        // ONE prominent primary button
+        primaryButton.titleLabel?.font = .boldSystemFont(ofSize: 17)
+        primaryButton.setTitleColor(.white, for: .normal)
+        primaryButton.layer.cornerRadius = 10
+        primaryButton.translatesAutoresizingMaskIntoConstraints = false
+        primaryButton.addTarget(self, action: #selector(didTapPrimary), for: .touchUpInside)
+        mainStack.addArrangedSubview(primaryButton)
+        primaryButton.widthAnchor.constraint(equalTo: mainStack.widthAnchor).isActive = true
+        primaryButton.heightAnchor.constraint(equalToConstant: 46).isActive = true
 
-        // Top Button Row: Action Buttons
-        let actionRow = UIStackView()
-        actionRow.axis = .horizontal
-        actionRow.spacing = 12
-        actionRow.distribution = .fillEqually
+        // Compact honest hint: manual fallback instruction + privacy note
+        hintLabel.font = .systemFont(ofSize: 10)
+        hintLabel.textColor = .secondaryLabel
+        hintLabel.textAlignment = .center
+        hintLabel.numberOfLines = 2
+        hintLabel.text = "Audio runs inside the Echolet app only. If auto-return is blocked, open Echolet, then switch back to this app."
+        mainStack.addArrangedSubview(hintLabel)
 
-        actionButton.setTitle("Start", for: .normal)
-        actionButton.titleLabel?.font = .boldSystemFont(ofSize: 14)
-        actionButton.backgroundColor = .systemBlue
-        actionButton.setTitleColor(.white, for: .normal)
-        actionButton.layer.cornerRadius = 8
-        actionButton.contentEdgeInsets = UIEdgeInsets(top: 8, left: 16, bottom: 8, right: 16)
-        actionButton.addTarget(self, action: #selector(didTapActionButton), for: .touchUpInside)
-        actionRow.addArrangedSubview(actionButton)
+        // Apple-required globe / next keyboard affordance
+        globeRow.axis = .horizontal
+        globeRow.spacing = 12
+        globeRow.alignment = .leading
 
-        // J4-E2E explicit Finish/Commit: NEVER reuse Stop-as-finish via
-        // Cancel. Finish allocates a fresh intent, sends STOP with the SAME
-        // sessionId, sequence+1, a NEW requestId, and keeps the local session
-        // alive (expected ACK identity updated to the STOP) until the final
-        // real transcript arrives via Consume Response.
-        finishButton.setTitle("Finish", for: .normal)
-        finishButton.titleLabel?.font = .systemFont(ofSize: 14)
-        finishButton.backgroundColor = .systemGreen
-        finishButton.setTitleColor(.white, for: .normal)
-        finishButton.layer.cornerRadius = 8
-        finishButton.contentEdgeInsets = UIEdgeInsets(top: 8, left: 16, bottom: 8, right: 16)
-        finishButton.addTarget(self, action: #selector(didTapFinishButton), for: .touchUpInside)
-        finishButton.isEnabled = false
-        actionRow.addArrangedSubview(finishButton)
-
-        cancelButton.setTitle("Stop / Cancel", for: .normal)
-        cancelButton.titleLabel?.font = .systemFont(ofSize: 14)
-        cancelButton.backgroundColor = .systemGray4
-        cancelButton.setTitleColor(.label, for: .normal)
-        cancelButton.layer.cornerRadius = 8
-        cancelButton.contentEdgeInsets = UIEdgeInsets(top: 8, left: 16, bottom: 8, right: 16)
-        cancelButton.addTarget(self, action: #selector(didTapCancelButton), for: .touchUpInside)
-        actionRow.addArrangedSubview(cancelButton)
-
-        pollResponseButton.setTitle("Consume Response", for: .normal)
-        pollResponseButton.titleLabel?.font = .systemFont(ofSize: 13)
-        pollResponseButton.backgroundColor = .systemGray5
-        pollResponseButton.setTitleColor(.label, for: .normal)
-        pollResponseButton.layer.cornerRadius = 8
-        pollResponseButton.contentEdgeInsets = UIEdgeInsets(top: 8, left: 12, bottom: 8, right: 12)
-        pollResponseButton.addTarget(self, action: #selector(didTapConsumeResponse), for: .touchUpInside)
-        actionRow.addArrangedSubview(pollResponseButton)
-
-        mainStack.addArrangedSubview(actionRow)
-
-        // Bottom Row: Globe / Next Keyboard Button (Apple HIG Requirement)
-        let bottomRow = UIStackView()
-        bottomRow.axis = .horizontal
-        bottomRow.spacing = 12
-        bottomRow.alignment = .leading
-
-        nextKeyboardButton.setTitle("🌐 Next Keyboard", for: .normal)
-        nextKeyboardButton.titleLabel?.font = .systemFont(ofSize: 13)
+        nextKeyboardButton.setTitle("🌐", for: .normal)
         nextKeyboardButton.setTitleColor(.secondaryLabel, for: .normal)
+        nextKeyboardButton.setContentHuggingPriority(.required, for: .horizontal)
         nextKeyboardButton.addTarget(self, action: #selector(handleInputModeList(from:with:)), for: .allTouchEvents)
-        bottomRow.addArrangedSubview(nextKeyboardButton)
+        globeRow.addArrangedSubview(nextKeyboardButton)
 
-        mainStack.addArrangedSubview(bottomRow)
+        mainStack.addArrangedSubview(globeRow)
 
-        updateStatusDisplay()
+        renderDisplay()
     }
 
-    private func updateStatusDisplay() {
-        guard let defaults = sharedDefaults else {
+    // MARK: - Rendering (truthful, derived from controller state)
+
+    private func renderDisplay() {
+        guard let controller = controller else {
             statusLabel.text = "App Group Unavailable: Entitlement Missing"
-            actionButton.isEnabled = false
-            finishButton.isEnabled = false
-            pollResponseButton.isEnabled = false
+            primaryButton.isEnabled = false
+            primaryButton.setTitle("Start Listening", for: .normal)
+            primaryButton.setTitleColor(UIColor(white: 1.0, alpha: 0.4), for: .normal)
+            primaryButton.backgroundColor = UIColor(white: 0.2, alpha: 1.0)
             return
         }
 
-        guard let appEpoch = defaults.string(forKey: EcholetIPC.appEpochKey), !appEpoch.isEmpty else {
-            statusLabel.text = "App Not Ready: Open Containing App Once to Set Epoch"
-            actionButton.isEnabled = false
-            finishButton.isEnabled = false
-            pollResponseButton.isEnabled = false
-            return
-        }
-
-        if let active = activeSession {
-            statusLabel.text = "Session Active (\(active.sessionId.prefix(8))...)\nSpeak, then tap Finish; next tap Consume Response"
-            actionButton.isEnabled = false
-            finishButton.isEnabled = true
-            pollResponseButton.isEnabled = true
+        primaryButton.setEnabled(interactive: controller.isPrimaryButtonInteractive)
+        primaryButton.setTitle(controller.primaryButtonLabel, for: .normal)
+        if controller.shouldShowRedStopButton {
+            primaryButton.backgroundColor = .systemRed
+        } else if controller.isPrimaryButtonInteractive {
+            primaryButton.backgroundColor = UIColor(white: 0.15, alpha: 1.0) // dark Start
         } else {
-            statusLabel.text = "Ready (Epoch: \(appEpoch.prefix(8))...)"
-            actionButton.isEnabled = true
-            finishButton.isEnabled = false
-            pollResponseButton.isEnabled = false
+            primaryButton.backgroundColor = .systemGray3
+        }
+
+        statusLabel.numberOfLines = 2
+        switch controller.phase {
+        case .ready:
+            if let unsupported = controller.autoLaunchUnsupportedReason {
+                statusLabel.text = "Ready. (Auto-launch note: \(shortUnsupported(unsupported)). Tap to open Echolet; return via App Switcher if blocked.)"
+            } else {
+                statusLabel.text = "Tap the button to start."
+            }
+        case .opening:
+            statusLabel.text = "Starting… opening Echolet app…"
+        case .starting:
+            statusLabel.text = "Starting… Echolet is arming the offline model + mic."
+        case .listening:
+            statusLabel.text = "Listening… speak now, then tap Stop."
+        case .finalizing:
+            statusLabel.text = "Finalizing…"
+        case .blocked(let reason):
+            statusLabel.text = "Blocked: \(reason)"
         }
     }
 
-    // MARK: - J4-E2E Finish / Commit (explicit STOP intent with tracked ACK)
-    @objc private func didTapFinishButton() {
-        guard let active = activeSession, let defaults = sharedDefaults else {
-            statusLabel.text = "No active session to finish."
-            return
-        }
-
-        guard let nextIntentSeq = reserveNextIntentSequence(in: defaults) else {
-            statusLabel.text = "Error: intent sequence counter overflowed. Fail closed."
-            return
-        }
-
-        let stopRequestId = UUID().uuidString
-        let stopSequence = active.sequence + 1
-        do {
-            let stopRequest = try EcholetIPC.KeyboardRequest(
-                appEpoch: active.epoch,
-                intentSequence: nextIntentSeq,
-                sessionId: active.sessionId,
-                sequence: stopSequence,
-                requestId: stopRequestId,
-                command: .stop,
-                clientTimestampMs: UInt64(Date().timeIntervalSince1970 * 1000)
-            )
-            let data = try EcholetIPC.makeEncoder().encode(stopRequest)
-            defaults.set(data, forKey: EcholetIPC.keyboardRequestKey)
-            defaults.synchronize()
-
-            let notificationName = CFNotificationName(EcholetIPC.darwinNotificationRequest as CFString)
-            CFNotificationCenterPostNotification(
-                CFNotificationCenterGetDarwinNotifyCenter(),
-                notificationName,
-                nil,
-                nil,
-                true
-            )
-
-            // Keep the local session ALIVE but update the expected correlated
-            // ACK identity to this Finish STOP (requestId + sequence). The
-            // session is closed ONLY after the final transcript is consumed.
-            activeSession?.requestId = stopRequestId
-            activeSession?.sequence = stopSequence
-            updateStatusDisplay()
-            statusLabel.text = "Finalized (?) — waiting for App transcript (Consume Response)..."
-        } catch {
-            statusLabel.text = "Failed to create stop request: \(error.localizedDescription)"
-        }
+    private func shortUnsupported(_ reason: String) -> String {
+        reason.count > 48 ? String(reason.prefix(48)) + "…" : reason
     }
 
     // MARK: - Actions
-    @objc private func didTapActionButton() {
-        guard let defaults = sharedDefaults else {
-            statusLabel.text = "Error: App Group defaults unavailable"
-            return
-        }
 
-        guard let currentEpoch = defaults.string(forKey: EcholetIPC.appEpochKey), !currentEpoch.isEmpty else {
-            statusLabel.text = "Error: App epoch not published. Open containing app first."
-            return
-        }
+    @objc private func didTapPrimary() {
+        controller?.handlePrimaryButtonTap()
+        renderDisplay()
+    }
 
-        let newSessionId = UUID().uuidString
-        let newRequestId = UUID().uuidString
-        guard let nextIntentSeq = reserveNextIntentSequence(in: defaults) else {
-            statusLabel.text = "Error: Intent sequence counter overflowed. Fail closed."
-            return
-        }
+    // MARK: - Bounded response polling while visible
 
-        do {
-            let request = try EcholetIPC.KeyboardRequest(
-                appEpoch: currentEpoch,
-                intentSequence: nextIntentSeq,
-                sessionId: newSessionId,
-                sequence: 1,
-                requestId: newRequestId,
-                command: .start,
-                clientTimestampMs: UInt64(Date().timeIntervalSince1970 * 1000)
-            )
-
-            let encoder = EcholetIPC.makeEncoder()
-            let data = try encoder.encode(request)
-            defaults.set(data, forKey: EcholetIPC.keyboardRequestKey)
-            defaults.synchronize()
-
-            // Post Darwin hint
-            let notificationName = CFNotificationName(EcholetIPC.darwinNotificationRequest as CFString)
-            CFNotificationCenterPostNotification(
-                CFNotificationCenterGetDarwinNotifyCenter(),
-                notificationName,
-                nil,
-                nil,
-                true
-            )
-
-            self.activeSession = ActiveSession(
-                epoch: currentEpoch,
-                sessionId: newSessionId,
-                intentSequence: nextIntentSeq,
-                requestId: newRequestId,
-                sequence: 1,
-                lastAcceptedRevision: 0
-            )
-
-            updateStatusDisplay()
-        } catch {
-            statusLabel.text = "Failed to create start request: \(error.localizedDescription)"
+    private func startPolling() {
+        stopPolling()
+        pollTimer = Timer.scheduledTimer(withTimeInterval: 0.3, repeats: true) { [weak self] _ in
+            guard let self = self else { return }
+            self.controller?.handleTimerTick()
+            self.renderDisplay()
         }
     }
 
-    @objc private func didTapCancelButton() {
-        invalidateSession(reason: "User cancelled")
+    private func stopPolling() {
+        pollTimer?.invalidate()
+        pollTimer = nil
     }
+}
 
-    @objc private func didTapConsumeResponse() {
-        consumePendingResponse()
-    }
-
-    // MARK: - Monotonic Intent Counter Allocation
-    private func reserveNextIntentSequence(in defaults: UserDefaults) -> UInt64? {
-        // App Group single-writer sequence strategy for keyboard.
-        // NOTE: Standard UserDefaults does not provide atomic compare-and-swap across separate
-        // processes or extension instances. Future production builds should use POSIX flock,
-        // file coordination, or an IPC coordinator daemon for strict cross-instance serialization.
-        let current = defaults.object(forKey: Self.intentSequenceStorageKey) as? UInt64 ?? 0
-        guard current < UInt64.max else {
-            // Fail-closed on monotonic counter overflow
-            return nil
-        }
-        let next = current + 1
-        defaults.set(next, forKey: Self.intentSequenceStorageKey)
-        defaults.synchronize()
-        return next
-    }
-
-    // MARK: - IPC Response Consumption & Guarded Text Insertion
-    private func consumePendingResponse() {
-        guard let active = activeSession else {
-            statusLabel.text = "No active session to consume response for."
-            return
-        }
-
-        guard let defaults = sharedDefaults else {
-            statusLabel.text = "App Group unavailable."
-            return
-        }
-
-        guard let responseData = defaults.data(forKey: EcholetIPC.appResponseKey) else {
-            statusLabel.text = "No response written in App Group yet."
-            return
-        }
-
-        do {
-            let decoder = EcholetIPC.makeDecoder()
-            let response = try decoder.decode(EcholetIPC.AppResponse.self, from: responseData)
-            try response.validate()
-
-            // Strict Safety Gate:
-            // 1. Epoch must match active session epoch
-            guard response.appEpoch == active.epoch else {
-                statusLabel.text = "Ignored: Response app_epoch mismatch"
-                return
-            }
-
-            // 2. Session ID must match active session
-            guard response.sessionId == active.sessionId else {
-                statusLabel.text = "Ignored: Response session_id mismatch"
-                return
-            }
-
-            // 3. Acknowledged Request ID and Sequence must correlate
-            guard response.acknowledgedRequestId == active.requestId,
-                  response.acknowledgedSequence == active.sequence else {
-                statusLabel.text = "Ignored: Response ack mismatch (req: \(response.acknowledgedRequestId))"
-                return
-            }
-
-            // 4. Monotonic Revision check: strictly greater than last accepted
-            guard response.revision > active.lastAcceptedRevision else {
-                statusLabel.text = "Ignored: Stale revision \(response.revision) <= \(active.lastAcceptedRevision)"
-                return
-            }
-
-            // 5. Text insertion into visible editor target
-            // NOTE: In this debug mock harness, recognizedText represents the complete final transcript.
-            // If response state is listening or blocked without recognizedText (J3A audio probe),
-            // update status display honestly without inserting fabricated text.
-            if response.isFinal {
-                if let textToInsert = response.recognizedText, !textToInsert.isEmpty {
-                    textDocumentProxy.insertText(textToInsert)
-                    statusLabel.text = "Inserted final text (rev \(response.revision)): \(textToInsert.prefix(20))..."
-                } else if response.state == .blocked {
-                    statusLabel.text = "Mic blocked (code: \(response.errorCode ?? "unknown")). Open Echolet."
-                } else {
-                    statusLabel.text = "Session complete (rev \(response.revision), state: \(response.state.rawValue))"
-                }
-                self.activeSession = nil
-                updateStatusDisplay()
-            } else {
-                // Non-final intermediate revision: record watermark without duplicate full insertion
-                self.activeSession?.lastAcceptedRevision = response.revision
-                if response.state == .preparing {
-                    statusLabel.text = "Mic PREPARING on iPad (rev \(response.revision))..."
-                } else if response.state == .listening {
-                    statusLabel.text = "Mic ACTIVE on iPad (rev \(response.revision))\nListening..."
-                } else if response.state == .blocked {
-                    statusLabel.text = "Mic BLOCKED: Open Echolet to arm test"
-                } else {
-                    statusLabel.text = "Received intermediate rev \(response.revision) (state: \(response.state.rawValue))"
-                }
-            }
-
-        } catch {
-            statusLabel.text = "Failed to decode response: \(error.localizedDescription)"
-        }
-    }
-
-    private func invalidateSession(reason: String) {
-        guard let active = activeSession else {
-            statusLabel.text = "Session invalidated: \(reason)"
-            updateStatusDisplay()
-            return
-        }
-
-        // Close local active session FIRST to prevent any concurrent text insertion
-        self.activeSession = nil
-        statusLabel.text = "Session invalidated: \(reason)"
-        updateStatusDisplay()
-
-        // Best-effort cancel notification write into App Group
-        guard let defaults = sharedDefaults,
-              let nextIntentSeq = reserveNextIntentSequence(in: defaults) else {
-            return
-        }
-
-        let cancelRequestId = UUID().uuidString
-        if let cancelReq = try? EcholetIPC.KeyboardRequest(
-            appEpoch: active.epoch,
-            intentSequence: nextIntentSeq,
-            sessionId: active.sessionId,
-            sequence: active.sequence + 1,
-            requestId: cancelRequestId,
-            command: .cancel,
-            clientTimestampMs: UInt64(Date().timeIntervalSince1970 * 1000)
-        ) {
-            if let data = try? EcholetIPC.makeEncoder().encode(cancelReq) {
-                defaults.set(data, forKey: EcholetIPC.keyboardRequestKey)
-                defaults.synchronize()
-
-                let notificationName = CFNotificationName(EcholetIPC.darwinNotificationRequest as CFString)
-                CFNotificationCenterPostNotification(
-                    CFNotificationCenterGetDarwinNotifyCenter(),
-                    notificationName,
-                    nil,
-                    nil,
-                    true
-                )
-            }
-        }
+private extension UIButton {
+    func setEnabled(interactive: Bool) {
+        self.isEnabled = interactive
+        self.titleLabel?.alpha = interactive ? 1.0 : 0.55
     }
 }

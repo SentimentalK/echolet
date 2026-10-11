@@ -140,12 +140,16 @@ class AppStatusViewController: UIViewController, AudioCaptureDelegate, WarmIPCSe
            - Tap "Start Audio Test" to capture real PCM frames from iPad mic.
            - Speak into iPad: watch RMS level and frame count advance in real time.
            - Tap "Stop Audio Test": microphone releases cleanly and frame count stops.
-        4. In-App Contained Test Flow:
-           - Tap the text editor box below so the keyboard appears.
-           - Switch to Echolet keyboard using the Globe (🌐) key.
-           - Tap "Start Test" on the Echolet keyboard.
-           - Tap "DEBUG: Send Mock Transcription" below.
-           - Tap "Consume Response" on the Echolet keyboard to insert mock text into the editor.
+        4. J5 Single-Button Keyboard Flow (primary path):
+           - Tap "Prepare Warm Dictation" (or let the keyboard open the app automatically).
+           - Tap the in-app editor below, switch to the Echolet keyboard via Globe.
+           - The keyboard shows ONE button: dark "Start Listening", red "Stop Listening"
+             only after the real mic/ASR ACK, then the recognized transcript is
+             inserted once automatically (no Finish/Consume taps).
+           - When Echolet auto-prepares for the keyboard, iOS shows no public
+             automatic return; use the system Back/App Switcher to return to the
+             host app — the keyboard sends START itself once the warm mic is live.
+           - DEBUG diagnostics (Keep for IPC regression): "DEBUG: Send Mock Transcription".
         """
         stackView.addArrangedSubview(instructionsLabel)
 
@@ -835,7 +839,7 @@ extension AppStatusViewController: EcholetAsrService.Delegate {
 extension AppStatusViewController {
     func warmIPCService(_ service: WarmIPCService, didChangeWarmStandbyActive active: Bool) {
         if active {
-            appendLiveStatusLine("WARM: warm dictation recording ACTIVE (foreground prepared). Switch to Notes now.")
+            appendLiveStatusLine("WARM: warm dictation recording ACTIVE (foreground prepared). iOS has no public automatic return — use the system Back/App Switcher to return to your host app; the keyboard sends START itself once the warm-live record is fresh.")
             disarmWarmButton.isEnabled = true
             prepareWarmButton.isEnabled = false
         } else {

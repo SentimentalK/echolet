@@ -13,6 +13,18 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         window.rootViewController = AppStatusViewController()
         self.window = window
         window.makeKeyAndVisible()
+
+        // Cold launch through the echolet:// deep link: the URL contexts
+        // arrive with the scene connection options.
+        for context in connectionOptions.urlContexts {
+            WarmIPCService.shared.handleDictationActivationURL(context.url, source: "cold_launch")
+        }
+    }
+
+    func scene(_ scene: UIScene, openURLContexts URLContexts: Set<UIOpenURLContext>) {
+        for context in URLContexts {
+            WarmIPCService.shared.handleDictationActivationURL(context.url, source: "openURLContexts")
+        }
     }
 
     func sceneWillEnterForeground(_ scene: UIScene) {
