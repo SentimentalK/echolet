@@ -138,7 +138,7 @@ and verified at link/bundle level; product keyboard ASR remains future work.
 | FULL_DICTATION_E2E (keyboard insertion) | BLOCKED (future work) |
 
 On-device probe output (real recognizer, official sherpa test wav `0.wav`,
-8.0 minutes of encoder-480ms streaming decode context; no personal audio):
+10.05 s of 16 kHz speech (160850 samples); no personal audio):
 `ECHOLET_IOS_PROBE_BEGIN / version=echolet-ios-probe 0.1.0 /
 recognizer_create_invalid_path=NULL_OK / real_model=LOADED /
 feed_samples_approved=160850/160850 / read_rc=68 /
@@ -154,3 +154,64 @@ cd ios/probe && xcodegen generate && xcodebuild -project EcholetNativeProbe.xcod
 xcrun devicectl device install app --device <UUID> <DerivedData>/…/EcholetNativeProbe.app
 ```
 Note: no CI pipeline exists for iOS artifacts; nothing runs automatically.
+
+### 2026-10-10 J4A 决策附录（decision appendix, J4A evidence pack）
+
+实测环境（decision-relevant toolchain facts, all measured）:
+- Host: Intel Mac, macOS 14.6.1, Xcode 16.2 (16C5032a), iPhoneOS SDK 18.2.
+- Rust: rustc 1.99.0 (b940084d 2026-09-28), cargo 1.99.0,
+  `aarch64-apple-ios` target installed. Note: rustc's LLVM 23 emits objects
+  newer than the Xcode 16.2 toolchain's `nm` understands (harmless
+  "Unknown attribute kind" banners both during probe and desktop builds).
+- Device: iPad mini 6 (iPad14,1, iPadOS 18.7.7), reachable via
+  `xcrun devicectl`, signed with team 668LTD8W55 (Apple Dev
+  kevxu.cad@gmail.com, RJ3C3F7JFM, is the valid codesign identity; the
+  free-team iOS Team Provisioning Profiles for `com.mainstayx.echolet.app{,.test,…}`
+  expire 2026-10-17 — 7-day renewal churn applies to all sideload builds).
+
+Pinned native distribution (channel = official prebuilt artifacts, no build
+from source needed):
+- sherpa-onnx source pin `1cb484af5e69d3c7803c1eb0b3b5ab8041e0e911`
+  (= root repo's Android pin, v1.13.6), binary via the upstream
+  iOS **static xcframework** (`sherpa-onnx-v1.13.6-ios-static.xcframework.zip`,
+  sha256 `0b8c880357e653af18c5f9c6e8b3c045e85b98403c00ff25692a1261d31aa332`,
+  published under the `xcframework` release tag and wired into the pinned
+  source's own Package.swift — this is upstream's supported iOS channel).
+  Device slice `ios-arm64` = static `ar` archive, 20 MB, all required
+  `SherpaOnnx*` C-API symbols verified present; simulator slice also ships.
+- onnxruntime-libs **v1.27.1** iOS static xcframework
+  (sha256 `985deaff345c7bcfbe4979b2daeec09d7a745b1e9cb73f37f4077364eb578e62`),
+  42 MB ar archive, `MinimumOSVersion 15.1` — **note: while our deployment
+  target is iOS 15.0, ORT requires ≥15.1**; raise the app target when
+  productizing. Also includes `_OrtSessionOptionsAppendExecutionProvider_CoreML`
+  (CoreML EP available for later speed/latency experiments; current manifest
+  pins `provider=cpu`).
+- Model: `echolet-xasr-zh-en-480ms-689ff18c…` (X-ASR zh-en upstream r1,
+  Apache-2.0, sha-verified; encoder 593 MB, dir 586 MB); licenses already in
+  `licenses/` (sherpa-onnx MIT, onnxruntime, openmdw). Apache-2.0 etc. are
+  attribution-compatible with the existing repo conventions.
+
+Sizes/implications measured on device build:
+- Final probe .app including model: 627 MB; framework statics total ≈103 MB
+  (linker dead-strips unused, incl. desktop-ish code inside the 41 MB
+  bridge archive — release `opt-level`/`panic=abort` tuning is available).
+- iPad mini 6 has 4 GB RAM; a 593 MB float32 encoder for ASR + core
+  viability (startup latency/thermal) is **unmeasured** — quantized/FP16
+  variants of the X-ASR model were NOT attempted (would be a new frozen
+  acquisition, outside J4A's no-new-model-download scope).
+
+Open decisions the coordinator/user still needs to make (next gate):
+1. **Model delivery channel for product**: bundle vs first-run on-demand
+   install (repo already has a frozen-lock local installer pattern,
+   `scripts/acquire-base-model.sh` + manifest sha validation) — probe proved
+   recognition works from a bundle-folder reference; delivery UX is open.
+2. **CoreML EP experiment** (`provider=cpu` → `coreml`) for latency on
+   iPad: API is present, zero code exists; measure before promising speed.
+3. **J4B mic wiring**: AVAudioEngine tap → `echolet_ios_stream_feed/read`
+   streaming loop → WarmIPC partial/final → keyboard insertion; iOS forbids
+   mic in the keyboard extension, so the App stays the audio owner. The
+   shipped bridge API (feed/read/create/destroy, NULL+bounds checked,
+   panic-guarded) was designed for exactly this call pattern.
+4. **Signing/persistence**: free team profile expiry (2026-10-17) affects
+   any long-lived sideload install; paid Developer Program or profile
+   refresh cadence is a user/product choice, unchanged by this probe.
