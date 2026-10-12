@@ -64,10 +64,15 @@ class AppStatusViewController: UIViewController, AudioCaptureDelegate, WarmIPCSe
     private var liveAsrSessionId: String?
     private var asrFinalTranscriptsShownCount = 0
 
+    private let navSectionLabel = UILabel()
+    private let returnHintLabel = UILabel()
+    private let auditNavButton = UIButton(type: .system)
+
     override func viewDidLoad() {
         super.viewDidLoad()
         setupUI()
         setupAsrUI()
+        setupNavUI()
         initializeIPC()
         AudioCaptureController.shared.delegate = self
         WarmIPCService.shared.delegate = self
@@ -115,6 +120,16 @@ class AppStatusViewController: UIViewController, AudioCaptureDelegate, WarmIPCSe
         titleLabel.font = .boldSystemFont(ofSize: 22)
         titleLabel.numberOfLines = 0
         stackView.addArrangedSubview(titleLabel)
+
+        returnHintLabel.numberOfLines = 0
+        returnHintLabel.textAlignment = .center
+        returnHintLabel.font = .boldSystemFont(ofSize: 18)
+        returnHintLabel.textColor = .label
+        returnHintLabel.backgroundColor = UIColor.systemYellow.withAlphaComponent(0.35)
+        returnHintLabel.layer.cornerRadius = 8
+        returnHintLabel.clipsToBounds = true
+        returnHintLabel.isHidden = true
+        stackView.addArrangedSubview(returnHintLabel)
 
         // Epoch
         epochStatusLabel.numberOfLines = 0
@@ -610,6 +625,120 @@ class AppStatusViewController: UIViewController, AudioCaptureDelegate, WarmIPCSe
         stackView.addArrangedSubview(wavRegressionButton)
     }
 
+    private func setupNavUI() {
+        navSectionLabel.text = "Return experiments — one open each, then stay if it does not leave Echolet"
+        navSectionLabel.font = .boldSystemFont(ofSize: 15)
+        navSectionLabel.textAlignment = .center
+        navSectionLabel.numberOfLines = 0
+
+        auditNavButton.setTitle("Audit Runtime Navigation APIs", for: .normal)
+        auditNavButton.titleLabel?.font = .boldSystemFont(ofSize: 13)
+        auditNavButton.backgroundColor = .systemGray
+        auditNavButton.setTitleColor(.white, for: .normal)
+        auditNavButton.layer.cornerRadius = 8
+        auditNavButton.addTarget(self, action: #selector(didTapAuditNav), for: .touchUpInside)
+
+        stackView.addArrangedSubview(navSectionLabel)
+        stackView.addArrangedSubview(auditNavButton)
+
+        for host in EcholetLaunch.knownReturnHosts {
+            stackView.addArrangedSubview(returnTestButton(
+                title: "\(host.name) bundle id",
+                color: .systemBlue
+            ) { [weak self] in
+                self?.appendLiveStatusLine("NAV-TEST: bundle \(host.bundleId)")
+                WarmIPCService.shared.debugReturnByBundleId(host.bundleId)
+            })
+            stackView.addArrangedSubview(returnTestButton(
+                title: "\(host.name) URL \(host.urlScheme)://",
+                color: .systemOrange
+            ) { [weak self] in
+                self?.appendLiveStatusLine("NAV-TEST: url \(host.urlScheme)://")
+                WarmIPCService.shared.debugReturnByURL(bundleId: host.bundleId)
+            })
+        }
+    }
+
+    private func returnTestButton(title: String, color: UIColor, action: @escaping () -> Void) -> UIButton {
+        let button = UIButton(type: .system)
+        button.setTitle(title, for: .normal)
+        button.titleLabel?.font = .boldSystemFont(ofSize: 13)
+        button.titleLabel?.numberOfLines = 2
+        button.titleLabel?.textAlignment = .center
+        button.backgroundColor = color
+        button.setTitleColor(.white, for: .normal)
+        button.layer.cornerRadius = 8
+        button.heightAnchor.constraint(greaterThanOrEqualToConstant: 40).isActive = true
+        button.addAction(UIAction { _ in action() }, for: .touchUpInside)
+        return button
+    }
+
+    @objc private func didTapAuditNav() {
+        auditReturnNavigationAPIs()
+    }
+
+    private func auditReturnNavigationAPIs() {
+        print("[DIAG-NAV] ========== AUDIT RETURN NAVIGATION APIS ==========")
+
+        // 1. LSApplicationWorkspace introspection
+        if let wsCls = NSClassFromString("LSApplicationWorkspace") as? NSObject.Type {
+            print("[DIAG-NAV] LSApplicationWorkspace class FOUND")
+            let defSel = NSSelectorFromString("defaultWorkspace")
+            if wsCls.responds(to: defSel), let ws = wsCls.perform(defSel)?.takeUnretainedValue() as? NSObject {
+                print("[DIAG-NAV] defaultWorkspace instance ACQUIRED: \(type(of: ws))")
+                var count: UInt32 = 0
+                if let methods = class_copyMethodList(type(of: ws), &count) {
+                    var openMethods: [String] = []
+                    for i in 0..<Int(count) {
+                        let name = NSStringFromSelector(method_getName(methods[i]))
+                        if name.lowercased().contains("open") || name.lowercased().contains("application") {
+                            openMethods.append(name)
+                        }
+                    }
+                    free(methods)
+                    print("[DIAG-NAV] LSApplicationWorkspace open/application methods (\(openMethods.count)): \(openMethods.joined(separator: ", "))")
+                }
+            } else {
+                print("[DIAG-NAV] defaultWorkspace returns nil")
+            }
+        } else {
+            print("[DIAG-NAV] LSApplicationWorkspace class NOT FOUND")
+        }
+
+        // 2. Priority C: UIApplication & breadcrumb / return introspection
+        let app = UIApplication.shared
+        var appMethodCount: UInt32 = 0
+        if let methods = class_copyMethodList(type(of: app), &appMethodCount) {
+            var navMethods: [String] = []
+            for i in 0..<Int(appMethodCount) {
+                let name = NSStringFromSelector(method_getName(methods[i]))
+                let lower = name.lowercased()
+                if lower.contains("breadcrumb") || lower.contains("backto") || lower.contains("previousapp") || lower.contains("return") {
+                    navMethods.append(name)
+                }
+            }
+            free(methods)
+            print("[DIAG-NAV] UIApplication breadcrumb/nav methods (\(navMethods.count)): \(navMethods.joined(separator: ", "))")
+        }
+
+        // 3. Scan all runtime classes for Breadcrumb
+        let numClasses = objc_getClassList(nil, 0)
+        let classes = UnsafeMutablePointer<AnyClass?>.allocate(capacity: Int(numClasses))
+        let realNum = objc_getClassList(AutoreleasingUnsafeMutablePointer(classes), numClasses)
+        var breadcrumbClasses: [String] = []
+        for i in 0..<Int(realNum) {
+            if let cls = classes[i] {
+                let name = NSStringFromClass(cls)
+                if name.localizedCaseInsensitiveContains("breadcrumb") {
+                    breadcrumbClasses.append(name)
+                }
+            }
+        }
+        classes.deallocate()
+        print("[DIAG-NAV] Classes matching *Breadcrumb* in runtime (\(breadcrumbClasses.count)): \(breadcrumbClasses.joined(separator: ", "))")
+        print("[DIAG-NAV] ==================================================")
+    }
+
     // MARK: Shared ASR actions
     @objc private func didTapLoadModel() {
         appendLiveStatusLine("ASR: loading offline model (one-time on-device)...")
@@ -839,13 +968,21 @@ extension AppStatusViewController: EcholetAsrService.Delegate {
 extension AppStatusViewController {
     func warmIPCService(_ service: WarmIPCService, didChangeWarmStandbyActive active: Bool) {
         if active {
-            appendLiveStatusLine("WARM: warm dictation recording ACTIVE (foreground prepared). iOS has no public automatic return — use the system Back/App Switcher to return to your host app; the keyboard sends START itself once the warm-live record is fresh.")
+            appendLiveStatusLine("WARM: recording ACTIVE. \(EcholetLaunch.manualReturnHint)")
             disarmWarmButton.isEnabled = true
             prepareWarmButton.isEnabled = false
         } else {
             appendLiveStatusLine("WARM: warm dictation recorder INACTIVE.")
             disarmWarmButton.isEnabled = false
             prepareWarmButton.isEnabled = true
+        }
+    }
+
+    func warmIPCService(_ service: WarmIPCService, didUpdateReturnGuidance text: String?) {
+        returnHintLabel.text = text
+        returnHintLabel.isHidden = (text == nil)
+        if let text = text {
+            appendLiveStatusLine(text)
         }
     }
 }

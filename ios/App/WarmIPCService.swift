@@ -1,6 +1,7 @@
 import Foundation
 import CoreFoundation
 import AVFoundation
+import UIKit
 
 /// Delegate protocol for `WarmIPCService` events.
 public protocol WarmIPCServiceDelegate: AnyObject {
@@ -9,6 +10,7 @@ public protocol WarmIPCServiceDelegate: AnyObject {
     func warmIPCService(_ service: WarmIPCService, didRejectRequest description: String)
     func warmIPCService(_ service: WarmIPCService, didEncounterBlockedState reason: String)
     func warmIPCService(_ service: WarmIPCService, didChangeWarmStandbyActive active: Bool)
+    func warmIPCService(_ service: WarmIPCService, didUpdateReturnGuidance text: String?)
 }
 
 /// App-process-owned warm IPC coordinator service.
@@ -240,61 +242,343 @@ public final class WarmIPCService {
 
     // MARK: - Best-effort Return To Host App (openApplicationWithBundleID)
     //
-    // After MIC_NATIVE_READY for a keyboard demand, if the keyboard stored
-    // the host app bundle id it was summoned into, try to return the user
-    // there via LSApplicationWorkspace (user explicitly accepts private API
-    // usage). Every step is logged; any failure leaves the user in the
-    // Echolet app (never suspends the process).
+    // After MIC_NATIVE_READY for a keyboard demand, bring forward the app the
+    // user just left. The keyboard-resolved bundle id is preferred. One
+    // bundle-id open is attempted; a URL-scheme open (the call SwiftUI
+    // OpenURLAction makes) happens only if that API returns false. `true`
+    // only means Return Requested. If Echolet is still foreground shortly
+    // after, we stop and show the manual hint. This path never suspends.
+    public static var debugOverrideHostBundleId: String? = nil
+    private static let hostResolveRetryLimit = 4
+    private static let returnConfirmWindowSeconds: Double = 0.8
+
     private func attemptReturnToHostApp(nonce: String?, reason: String) {
         guard let defaults = sharedDefaults else {
             print("[Echolet-APP] RETURN_ATTEMPT(unavailable_defaults reason=\(reason))")
             return
         }
         let now = WarmIPCService.currentTimeMs()
-        var targetHost: String? = nil
+        var storedHost: String? = nil
+        let sourceApp = self.lastReceivedSourceApp
 
-        if let nonce = nonce, let ctx = EcholetLaunch.freshHostReturnContext(forNonce: nonce, nowMs: now, defaults: defaults) {
-            targetHost = ctx.hostBundleId
+        if let overrideId = Self.debugOverrideHostBundleId, EcholetLaunch.isReturnableHostBundleId(overrideId) {
+            storedHost = EcholetLaunch.normalizeHostBundleId(overrideId)
+            print("[Echolet-APP] RETURN_ATTEMPT(debug_override host=\(storedHost ?? "nil") reason=\(reason))")
+        } else if let nonce = nonce, let ctx = EcholetLaunch.freshHostReturnContext(forNonce: nonce, nowMs: now, defaults: defaults),
+                  EcholetLaunch.isReturnableHostBundleId(ctx.hostBundleId) {
+            storedHost = ctx.hostBundleId
             print("[Echolet-APP] RETURN_ATTEMPT(nonce_matched=\(String(nonce.prefix(8)))… host=\(ctx.hostBundleId) reason=\(reason))")
-        } else if let fallback = self.lastReceivedSourceApp, !fallback.isEmpty, !fallback.contains("echolet") {
-            targetHost = fallback
-            print("[Echolet-APP] RETURN_ATTEMPT(fallback_source_app host=\(fallback) reason=\(reason))")
         } else {
-            // If no fresh nonce-matching context exists and no fallback source app, fail closed:
-            print("[Echolet-APP] RETURN_SKIPPED(no_fresh_host_return_context nonce=\(nonce ?? "nil") reason=\(reason) -> user stays in Echolet)")
-            return
+            print("[Echolet-APP] RETURN_ATTEMPT(no_stored_host source=\(sourceApp ?? "nil") reason=\(reason) -> will read system breadcrumb)")
         }
 
-        guard let hostBundleId = targetHost else { return }
-
-        // Give the audio session and mic engine 150ms to settle in foreground before background transition
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-            Self.performWorkspaceOpen(bundleId: hostBundleId)
+        // Give the audio session and mic engine 150ms to settle in foreground before background transition.
+        let capturedStored = storedHost
+        let capturedSource = sourceApp
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+            self?.beginHostReturn(storedHost: capturedStored, sourceApp: capturedSource, resolveAttempt: 0)
         }
     }
 
-    private static func performWorkspaceOpen(bundleId: String) {
+    /// Resolves one host, then performs at most one bundle open and, only if
+    /// that call returns false, one URL open. Reading the back-badge a few
+    /// times is host resolution, not a return retry.
+    private func beginHostReturn(storedHost: String?, sourceApp: String?, resolveAttempt: Int) {
+        let breadcrumb = Self.systemBreadcrumbBundleId()
+        let hosts = EcholetLaunch.orderedReturnHosts(
+            breadcrumb: breadcrumb,
+            storedHost: storedHost,
+            sourceApp: sourceApp
+        )
+        print("[Echolet-APP] RETURN_CANDIDATES(resolve=\(resolveAttempt) breadcrumb=\(breadcrumb ?? "nil") hosts=\(hosts.joined(separator: ",")))")
+        if let host = hosts.first {
+            performSingleReturn(to: host)
+            return
+        }
+        if storedHost == nil, breadcrumb == nil, resolveAttempt < Self.hostResolveRetryLimit {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { [weak self] in
+                self?.beginHostReturn(storedHost: storedHost, sourceApp: sourceApp, resolveAttempt: resolveAttempt + 1)
+            }
+            return
+        }
+        stayInEcholet(reason: "no_returnable_host")
+    }
+
+    private func performSingleReturn(to host: String) {
+        publishReturnGuidance(nil)
+        switch EcholetLaunch.initialReturnStep(hostBundleId: host) {
+        case .stay(let reason):
+            stayInEcholet(reason: reason)
+        case .openURL:
+            openHostURL(host)
+        case .openBundle(let bundleId):
+            let opened = Self.performWorkspaceOpen(bundleId: bundleId)
+            print("[Echolet-APP] RETURN_EXECUTION(method=workspace_open,host=\(bundleId),result=\(opened))")
+            if opened {
+                beginConfirmationWatch(host: bundleId, method: "workspace_open")
+                return
+            }
+            switch EcholetLaunch.afterBundleOpenRejected(hostBundleId: bundleId) {
+            case .openURL(let url, let id):
+                print("[Echolet-APP] RETURN_EXECUTION(method=open_url,host=\(id),url=\(url.absoluteString),because=bundle_rejected)")
+                openHostURL(id)
+            case .stay(let reason):
+                stayInEcholet(reason: reason)
+            case .openBundle:
+                stayInEcholet(reason: "bundle_open_rejected")
+            }
+        }
+    }
+
+    private func openHostURL(_ host: String) {
+        guard let url = EcholetLaunch.returnURL(forHostBundleId: host) else {
+            stayInEcholet(reason: "no_url_scheme")
+            return
+        }
+        UIApplication.shared.open(url, options: [:]) { [weak self] accepted in
+            print("[Echolet-APP] RETURN_EXECUTION(method=open_url,host=\(host),url=\(url.absoluteString),accepted=\(accepted))")
+            if accepted {
+                self?.beginConfirmationWatch(host: host, method: "open_url")
+            } else {
+                self?.stayInEcholet(reason: "open_url_rejected")
+            }
+        }
+    }
+
+    private func stayInEcholet(reason: String) {
+        print("[Echolet-APP] RETURN_STAY(reason=\(reason))")
+        publishReturnGuidance(EcholetLaunch.manualReturnHint)
+    }
+
+    /// Manual experiments. Each call is one open, then the same foreground check.
+    public func debugReturnByBundleId(_ bundleId: String) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            print("[Echolet-APP] DEBUG_RETURN(bundle=\(bundleId))")
+            let opened = Self.performWorkspaceOpen(bundleId: bundleId)
+            if opened {
+                self.beginConfirmationWatch(host: bundleId, method: "debug_workspace_open")
+            } else {
+                self.stayInEcholet(reason: "debug_bundle_rejected")
+            }
+        }
+    }
+
+    public func debugReturnByURL(bundleId: String) {
+        DispatchQueue.main.async { [weak self] in
+            self?.openHostURL(bundleId)
+        }
+    }
+
+    private struct ReturnWatch {
+        let token: UUID
+        let host: String
+        let method: String
+        var leftForeground = false
+    }
+
+    private var returnWatch: ReturnWatch?
+    private var returnForegroundObserver: NSObjectProtocol?
+
+    private func beginConfirmationWatch(host: String, method: String) {
+        let start = { [weak self] in
+            guard let self = self else { return }
+            self.installReturnForegroundObserver()
+            let token = UUID()
+            self.returnWatch = ReturnWatch(token: token, host: host, method: method)
+            print("[Echolet-APP] RETURN_REQUESTED(host=\(host) method=\(method))")
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.returnConfirmWindowSeconds) { [weak self] in
+                guard let self = self, let watch = self.returnWatch, watch.token == token else { return }
+                self.returnWatch = nil
+                if watch.leftForeground {
+                    print("[Echolet-APP] RETURN_LEFT_FOREGROUND(host=\(watch.host) method=\(watch.method))")
+                    return
+                }
+                print("[Echolet-APP] RETURN_UNCONFIRMED(host=\(watch.host) method=\(watch.method) still_foreground)")
+                self.publishReturnGuidance(EcholetLaunch.manualReturnHint)
+            }
+        }
+        if Thread.isMainThread {
+            start()
+        } else {
+            DispatchQueue.main.async(execute: start)
+        }
+    }
+
+    private func installReturnForegroundObserver() {
+        guard returnForegroundObserver == nil else { return }
+        returnForegroundObserver = NotificationCenter.default.addObserver(
+            forName: UIApplication.willResignActiveNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            guard let self = self, var watch = self.returnWatch, !watch.leftForeground else { return }
+            watch.leftForeground = true
+            self.returnWatch = watch
+            print("[Echolet-APP] RETURN_WILL_RESIGN(host=\(watch.host) method=\(watch.method))")
+        }
+    }
+
+    private func publishReturnGuidance(_ text: String?) {
+        let deliver = { [weak self] in
+            guard let self = self else { return }
+            print("[Echolet-APP] RETURN_GUIDANCE(\(text ?? "clear"))")
+            self.delegate?.warmIPCService(self, didUpdateReturnGuidance: text)
+        }
+        if Thread.isMainThread {
+            deliver()
+        } else {
+            DispatchQueue.main.async(execute: deliver)
+        }
+    }
+
+    /// Bundle id of the system "Back to X" badge, if UIKit has one.
+    private static func systemBreadcrumbBundleId() -> String? {
+        let app = UIApplication.shared
+        guard let action = performObjectReturning(app, selectorName: "_systemNavigationAction")
+                ?? performObjectReturning(app, selectorName: "systemNavigationAction") else {
+            print("[Echolet-APP] BREADCRUMB(action=nil)")
+            return nil
+        }
+        guard let actionNS = action as? NSObject else {
+            print("[Echolet-APP] BREADCRUMB(action_not_nsobject class=\(type(of: action)))")
+            return nil
+        }
+        print("[Echolet-APP] BREADCRUMB(actionClass=\(String(describing: type(of: actionNS))))")
+
+        var destinations: [NSObject] = []
+        if let raw = performObjectReturning(actionNS, selectorName: "destinations") as? NSArray {
+            destinations = raw.compactMap { $0 as? NSObject }
+        }
+        if destinations.isEmpty, let raw = objectIvar(actionNS, name: "_destinations") as? NSArray
+            ?? objectIvar(actionNS, name: "destinations") as? NSArray {
+            destinations = raw.compactMap { $0 as? NSObject }
+        }
+        let selfId = Bundle.main.bundleIdentifier
+        for dest in destinations {
+            if let id = bundleIdString(on: dest), id != selfId {
+                print("[Echolet-APP] BREADCRUMB(host=\(id) class=\(String(describing: type(of: dest))))")
+                return id
+            }
+            print("[Echolet-APP] BREADCRUMB(unreadable class=\(String(describing: type(of: dest))) ivars=\(debugIvarNames(dest)))")
+        }
+        if destinations.isEmpty {
+            print("[Echolet-APP] BREADCRUMB(no_destinations ivars=\(debugIvarNames(actionNS)))")
+        }
+        return nil
+    }
+
+    private static func performObjectReturning(_ object: NSObject, selectorName: String) -> AnyObject? {
+        let sel = NSSelectorFromString(selectorName)
+        guard object.responds(to: sel),
+              let method = class_getInstanceMethod(type(of: object), sel) else {
+            return nil
+        }
+        let ret = method_copyReturnType(method)
+        defer { free(ret) }
+        guard ret[0] == UInt8(ascii: "@") else { return nil }
+        return object.perform(sel)?.takeUnretainedValue()
+    }
+
+    private static func objectIvar(_ object: NSObject, name: String) -> AnyObject? {
+        var cls: AnyClass? = type(of: object)
+        while let current = cls {
+            if let ivar = class_getInstanceVariable(current, name),
+               let enc = ivar_getTypeEncoding(ivar), enc[0] == UInt8(ascii: "@") {
+                return object_getIvar(object, ivar) as AnyObject?
+            }
+            cls = class_getSuperclass(current)
+        }
+        return nil
+    }
+
+    private static func bundleIdString(on object: NSObject) -> String? {
+        let selectors = ["bundleId", "bundleIdentifier", "applicationBundleIdentifier", "_bundleId"]
+        for name in selectors {
+            if let raw = performObjectReturning(object, selectorName: name) as? String,
+               let norm = EcholetLaunch.normalizeHostBundleId(raw),
+               EcholetLaunch.isReturnableHostBundleId(norm) {
+                return norm
+            }
+        }
+        var cls: AnyClass? = type(of: object)
+        while let current = cls {
+            var count: UInt32 = 0
+            if let ivars = class_copyIvarList(current, &count) {
+                defer { free(ivars) }
+                for i in 0..<Int(count) {
+                    let ivar = ivars[i]
+                    guard let enc = ivar_getTypeEncoding(ivar), enc[0] == UInt8(ascii: "@") else { continue }
+                    guard let raw = object_getIvar(object, ivar) as? String,
+                          let norm = EcholetLaunch.normalizeHostBundleId(raw),
+                          EcholetLaunch.isReturnableHostBundleId(norm) else { continue }
+                    return norm
+                }
+            }
+            cls = class_getSuperclass(current)
+        }
+        return nil
+    }
+
+    private static func debugIvarNames(_ object: NSObject) -> String {
+        var names: [String] = []
+        var cls: AnyClass? = type(of: object)
+        while let current = cls, names.count < 24 {
+            var count: UInt32 = 0
+            if let ivars = class_copyIvarList(current, &count) {
+                for i in 0..<Int(count) where names.count < 24 {
+                    if let n = ivar_getName(ivars[i]) {
+                        names.append(String(cString: n))
+                    }
+                }
+                free(ivars)
+            }
+            cls = class_getSuperclass(current)
+        }
+        return names.joined(separator: ",")
+    }
+
+    @discardableResult
+    public static func performWorkspaceOpen(bundleId: String) -> Bool {
+        print("[Echolet-APP] WORKSPACE_OPEN_ATTEMPT(host=\(bundleId),isMainThread=\(Thread.isMainThread))")
         guard let workspaceClass = NSClassFromString("LSApplicationWorkspace") as? NSObject.Type else {
             print("[Echolet-APP] RETURN_RESULT(false LSApplicationWorkspace class unavailable) user stays in Echolet")
-            return
+            return false
         }
         let defaultWorkspaceSel = NSSelectorFromString("defaultWorkspace")
         guard workspaceClass.responds(to: defaultWorkspaceSel),
               let workspace = workspaceClass.perform(defaultWorkspaceSel)?.takeUnretainedValue() as? NSObject else {
             print("[Echolet-APP] RETURN_RESULT(false defaultWorkspace nil) user stays in Echolet")
-            return
+            return false
         }
 
         let openSel = NSSelectorFromString("openApplicationWithBundleID:")
         guard workspace.responds(to: openSel) else {
             print("[Echolet-APP] RETURN_RESULT(false openApplicationWithBundleID: missing) user stays in Echolet")
-            return
+            return false
         }
 
         typealias OpenAppFn = @convention(c) (NSObject, Selector, NSString) -> Bool
         let fn = unsafeBitCast(workspace.method(for: openSel), to: OpenAppFn.self)
         let opened = fn(workspace, openSel, bundleId as NSString)
         print("[Echolet-APP] RETURN_RESULT(openApplicationWithBundleID=\(opened) host=\(bundleId))")
+        return opened
+    }
+
+    @discardableResult
+    public static func performSuspendReturningToLastApp(arg: Bool = true) -> Bool {
+        print("[Echolet-APP] SUSPEND_RETURNING_TO_LAST_APP_ATTEMPT(arg=\(arg),isMainThread=\(Thread.isMainThread))")
+        let app = UIApplication.shared
+        let sel = NSSelectorFromString("suspendReturningToLastApp:")
+        guard app.responds(to: sel) else {
+            print("[Echolet-APP] SUSPEND_RETURNING_RESULT(false suspendReturningToLastApp: missing)")
+            return false
+        }
+        typealias SuspendFn = @convention(c) (NSObject, Selector, Bool) -> Void
+        let fn = unsafeBitCast(app.method(for: sel), to: SuspendFn.self)
+        fn(app, sel, arg)
+        print("[Echolet-APP] SUSPEND_RETURNING_RESULT(called arg=\(arg))")
+        return true
     }
 
     // MARK: - User Arming State

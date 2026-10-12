@@ -1,4 +1,5 @@
 import UIKit
+import Darwin
 
 /// Echolet Voice Keyboard (J5 single-button).
 ///
@@ -247,7 +248,7 @@ class KeyboardViewController: UIInputViewController {
             let sel = NSSelectorFromString(key)
             if let obj = target as? NSObject, obj.responds(to: sel) {
                 if let raw = obj.perform(sel), let str = raw.takeUnretainedValue() as? String {
-                    if let norm = EcholetLaunch.normalizeHostBundleId(str) {
+                    if let norm = EcholetLaunch.normalizeHostBundleId(str), EcholetLaunch.isReturnableHostBundleId(norm) {
                         return norm
                     }
                 }
@@ -255,9 +256,10 @@ class KeyboardViewController: UIInputViewController {
             // 2. Safe ivar probe via ObjC runtime (no NSException possible)
             var cls: AnyClass? = type(of: target)
             while let currentCls = cls {
-                if let ivar = class_getInstanceVariable(currentCls, key) {
+                if let ivar = class_getInstanceVariable(currentCls, key),
+                   let enc = ivar_getTypeEncoding(ivar), enc[0] == UInt8(ascii: "@") {
                     if let raw = object_getIvar(target, ivar) as? String {
-                        if let norm = EcholetLaunch.normalizeHostBundleId(raw) {
+                        if let norm = EcholetLaunch.normalizeHostBundleId(raw), EcholetLaunch.isReturnableHostBundleId(norm) {
                             return norm
                         }
                     }
@@ -276,7 +278,14 @@ class KeyboardViewController: UIInputViewController {
                 "hostApplicationBundleIdentifier",
                 "_hostIdentifier",
                 "hostIdentifier",
-                "_hostProcessBundleIdentifier"
+                "_hostProcessBundleIdentifier",
+                "__hostBundleIdentifier",
+                "appId",
+                "_appId",
+                "applicationBundleIdentifier",
+                "_applicationBundleIdentifier",
+                "bundleIdentifier",
+                "_bundleIdentifier"
             ]
             for key in candidateKeys {
                 if let found = probeTarget(target, key: key) {
@@ -286,7 +295,15 @@ class KeyboardViewController: UIInputViewController {
             return nil
         }
 
-        if let p = self.parent, let found = probeAllKeys(on: p) { return found }
+        // Direct checks on self, parent chain, extensionContext, responders, view.window.
+        // These succeed for UIKit hosts such as Maps. Chrome often leaves them empty.
+        var parent: UIViewController? = self.parent
+        var parentDepth = 0
+        while let current = parent, parentDepth < 6 {
+            if let found = probeAllKeys(on: current) { return found }
+            parent = current.parent
+            parentDepth += 1
+        }
         if let found = probeAllKeys(on: self) { return found }
         if let extCtx = self.extensionContext, let found = probeAllKeys(on: extCtx) { return found }
 
@@ -297,6 +314,298 @@ class KeyboardViewController: UIInputViewController {
         }
 
         if let win = self.view.window, let found = probeAllKeys(on: win) { return found }
+
+        if let proxy = self.textDocumentProxy as? NSObject {
+            if let found = probeAllKeys(on: proxy) { return found }
+            if let found = probeNestedHostBundleId(on: proxy, depth: 0) { return found }
+        }
+
+        // KeyboardKit's pre-iOS 26.4 resolver: PKService personality XPC
+        // connection, then xpc_connection_copy_bundle_id. This is the path
+        // that still works on iPadOS 18 when `_hostBundleID` is empty.
+        if let xpcHost = hostBundleIdViaXPC() { return xpcHost }
+
+        // Frontmost app while this keyboard is still on screen.
+        if let front = frontmostApplicationBundleId() { return front }
+
+        // Associated object check for ___hostApplicationBundleIdentifierKey
+        let assocTargets: [AnyObject?] = [self, self.parent, self.extensionContext, self.view.window]
+        for t in assocTargets {
+            guard let target = t else { continue }
+            // Probe any associated objects or properties containing host info
+            if let obj = target as? NSObject {
+                let keys = ["_hostProcessIdentifier", "_hostPID", "hostPID", "hostProcessIdentifier"]
+                for k in keys {
+                    let sel = NSSelectorFromString(k)
+                    if obj.responds(to: sel) {
+                        typealias PidFn = @convention(c) (NSObject, Selector) -> pid_t
+                        let fn = unsafeBitCast(obj.method(for: sel), to: PidFn.self)
+                        let pid = fn(obj, sel)
+                        if pid > 0 {
+                            if let bundleId = bundleIdForPid(pid), EcholetLaunch.isReturnableHostBundleId(bundleId) {
+                                print("[Echolet-KBD] HOST_PROBE_VIA_PID(pid=\(pid),bundle=\(bundleId))")
+                                return bundleId
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        return nil
+    }
+
+    /// Host bundle id from the extension's PKService XPC personality.
+    /// This is the resolver KeyboardKit used through iOS 18. The C string is
+    /// nil-checked; a missing id returns nil instead of crashing.
+    private func hostBundleIdViaXPC() -> String? {
+        let candidates: [AnyObject?] = [self.parent, self, self.extensionContext]
+        var pid: Int32 = 0
+        for candidate in candidates {
+            guard let object = candidate else { continue }
+            let found = readNumericIvar(object, name: "_hostPID")
+                ?? readNumericIvar(object, name: "hostPID")
+                ?? readNumericIvar(object, name: "_hostProcessIdentifier")
+            if let found = found, found > 0 {
+                pid = found
+                break
+            }
+        }
+        guard pid > 0 else {
+            print("[Echolet-KBD] HOST_PROBE_XPC(stage=no_host_pid)")
+            return nil
+        }
+        guard let serviceClass = NSClassFromString("PKService") as? NSObject.Type else {
+            print("[Echolet-KBD] HOST_PROBE_XPC(stage=no_PKService)")
+            return nil
+        }
+        guard let service = objectReturning(serviceClass as AnyObject, selectorName: "defaultService") as? NSObject else {
+            print("[Echolet-KBD] HOST_PROBE_XPC(stage=no_defaultService)")
+            return nil
+        }
+        guard let personalities = objectReturning(service, selectorName: "personalities") as? NSDictionary else {
+            print("[Echolet-KBD] HOST_PROBE_XPC(stage=no_personalities)")
+            return nil
+        }
+        let keyboardId = Bundle.main.bundleIdentifier ?? ""
+        guard let infos = personalities[keyboardId] as? NSDictionary else {
+            let keys = personalities.allKeys.map { String(describing: $0) }.joined(separator: ",")
+            print("[Echolet-KBD] HOST_PROBE_XPC(stage=no_personality keyboard=\(keyboardId) keys=\(keys))")
+            return nil
+        }
+        let wanted = NSNumber(value: pid)
+        var info = infos[wanted] as? NSObject ?? infos["\(pid)"] as? NSObject
+        if info == nil {
+            for key in infos.allKeys {
+                if let num = key as? NSNumber, num.int32Value == pid {
+                    info = infos[key] as? NSObject
+                    break
+                }
+            }
+        }
+        guard let personality = info else {
+            let keys = infos.allKeys.map { String(describing: $0) }.joined(separator: ",")
+            print("[Echolet-KBD] HOST_PROBE_XPC(stage=no_pid_entry pid=\(pid) keys=\(keys))")
+            return nil
+        }
+        guard let connection = objectReturning(personality, selectorName: "connection") as? NSObject
+                ?? objectReturning(personality, selectorName: "_connection") as? NSObject else {
+            print("[Echolet-KBD] HOST_PROBE_XPC(stage=no_connection)")
+            return nil
+        }
+        guard let xpc = objectReturning(connection, selectorName: "_xpcConnection")
+                ?? objectReturning(connection, selectorName: "xpcConnection") else {
+            print("[Echolet-KBD] HOST_PROBE_XPC(stage=no_xpc_connection)")
+            return nil
+        }
+        guard let bundle = copyXPCBundleId(xpc) else {
+            print("[Echolet-KBD] HOST_PROBE_XPC(stage=bundle_id_nil pid=\(pid))")
+            return nil
+        }
+        guard let norm = EcholetLaunch.normalizeHostBundleId(bundle), EcholetLaunch.isReturnableHostBundleId(norm) else {
+            print("[Echolet-KBD] HOST_PROBE_XPC(stage=rejected raw=\(bundle))")
+            return nil
+        }
+        print("[Echolet-KBD] HOST_PROBE_XPC(pid=\(pid),host=\(norm))")
+        return norm
+    }
+
+    private func readNumericIvar(_ object: AnyObject, name: String) -> Int32? {
+        var cls: AnyClass? = type(of: object)
+        while let current = cls {
+            if let ivar = class_getInstanceVariable(current, name),
+               let encPtr = ivar_getTypeEncoding(ivar) {
+                let enc = String(cString: encPtr)
+                let raw = Unmanaged.passUnretained(object).toOpaque().advanced(by: ivar_getOffset(ivar))
+                switch enc {
+                case "i", "I":
+                    return raw.load(as: Int32.self)
+                case "q", "Q":
+                    let value = raw.load(as: Int64.self)
+                    if value < 0 || value > Int64(Int32.max) { return nil }
+                    return Int32(value)
+                case "l", "L":
+                    let value = raw.load(as: Int.self)
+                    if value < 0 || value > Int(Int32.max) { return nil }
+                    return Int32(value)
+                default:
+                    if enc.hasPrefix("@"), let num = object_getIvar(object, ivar) as? NSNumber {
+                        return num.int32Value
+                    }
+                }
+            }
+            cls = class_getSuperclass(current)
+        }
+        return nil
+    }
+
+    private func objectReturning(_ object: AnyObject, selectorName: String) -> AnyObject? {
+        let sel = NSSelectorFromString(selectorName)
+        guard object.responds(to: sel),
+              let cls = object_getClass(object),
+              let method = class_getInstanceMethod(cls, sel) else {
+            return nil
+        }
+        let ret = method_copyReturnType(method)
+        defer { free(ret) }
+        guard ret[0] == UInt8(ascii: "@") else { return nil }
+        return object.perform(sel)?.takeUnretainedValue()
+    }
+
+    private func copyXPCBundleId(_ connection: AnyObject) -> String? {
+        let paths = ["/usr/lib/libSystem.B.dylib", "/usr/lib/libc.dylib"]
+        for path in paths {
+            guard let handle = dlopen(path, RTLD_NOW) else { continue }
+            defer { dlclose(handle) }
+            guard let sym = dlsym(handle, "xpc_connection_copy_bundle_id") else { continue }
+            typealias CopyFn = @convention(c) (AnyObject) -> UnsafePointer<CChar>?
+            let fn = unsafeBitCast(sym, to: CopyFn.self)
+            guard let cString = fn(connection) else { return nil }
+            return String(cString: cString)
+        }
+        print("[Echolet-KBD] HOST_PROBE_XPC(stage=symbol_missing)")
+        return nil
+    }
+
+    /// SpringBoard's frontmost display identifier, called before Echolet is opened.
+    private func frontmostApplicationBundleId() -> String? {
+        let path = "/System/Library/PrivateFrameworks/SpringBoardServices.framework/SpringBoardServices"
+        guard let handle = dlopen(path, RTLD_LAZY) else {
+            print("[Echolet-KBD] HOST_PROBE_FRONTMOST(dlopen_failed)")
+            return nil
+        }
+        defer { dlclose(handle) }
+        let symbolNames = [
+            "SBSCopyFrontmostApplicationDisplayIdentifier",
+            "SBFrontmostApplicationDisplayIdentifier"
+        ]
+        for name in symbolNames {
+            guard let sym = dlsym(handle, name) else { continue }
+            typealias CopyFn = @convention(c) () -> UnsafeRawPointer?
+            let fn = unsafeBitCast(sym, to: CopyFn.self)
+            guard let ptr = fn() else {
+                print("[Echolet-KBD] HOST_PROBE_FRONTMOST(symbol=\(name),value=nil)")
+                continue
+            }
+            let unmanaged = Unmanaged<CFString>.fromOpaque(ptr)
+            let raw = (name.contains("Copy") ? unmanaged.takeRetainedValue() : unmanaged.takeUnretainedValue()) as String
+            if let norm = EcholetLaunch.normalizeHostBundleId(raw), EcholetLaunch.isReturnableHostBundleId(norm) {
+                print("[Echolet-KBD] HOST_PROBE_FRONTMOST(symbol=\(name),host=\(norm))")
+                return norm
+            }
+            print("[Echolet-KBD] HOST_PROBE_FRONTMOST(symbol=\(name),rejected=\(raw))")
+        }
+        print("[Echolet-KBD] HOST_PROBE_FRONTMOST(unavailable)")
+        return nil
+    }
+
+    /// One level into RTI / document-trait objects. Only follows ivars whose
+    /// names look like host/session/trait state, and only object ivars.
+    private func probeNestedHostBundleId(on target: AnyObject, depth: Int) -> String? {
+        guard depth < 2 else { return nil }
+        let hints = ["trait", "session", "document", "host", "context", "rti", "state", "proxy"]
+        func matches(_ name: String) -> Bool {
+            let lower = name.lowercased()
+            return hints.contains(where: { lower.contains($0) })
+        }
+        func stringIfReturnable(_ target: AnyObject, key: String) -> String? {
+            let sel = NSSelectorFromString(key)
+            if let obj = target as? NSObject, obj.responds(to: sel),
+               let raw = obj.perform(sel)?.takeUnretainedValue() as? String,
+               let norm = EcholetLaunch.normalizeHostBundleId(raw),
+               EcholetLaunch.isReturnableHostBundleId(norm) {
+                return norm
+            }
+            var cls: AnyClass? = type(of: target)
+            while let current = cls {
+                if let ivar = class_getInstanceVariable(current, key),
+                   let enc = ivar_getTypeEncoding(ivar), enc[0] == UInt8(ascii: "@"),
+                   let raw = object_getIvar(target, ivar) as? String,
+                   let norm = EcholetLaunch.normalizeHostBundleId(raw),
+                   EcholetLaunch.isReturnableHostBundleId(norm) {
+                    return norm
+                }
+                cls = class_getSuperclass(current)
+            }
+            return nil
+        }
+        let keys = ["appId", "_appId", "bundleIdentifier", "_bundleIdentifier", "_hostBundleID", "hostBundleID"]
+        var cls: AnyClass? = type(of: target)
+        while let current = cls {
+            var count: UInt32 = 0
+            guard let ivars = class_copyIvarList(current, &count) else {
+                cls = class_getSuperclass(current)
+                continue
+            }
+            defer { free(ivars) }
+            for i in 0..<Int(count) {
+                let ivar = ivars[i]
+                guard let enc = ivar_getTypeEncoding(ivar), enc[0] == UInt8(ascii: "@") else { continue }
+                guard let nameC = ivar_getName(ivar) else { continue }
+                let name = String(cString: nameC)
+                guard matches(name) else { continue }
+                guard let child = object_getIvar(target, ivar) as? NSObject else { continue }
+                for key in keys {
+                    if let found = stringIfReturnable(child, key: key) {
+                        print("[Echolet-KBD] HOST_PROBE_NESTED(ivar=\(name),key=\(key),host=\(found))")
+                        return found
+                    }
+                }
+                if let found = probeNestedHostBundleId(on: child, depth: depth + 1) { return found }
+            }
+            cls = class_getSuperclass(current)
+        }
+        return nil
+    }
+
+    /// Resolves bundle identifier for a target process ID via RunningBoardServices RBSProcessHandle
+    private func bundleIdForPid(_ pid: pid_t) -> String? {
+        guard pid > 0 else { return nil }
+        guard let handleClass = NSClassFromString("RBSProcessHandle") as? NSObject.Type,
+              let idClass = NSClassFromString("RBSProcessIdentifier") as? NSObject.Type else {
+            return nil
+        }
+        let identSel = NSSelectorFromString("identifierWithPid:")
+        guard idClass.responds(to: identSel) else { return nil }
+        typealias IdentFn = @convention(c) (NSObject.Type, Selector, Int32) -> AnyObject?
+        let identFn = unsafeBitCast(idClass.method(for: identSel), to: IdentFn.self)
+        guard let identifier = identFn(idClass, identSel, Int32(pid)) else { return nil }
+
+        let handleSel = NSSelectorFromString("handleForIdentifier:error:")
+        guard handleClass.responds(to: handleSel) else { return nil }
+        typealias HandleFn = @convention(c) (NSObject.Type, Selector, AnyObject, AutoreleasingUnsafeMutablePointer<NSError?>?) -> AnyObject?
+        let handleFn = unsafeBitCast(handleClass.method(for: handleSel), to: HandleFn.self)
+        var err: NSError? = nil
+        guard let handle = handleFn(handleClass, handleSel, identifier, &err) as? NSObject else { return nil }
+
+        // Read handle.bundle.identifier
+        let bundleSel = NSSelectorFromString("bundle")
+        if handle.responds(to: bundleSel), let bundle = handle.perform(bundleSel)?.takeUnretainedValue() as? NSObject {
+            let idSel = NSSelectorFromString("identifier")
+            if bundle.responds(to: idSel), let raw = bundle.perform(idSel)?.takeUnretainedValue() as? String {
+                return EcholetLaunch.normalizeHostBundleId(raw)
+            }
+        }
         return nil
     }
 
@@ -304,10 +613,15 @@ class KeyboardViewController: UIInputViewController {
         guard let defaults = sharedDefaults else { return }
 
         let probed = probeCurrentHostBundleId()
-        if let p = probed {
-            lastKnownHostBundleId = p
-        }
-        let targetHost = probed ?? lastKnownHostBundleId
+        // Fresh target host only: probed on this appearance, or an explicit debug override.
+        // A previous app's bundle id must not leak into this launch.
+        let debugHost = defaults.string(forKey: "echolet.debug.target.host.bundleid")
+        let targetHost = [probed, debugHost].compactMap { raw -> String? in
+            guard let norm = EcholetLaunch.normalizeHostBundleId(raw), EcholetLaunch.isReturnableHostBundleId(norm) else {
+                return nil
+            }
+            return norm
+        }.first
 
         let now = UInt64(Date().timeIntervalSince1970 * 1000)
         if let id = targetHost {

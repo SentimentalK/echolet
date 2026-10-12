@@ -39,6 +39,13 @@ enum EcholetLaunchTests {
         testWarmLiveAuthority()
         testWarmLiveInactiveAndStaleEpochFails()
         testHostReturnContextScoping()
+        testHostReturnContextFreshnessExpiry()
+        testNormalizeHostBundleId()
+        testReturnableHostBundleId()
+        testOrderedReturnHosts()
+        testKnownReturnHosts()
+        testReturnSteps()
+        testLegacyHostBundleIdSync()
         testPendingStartIntentHandoff()
 
         if failures.isEmpty {
@@ -182,6 +189,119 @@ enum EcholetLaunchTests {
         // Clear removes context
         EcholetLaunch.clearHostReturnContext(defaults: defaults)
         expectNil(EcholetLaunch.readHostReturnContext(defaults: defaults), "testHostReturnContextScoping(4)")
+    }
+
+    static func testHostReturnContextFreshnessExpiry() {
+        let defaults = freshDefaults()
+        let now: UInt64 = 200_000
+        let nonce = "nonce-expiry-test"
+
+        let ctx = EcholetLaunch.HostReturnContext(launchNonce: nonce, hostBundleId: "com.google.chrome.ios", capturedAtMs: now)
+        expectTrue(EcholetLaunch.writeHostReturnContext(ctx, defaults: defaults), "testHostReturnContextExpiry(1)")
+
+        // Within TTL (e.g. at 59 seconds) is fresh
+        let fresh = EcholetLaunch.freshHostReturnContext(forNonce: nonce, nowMs: now + 59_000, defaults: defaults)
+        expectEqual(fresh?.hostBundleId, "com.google.chrome.ios", "testHostReturnContextExpiry(2)")
+
+        // Past default TTL (60_000 ms) fails closed
+        let expired = EcholetLaunch.freshHostReturnContext(forNonce: nonce, nowMs: now + EcholetLaunch.defaultHostReturnTtlMs + 1, defaults: defaults)
+        expectNil(expired, "testHostReturnContextExpiry(3)")
+    }
+
+    static func testNormalizeHostBundleId() {
+        expectNil(EcholetLaunch.normalizeHostBundleId(nil), "testNormalizeHostBundleId(nil)")
+        expectNil(EcholetLaunch.normalizeHostBundleId(""), "testNormalizeHostBundleId(empty)")
+        expectNil(EcholetLaunch.normalizeHostBundleId("   \n\t  "), "testNormalizeHostBundleId(whitespace)")
+        expectNil(EcholetLaunch.normalizeHostBundleId("<null>"), "testNormalizeHostBundleId(nullTag1)")
+        expectNil(EcholetLaunch.normalizeHostBundleId("(null)"), "testNormalizeHostBundleId(nullTag2)")
+        expectEqual(EcholetLaunch.normalizeHostBundleId(" com.google.chrome.ios \n"), "com.google.chrome.ios", "testNormalizeHostBundleId(trimmed)")
+    }
+
+    static func testReturnableHostBundleId() {
+        expectTrue(EcholetLaunch.isReturnableHostBundleId("com.google.chrome.ios"), "testReturnableHostBundleId(chrome)")
+        expectTrue(EcholetLaunch.isReturnableHostBundleId("com.apple.Maps"), "testReturnableHostBundleId(maps)")
+        expectTrue(EcholetLaunch.isReturnableHostBundleId(" com.apple.mobilesafari "), "testReturnableHostBundleId(trimmed)")
+        expectTrue(!EcholetLaunch.isReturnableHostBundleId(nil), "testReturnableHostBundleId(nil)")
+        expectTrue(!EcholetLaunch.isReturnableHostBundleId(""), "testReturnableHostBundleId(empty)")
+        expectTrue(!EcholetLaunch.isReturnableHostBundleId("com.apple.springboard"), "testReturnableHostBundleId(springboard)")
+        expectTrue(!EcholetLaunch.isReturnableHostBundleId("com.apple.WebKit.WebContent"), "testReturnableHostBundleId(webkit)")
+        expectTrue(!EcholetLaunch.isReturnableHostBundleId("com.mainstayx.echolet.dev.keyboard"), "testReturnableHostBundleId(self)")
+        expectTrue(!EcholetLaunch.isReturnableHostBundleId("8F3A1C2E-9B44-4D1A-A1C0-0E5B6A7C8D9E"), "testReturnableHostBundleId(uuid)")
+        expectTrue(!EcholetLaunch.isReturnableHostBundleId("chrome"), "testReturnableHostBundleId(bare)")
+    }
+
+    static func testOrderedReturnHosts() {
+        let both = EcholetLaunch.orderedReturnHosts(
+            breadcrumb: "com.google.chrome.ios",
+            storedHost: "com.apple.Maps",
+            sourceApp: nil
+        )
+        expectEqual(both, ["com.apple.Maps", "com.google.chrome.ios"], "testOrderedReturnHosts(storedFirst)")
+
+        let storedOnly = EcholetLaunch.orderedReturnHosts(breadcrumb: nil, storedHost: "com.apple.Maps", sourceApp: nil)
+        expectEqual(storedOnly, ["com.apple.Maps"], "testOrderedReturnHosts(stored)")
+
+        let filtered = EcholetLaunch.orderedReturnHosts(
+            breadcrumb: "com.apple.springboard",
+            storedHost: "com.google.chrome.ios",
+            sourceApp: "com.mainstayx.echolet.dev"
+        )
+        expectEqual(filtered, ["com.google.chrome.ios"], "testOrderedReturnHosts(filtered)")
+
+        let deduped = EcholetLaunch.orderedReturnHosts(
+            breadcrumb: "com.google.chrome.ios",
+            storedHost: "com.google.chrome.ios",
+            sourceApp: "com.google.chrome.ios"
+        )
+        expectEqual(deduped, ["com.google.chrome.ios"], "testOrderedReturnHosts(deduped)")
+    }
+
+    static func testKnownReturnHosts() {
+        expectEqual(EcholetLaunch.knownReturnHost(bundleId: "com.apple.DocumentsApp")?.name, "Apple Files", "testKnownReturnHosts(files)")
+        expectEqual(EcholetLaunch.returnURL(forHostBundleId: "com.google.chrome.ios")?.absoluteString, "googlechrome://", "testKnownReturnHosts(chromeURL)")
+        expectEqual(EcholetLaunch.returnURL(forHostBundleId: "com.apple.DocumentsApp")?.absoluteString, "shareddocuments://", "testKnownReturnHosts(filesURL)")
+        expectEqual(EcholetLaunch.returnURL(forHostBundleId: "com.openai.chat")?.absoluteString, "chatgpt://", "testKnownReturnHosts(chatgptURL)")
+        expectEqual(EcholetLaunch.returnURL(forHostBundleId: "com.apple.Maps")?.absoluteString, "maps://", "testKnownReturnHosts(mapsURL)")
+        expectNil(EcholetLaunch.returnURL(forHostBundleId: "com.example.unknown.app"), "testKnownReturnHosts(unknown)")
+        expectTrue(EcholetLaunch.isReturnableHostBundleId("com.apple.DocumentsApp"), "testKnownReturnHosts(filesReturnable)")
+    }
+
+    static func testReturnSteps() {
+        expectEqual(EcholetLaunch.initialReturnStep(hostBundleId: nil), .stay("no_returnable_host"), "testReturnSteps(nil)")
+        expectEqual(EcholetLaunch.initialReturnStep(hostBundleId: "com.apple.springboard"), .stay("no_returnable_host"), "testReturnSteps(springboard)")
+        expectEqual(
+            EcholetLaunch.initialReturnStep(hostBundleId: "com.google.chrome.ios"),
+            .openBundle("com.google.chrome.ios"),
+            "testReturnSteps(chromeBundle)"
+        )
+        expectEqual(
+            EcholetLaunch.afterBundleOpenRejected(hostBundleId: "com.google.chrome.ios"),
+            .openURL(URL(string: "googlechrome://")!, bundleId: "com.google.chrome.ios"),
+            "testReturnSteps(chromeURLFallback)"
+        )
+        expectEqual(
+            EcholetLaunch.afterBundleOpenRejected(hostBundleId: "com.example.unknown.app"),
+            .stay("bundle_open_rejected"),
+            "testReturnSteps(unknownRejected)"
+        )
+    }
+
+    static func testLegacyHostBundleIdSync() {
+        let defaults = freshDefaults()
+        let now: UInt64 = 300_000
+        let nonce = "nonce-legacy-sync"
+
+        let ctx = EcholetLaunch.HostReturnContext(launchNonce: nonce, hostBundleId: "com.google.chrome.ios", capturedAtMs: now)
+        _ = EcholetLaunch.writeHostReturnContext(ctx, defaults: defaults)
+
+        // Legacy key is synchronized
+        let legacy = defaults.string(forKey: EcholetLaunch.hostBundleIdKey)
+        expectEqual(legacy, "com.google.chrome.ios", "testLegacyHostBundleIdSync(1)")
+
+        // Clear removes both
+        EcholetLaunch.clearHostReturnContext(defaults: defaults)
+        expectNil(defaults.string(forKey: EcholetLaunch.hostBundleIdKey), "testLegacyHostBundleIdSync(2)")
+        expectNil(EcholetLaunch.readHostReturnContext(defaults: defaults), "testLegacyHostBundleIdSync(3)")
     }
 
     static func testPendingStartIntentHandoff() {

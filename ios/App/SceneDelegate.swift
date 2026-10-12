@@ -46,6 +46,7 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
     }
 
     func sceneWillEnterForeground(_ scene: UIScene) {
+        print("[Echolet-APP] SCENE_WILL_ENTER_FOREGROUND")
         // App became active/foreground: ensure WarmIPCService is polling
         WarmIPCService.shared.startPolling()
         // Idempotent foreground coordination: honors keyboard demand if pending,
@@ -57,7 +58,16 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         )
     }
 
+    func sceneDidBecomeActive(_ scene: UIScene) {
+        print("[Echolet-APP] SCENE_DID_BECOME_ACTIVE")
+    }
+
+    func sceneWillResignActive(_ scene: UIScene) {
+        print("[Echolet-APP] SCENE_WILL_RESIGN_ACTIVE")
+    }
+
     func sceneDidEnterBackground(_ scene: UIScene) {
+        print("[Echolet-APP] SCENE_DID_ENTER_BACKGROUND")
         // Background transition: retain polling only if active recording is underway
         if AudioCaptureController.shared.status != .recording {
             WarmIPCService.shared.stopPolling()

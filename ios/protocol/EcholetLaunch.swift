@@ -90,6 +90,100 @@ public enum EcholetLaunch {
         return id
     }
 
+    /// A bundle id we are willing to bring forward with
+    /// `openApplicationWithBundleID:`. Rejects empty values, process
+    /// identifiers, SpringBoard / WebKit helpers, and our own bundles.
+    /// `com.apple.Maps` and `com.google.chrome.ios` both pass.
+    public static func isReturnableHostBundleId(_ raw: String?) -> Bool {
+        guard let id = normalizeHostBundleId(raw) else { return false }
+        let labels = id.split(separator: ".", omittingEmptySubsequences: false)
+        guard labels.count >= 3 else { return false }
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-"))
+        for label in labels {
+            guard !label.isEmpty, label.unicodeScalars.allSatisfy({ allowed.contains($0) }) else {
+                return false
+            }
+        }
+        let lower = id.lowercased()
+        if lower.contains("echolet") { return false }
+        let blockedPrefixes = [
+            "com.apple.springboard",
+            "com.apple.backboard",
+            "com.apple.frontboard",
+            "com.apple.webkit"
+        ]
+        if blockedPrefixes.contains(where: { lower.hasPrefix($0) }) { return false }
+        return true
+    }
+
+    /// Keyboard-resolved host first, then the URL source application, then a
+    /// bundle id actually read from the system back-badge. A visible
+    /// "◀ Chrome" label is not itself a bundle id, so the badge is last.
+    /// Duplicates and non-returnable ids are dropped.
+    public static func orderedReturnHosts(breadcrumb: String?, storedHost: String?, sourceApp: String?) -> [String] {
+        var seen = Set<String>()
+        var ordered: [String] = []
+        for raw in [storedHost, sourceApp, breadcrumb] {
+            guard let id = normalizeHostBundleId(raw), isReturnableHostBundleId(id) else { continue }
+            if seen.insert(id).inserted {
+                ordered.append(id)
+            }
+        }
+        return ordered
+    }
+
+    public static let manualReturnHint = "Recording is ready. Tap ◀ Previous App to continue."
+
+    /// Hosts we can try to foreground. The URL is only `scheme://` so Chrome
+    /// is brought forward without opening a new tab.
+    public struct KnownReturnHost: Equatable {
+        public let name: String
+        public let bundleId: String
+        public let urlScheme: String
+
+        public var returnURL: URL? { URL(string: "\(urlScheme)://") }
+    }
+
+    public static let knownReturnHosts: [KnownReturnHost] = [
+        KnownReturnHost(name: "Apple Maps", bundleId: "com.apple.Maps", urlScheme: "maps"),
+        KnownReturnHost(name: "Google Chrome", bundleId: "com.google.chrome.ios", urlScheme: "googlechrome"),
+        KnownReturnHost(name: "Apple Files", bundleId: "com.apple.DocumentsApp", urlScheme: "shareddocuments"),
+        KnownReturnHost(name: "ChatGPT", bundleId: "com.openai.chat", urlScheme: "chatgpt")
+    ]
+
+    public static func knownReturnHost(bundleId: String) -> KnownReturnHost? {
+        guard let id = normalizeHostBundleId(bundleId) else { return nil }
+        return knownReturnHosts.first { $0.bundleId.caseInsensitiveCompare(id) == .orderedSame }
+    }
+
+    public static func returnURL(forHostBundleId bundleId: String) -> URL? {
+        knownReturnHost(bundleId: bundleId)?.returnURL
+    }
+
+    public enum HostReturnStep: Equatable {
+        case openBundle(String)
+        case openURL(URL, bundleId: String)
+        case stay(String)
+    }
+
+    /// The only automatic bundle-id attempt. Callers must not repeat it when
+    /// the API reports success.
+    public static func initialReturnStep(hostBundleId: String?) -> HostReturnStep {
+        guard let id = normalizeHostBundleId(hostBundleId), isReturnableHostBundleId(id) else {
+            return .stay("no_returnable_host")
+        }
+        return .openBundle(id)
+    }
+
+    /// Used only when the bundle-id API explicitly rejects the open.
+    public static func afterBundleOpenRejected(hostBundleId: String) -> HostReturnStep {
+        guard let id = normalizeHostBundleId(hostBundleId), isReturnableHostBundleId(id),
+              let url = returnURL(forHostBundleId: id) else {
+            return .stay("bundle_open_rejected")
+        }
+        return .openURL(url, bundleId: id)
+    }
+
     public static func writeHostReturnContext(_ ctx: HostReturnContext, defaults: UserDefaults) -> Bool {
         guard isInstanceValid(ctx.launchNonce), let normId = normalizeHostBundleId(ctx.hostBundleId) else { return false }
         let cleanCtx = HostReturnContext(launchNonce: ctx.launchNonce, hostBundleId: normId, capturedAtMs: ctx.capturedAtMs)
