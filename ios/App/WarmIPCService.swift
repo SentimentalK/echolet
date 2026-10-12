@@ -237,16 +237,25 @@ public final class WarmIPCService {
     // there via LSApplicationWorkspace (user explicitly accepts private API
     // usage). Every step is logged; any failure leaves the user in the
     // Echolet app (never suspends the process).
-    private func attemptReturnToHostApp(reason: String) {
+    private func attemptReturnToHostApp(nonce: String?, reason: String) {
         guard let defaults = sharedDefaults else {
             print("[Echolet-APP] RETURN_ATTEMPT(unavailable_defaults reason=\(reason))")
             return
         }
-        guard let hostBundleId = EcholetLaunch.readHostBundleId(defaults: defaults) else {
-            print("[Echolet-APP] RETURN_ATTEMPT(no_host_bundle_id_known reason=\(reason) -> user stays in Echolet)")
+        let now = WarmIPCService.currentTimeMs()
+        var targetHost: String? = nil
+
+        if let nonce = nonce, let ctx = EcholetLaunch.freshHostReturnContext(forNonce: nonce, nowMs: now, defaults: defaults) {
+            targetHost = ctx.hostBundleId
+            print("[Echolet-APP] RETURN_ATTEMPT(nonce_matched=\(String(nonce.prefix(8)))… host=\(ctx.hostBundleId) reason=\(reason))")
+        } else {
+            // If no fresh nonce-matching context exists, fail closed: do NOT use stale/unrelated host ID!
+            print("[Echolet-APP] RETURN_SKIPPED(no_fresh_host_return_context nonce=\(nonce ?? "nil") reason=\(reason) -> user stays in Echolet)")
             return
         }
-        print("[Echolet-APP] RETURN_ATTEMPT(host=\(hostBundleId) reason=\(reason))")
+
+        guard let hostBundleId = targetHost else { return }
+
         guard let workspaceClass = NSClassFromString("LSApplicationWorkspace") as? LSApplicationWorkspaceShim.Type else {
             print("[Echolet-APP] RETURN_RESULT(false LSApplicationWorkspace unavailable) user stays in Echolet")
             return
@@ -464,7 +473,7 @@ public final class WarmIPCService {
                 defaults: defaults
             )
             print("[Echolet-APP] MIC_NATIVE_READY(adopted_existing_recorder,nonce=\(String(nonce.prefix(8)))…)")
-            self.attemptReturnToHostApp(reason: "mic_native_ready_adopted_existing_recorder")
+            self.attemptReturnToHostApp(nonce: nonce, reason: "mic_native_ready_adopted_existing_recorder")
             return
         }
 
@@ -890,7 +899,7 @@ public final class WarmIPCService {
                     // Best-effort return to the app the keyboard was summoned
                     // into (LSApplicationWorkspace via responder/perform; if
                     // it fails, the user simply stays in the Echolet app).
-                    self.attemptReturnToHostApp(reason: "mic_native_ready")
+                    self.attemptReturnToHostApp(nonce: pending.nonce, reason: "mic_native_ready")
                 }
                 DispatchQueue.main.async { [weak self] in
                     guard let self = self else { return }

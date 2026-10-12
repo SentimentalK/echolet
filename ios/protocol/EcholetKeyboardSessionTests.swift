@@ -162,6 +162,10 @@ enum EcholetKeyboardSessionTests {
         testGuardedPartialDeletionOnCursorMismatch()
         testColdProcessRecoveryNewEpoch()
         testPreparedDemandURLRotatesNearExpiry()
+        testExplicitStartIntentHandoffAfterColdLaunch()
+        testRecreatedKeyboardAdoptsPendingStartIntent()
+        testStaleHostReturnContextRejectedForDifferentNonce()
+        testIntentHandoffExpiresIfColdLaunchTimesOut()
 
         if failures.isEmpty {
             print("EcholetKeyboardSessionTests: ALL PASS")
@@ -173,31 +177,39 @@ enum EcholetKeyboardSessionTests {
     static func testAppearWithNoWarmAutoOpenOnce() {
         let h = FakeHarness()
         let c = h.controller()
+        // On appearance, controller is strictly idle (on-demand): NO auto-open!
         c.handleAppeared()
-        expectEqual(h.openCallsRaw.count, 1, "testAppearWithNoWarmAutoOpenOnce(1)")
-        // Second appearance event in the SAME appearance window dedupes.
-        c.handleAppeared()
-        expectEqual(h.openCallsRaw.count, 1, "testAppearWithNoWarmAutoOpenOnce(2)")
-        // An in-flight launch context resumes (OPEN_RESUMED), never re-opens.
-        c.handleDisappeared()
-        c.handleAppeared()
+        expectEqual(h.openCallsRaw.count, 0, "testAppearWithNoWarmAutoOpenOnce(1)")
+        expectEqual(c.phase, EcholetKeyboardSessionController.Phase.ready, "testAppearWithNoWarmAutoOpenOnce(2)")
+
+        // User explicitly taps start listening -> opens app
+        c.handlePrimaryButtonTap()
         expectEqual(h.openCallsRaw.count, 1, "testAppearWithNoWarmAutoOpenOnce(3)")
         expectEqual(c.phase, EcholetKeyboardSessionController.Phase.opening, "testAppearWithNoWarmAutoOpenOnce(4)")
-        // Once the demand epoch expires (>45s), a fresh appearance may
-        // measure exactly one new attempt.
+
+        // An in-flight launch context resumes (OPEN_RESUMED) across disappear/appear, never re-opens
+        c.handleDisappeared()
+        c.handleAppeared()
+        expectEqual(h.openCallsRaw.count, 1, "testAppearWithNoWarmAutoOpenOnce(5)")
+        expectEqual(c.phase, EcholetKeyboardSessionController.Phase.opening, "testAppearWithNoWarmAutoOpenOnce(6)")
+
+        // Once the demand epoch expires (>45s), controller returns to ready
         c.handleDisappeared()
         h.now += EcholetLaunch.defaultDemandTtlMs + 1
         c.handleAppeared()
-        expectEqual(h.openCallsRaw.count, 2, "testAppearWithNoWarmAutoOpenOnce(5)")
+        expectEqual(c.phase, EcholetKeyboardSessionController.Phase.ready, "testAppearWithNoWarmAutoOpenOnce(7)")
+        // User taps again -> fresh open attempt
+        c.handlePrimaryButtonTap()
+        expectEqual(h.openCallsRaw.count, 2, "testAppearWithNoWarmAutoOpenOnce(8)")
+
         // Demand record written for the launch attempt.
         let demand = EcholetLaunch.readDemand(defaults: h.defaults)
-        expectTrue(demand != nil, "testAppearWithNoWarmAutoOpenOnce(6)")
-        // Nonce in URL matches the demand record.
+        expectTrue(demand != nil, "testAppearWithNoWarmAutoOpenOnce(9)")
         if let demand = demand, let url = h.openCallsRaw.last?.url,
            let parsed = EcholetLaunch.parseDictationPrepareURL(url) {
-            expectEqual(parsed.nonce, demand.nonce, "testAppearWithNoWarmAutoOpenOnce(7)")
+            expectEqual(parsed.nonce, demand.nonce, "testAppearWithNoWarmAutoOpenOnce(10)")
         } else {
-            recordFailure("testAppearWithNoWarmAutoOpenOnce(7)", "missing demand/url")
+            recordFailure("testAppearWithNoWarmAutoOpenOnce(10)", "missing demand/url")
         }
     }
 
@@ -205,12 +217,19 @@ enum EcholetKeyboardSessionTests {
         let h = FakeHarness()
         let c = h.controller()
         h.writeWarmLive(epoch: h.appEpoch, active: true, tsMs: h.now)
+        // Appearance is strictly NO-OP even when warm mic is live!
         c.handleAppeared()
         expectEqual(h.openCallsRaw.count, 0, "testFreshWarmLiveSkipsOpenAndStartsDirectly(1)")
-        expectEqual(c.phase, EcholetKeyboardSessionController.Phase.starting, "testFreshWarmLiveSkipsOpenAndStartsDirectly(2)")
+        expectEqual(c.phase, EcholetKeyboardSessionController.Phase.ready, "testFreshWarmLiveSkipsOpenAndStartsDirectly(2)")
+        expectEqual(h.lastRequest(), nil, "testFreshWarmLiveSkipsOpenAndStartsDirectly(3)")
+
+        // User taps start -> starts directly with zero open calls
+        c.handlePrimaryButtonTap()
+        expectEqual(h.openCallsRaw.count, 0, "testFreshWarmLiveSkipsOpenAndStartsDirectly(4)")
+        expectEqual(c.phase, EcholetKeyboardSessionController.Phase.starting, "testFreshWarmLiveSkipsOpenAndStartsDirectly(5)")
         let req = h.lastRequest()
-        expectEqual(req?.command, EcholetIPC.Command.start, "testFreshWarmLiveSkipsOpenAndStartsDirectly(3)")
-        expectEqual(req?.sequence, UInt64(1), "testFreshWarmLiveSkipsOpenAndStartsDirectly(4)")
+        expectEqual(req?.command, EcholetIPC.Command.start, "testFreshWarmLiveSkipsOpenAndStartsDirectly(6)")
+        expectEqual(req?.sequence, UInt64(1), "testFreshWarmLiveSkipsOpenAndStartsDirectly(7)")
     }
 
     static func testTappedStartAfterUnsupportedOpen() {
@@ -219,18 +238,18 @@ enum EcholetKeyboardSessionTests {
         let c = h.controller()
         c.handleAppeared()
         expectEqual(c.phase, EcholetKeyboardSessionController.Phase.ready, "testTappedStartAfterUnsupportedOpen(1)")
-        expectEqual(h.openCallsRaw.count, 1, "testTappedStartAfterUnsupportedOpen(2)")
-        expectTrue(c.autoLaunchUnsupportedReason?.contains("AUTO_LAUNCH_UNSUPPORTED") == true || c.autoLaunchUnsupportedReason != nil, "testTappedStartAfterUnsupportedOpen(3)")
-        // User tap re-attempts the open (tapped attempts allowed); a
-        // synchronously unsupported open resolves back to ready honestly.
+        expectEqual(h.openCallsRaw.count, 0, "testTappedStartAfterUnsupportedOpen(2)")
+
+        // User tap attempts the open; synchronously unsupported open resolves back to ready
         c.handlePrimaryButtonTap()
-        expectEqual(h.openCallsRaw.count, 2, "testTappedStartAfterUnsupportedOpen(4)")
-        expectEqual(c.phase, EcholetKeyboardSessionController.Phase.ready, "testTappedStartAfterUnsupportedOpen(5)")
+        expectEqual(h.openCallsRaw.count, 1, "testTappedStartAfterUnsupportedOpen(3)")
+        expectEqual(c.phase, EcholetKeyboardSessionController.Phase.ready, "testTappedStartAfterUnsupportedOpen(4)")
+        expectTrue(c.autoLaunchUnsupportedReason?.contains("AUTO_LAUNCH_UNSUPPORTED") == true || c.autoLaunchUnsupportedReason != nil, "testTappedStartAfterUnsupportedOpen(5)")
 
         // While the open is pending (initiated), the state is opening.
         h.nextOpenResult = .initiated
         c.handlePrimaryButtonTap()
-        expectEqual(h.openCallsRaw.count, 3, "testTappedStartAfterUnsupportedOpen(6)")
+        expectEqual(h.openCallsRaw.count, 2, "testTappedStartAfterUnsupportedOpen(6)")
         expectEqual(c.phase, EcholetKeyboardSessionController.Phase.opening, "testTappedStartAfterUnsupportedOpen(7)")
     }
 
@@ -241,7 +260,7 @@ enum EcholetKeyboardSessionTests {
         c.handleAppeared()
         expectEqual(h.openCallsRaw.count, 0, "testRecentWarmReadyBlocksAutoReopen(1)")
         expectEqual(c.phase, EcholetKeyboardSessionController.Phase.ready, "testRecentWarmReadyBlocksAutoReopen(2)")
-        // Tapped attempt still permitted.
+        // Tapped attempt permitted.
         c.handlePrimaryButtonTap()
         expectEqual(h.openCallsRaw.count, 1, "testRecentWarmReadyBlocksAutoReopen(3)")
     }
@@ -252,15 +271,20 @@ enum EcholetKeyboardSessionTests {
         // Old process epoch + aged recorder record: NOT a fresh warm mic.
         h.writeWarmLive(epoch: "epoch-dead", active: true, tsMs: h.now - 60_000)
         c.handleAppeared()
-        expectEqual(h.openCallsRaw.count, 1, "testColdDeadAppStaleWarmLiveOpensApp(1)")
-        expectEqual(c.phase, EcholetKeyboardSessionController.Phase.opening, "testColdDeadAppStaleWarmLiveOpensApp(2)")
+        expectEqual(h.openCallsRaw.count, 0, "testColdDeadAppStaleWarmLiveOpensApp(1)")
+        expectEqual(c.phase, EcholetKeyboardSessionController.Phase.ready, "testColdDeadAppStaleWarmLiveOpensApp(2)")
+        // User taps start -> cold app detected -> opens app
+        c.handlePrimaryButtonTap()
+        expectEqual(h.openCallsRaw.count, 1, "testColdDeadAppStaleWarmLiveOpensApp(3)")
+        expectEqual(c.phase, EcholetKeyboardSessionController.Phase.opening, "testColdDeadAppStaleWarmLiveOpensApp(4)")
     }
 
     static func testStartAckGatesRedStop() {
         let h = FakeHarness()
         let c = h.controller()
         h.writeWarmLive(epoch: h.appEpoch, active: true, tsMs: h.now)
-        c.handleAppeared() // direct START
+        c.handleAppeared()
+        c.handlePrimaryButtonTap() // tap START
         expectEqual(c.shouldShowRedStopButton, false, "testStartAckGatesRedStop(1)")
         expectTrue(c.phase == .starting, "testStartAckGatesRedStop(2)")
         guard let req = h.lastRequest() else {
@@ -288,6 +312,7 @@ enum EcholetKeyboardSessionTests {
         let c = h.controller()
         h.writeWarmLive(epoch: h.appEpoch, active: true, tsMs: h.now)
         c.handleAppeared()
+        c.handlePrimaryButtonTap()
         guard let startReq = h.lastRequest() else {
             recordFailure("testStopExactAckThenInsertOnce", "no start request")
             return
@@ -334,6 +359,7 @@ enum EcholetKeyboardSessionTests {
         h.writeWarmLive(epoch: h.appEpoch, active: true, tsMs: h.now)
         let c = h.controller()
         c.handleAppeared()
+        c.handlePrimaryButtonTap()
         guard let req = h.lastRequest() else {
             recordFailure("testInsertOnceUnicode", "no start request")
             return
@@ -358,6 +384,7 @@ enum EcholetKeyboardSessionTests {
         h.writeWarmLive(epoch: h.appEpoch, active: true, tsMs: h.now)
         let c = h.controller()
         c.handleAppeared()
+        c.handlePrimaryButtonTap()
         guard let req = h.lastRequest() else {
             recordFailure("testEditorMismatchFailsClosed", "no start request")
             return
@@ -383,6 +410,7 @@ enum EcholetKeyboardSessionTests {
         h.writeWarmLive(epoch: h.appEpoch, active: true, tsMs: h.now)
         let c = h.controller()
         c.handleAppeared()
+        c.handlePrimaryButtonTap()
         guard let req = h.lastRequest() else {
             recordFailure("testOtherSessionAndStaleResponsesIgnored", "no start request")
             return
@@ -410,6 +438,7 @@ enum EcholetKeyboardSessionTests {
         h.writeWarmLive(epoch: h.appEpoch, active: true, tsMs: h.now)
         let c = h.controller()
         c.handleAppeared()
+        c.handlePrimaryButtonTap()
         guard let req = h.lastRequest() else {
             recordFailure("testFocusChangeCancelsSession", "no start request")
             return
@@ -433,6 +462,7 @@ enum EcholetKeyboardSessionTests {
         h.writeWarmLive(epoch: h.appEpoch, active: true, tsMs: h.now)
         let c = h.controller()
         c.handleAppeared()
+        c.handlePrimaryButtonTap()
         guard let req = h.lastRequest() else {
             recordFailure("testInsertChurnDoesNotCancelSession", "no start request")
             return
@@ -459,6 +489,7 @@ enum EcholetKeyboardSessionTests {
         h.writeWarmLive(epoch: h.appEpoch, active: true, tsMs: h.now)
         let c = h.controller()
         c.handleAppeared()
+        c.handlePrimaryButtonTap()
         guard let req = h.lastRequest() else {
             recordFailure("testHideCancelsSession", "no start request")
             return
@@ -484,6 +515,7 @@ enum EcholetKeyboardSessionTests {
         h.writeWarmLive(epoch: h.appEpoch, active: true, tsMs: h.now)
         let c = h.controller()
         c.handleAppeared()
+        c.handlePrimaryButtonTap()
         expectTrue(h.sentRequestCount() >= 1, "testRapidTapsDeduplicated(0)")
         // While starting, extra START taps are state-gated.
         c.handlePrimaryButtonTap()
@@ -512,6 +544,8 @@ enum EcholetKeyboardSessionTests {
         let h = FakeHarness()
         let c = h.controller()
         c.handleAppeared()
+        // Tap start listening triggers open
+        c.handlePrimaryButtonTap()
         expectEqual(h.openCallsRaw.count, 1, "testWarmReadyEvidenceAutoStartsOnce(1)")
         let nonce = h.warmReadyPhaseNonce()
         expectTrue(nonce != nil, "testWarmReadyEvidenceAutoStartsOnce(2)")
@@ -543,6 +577,7 @@ enum EcholetKeyboardSessionTests {
         h.writeWarmLive(epoch: h.appEpoch, active: true, tsMs: h.now)
         let c = h.controller()
         c.handleAppeared()
+        c.handlePrimaryButtonTap()
         guard let req = h.lastRequest() else {
             recordFailure("testPermissionFailureBlockedResponse", "no start request")
             return
@@ -561,6 +596,7 @@ enum EcholetKeyboardSessionTests {
         h.writeWarmLive(epoch: h.appEpoch, active: true, tsMs: h.now)
         let c = h.controller()
         c.handleAppeared()
+        c.handlePrimaryButtonTap()
         guard let req = h.lastRequest() else {
             recordFailure("testLivePartialStreaming", "no start request")
             return
@@ -604,6 +640,7 @@ enum EcholetKeyboardSessionTests {
         h.writeWarmLive(epoch: h.appEpoch, active: true, tsMs: h.now)
         let c = h.controller()
         c.handleAppeared()
+        c.handlePrimaryButtonTap()
         guard let req = h.lastRequest() else {
             recordFailure("testFinalReconcilesStreamedPartial", "no start request")
             return
@@ -631,6 +668,7 @@ enum EcholetKeyboardSessionTests {
         h2.writeWarmLive(epoch: h2.appEpoch, active: true, tsMs: h2.now)
         let c2 = h2.controller()
         c2.handleAppeared()
+        c2.handlePrimaryButtonTap()
         let req2 = h2.lastRequest()!
         h2.writeResponse(sessionId: req2.sessionId, ackReq: req2.requestId, ackSeq: req2.sequence, rev: 1, state: .listening)
         c2.handleTimerTick()
@@ -649,6 +687,7 @@ enum EcholetKeyboardSessionTests {
         h.writeWarmLive(epoch: h.appEpoch, active: true, tsMs: h.now)
         let c = h.controller()
         c.handleAppeared()
+        c.handlePrimaryButtonTap()
         let req = h.lastRequest()!
         h.writeResponse(sessionId: req.sessionId, ackReq: req.requestId, ackSeq: req.sequence, rev: 1, state: .listening)
         c.handleTimerTick()
@@ -664,6 +703,7 @@ enum EcholetKeyboardSessionTests {
         let h = FakeHarness()
         let c = h.controller()
         c.handleAppeared()
+        c.handlePrimaryButtonTap() // tap triggers open
         expectEqual(h.openCallsRaw.count, 1, "testOpenTimeoutUnsupported(1)")
         expectEqual(c.phase, EcholetKeyboardSessionController.Phase.opening, "testOpenTimeoutUnsupported(2)")
         h.now += EcholetKeyboardSessionController.openEvidenceTimeoutMs + 1
@@ -677,6 +717,7 @@ enum EcholetKeyboardSessionTests {
         h.writeWarmLive(epoch: h.appEpoch, active: true, tsMs: h.now)
         let c = h.controller()
         c.handleAppeared()
+        c.handlePrimaryButtonTap()
         expectTrue(c.phase == .starting, "testStartAckTimeout(1)")
         h.now += EcholetKeyboardSessionController.startAckTimeoutMs + 1
         c.handleTimerTick()
@@ -705,11 +746,12 @@ enum EcholetKeyboardSessionTests {
             recordFailure("testPreparedDemandURLMatchesDemandRecord(4)", "missing demand/url parsed")
         }
 
-        // When warm live mic exists, appear clears preparedDemandURL and adopts directly
+        // When warm live mic exists, tap starts directly with zero open
         let h2 = FakeHarness()
         h2.writeWarmLive(epoch: h2.appEpoch, active: true, tsMs: h2.now)
         let c2 = h2.controller()
         c2.handleAppeared()
+        c2.handlePrimaryButtonTap()
         expectTrue(c2.preparedDemandURL == nil, "testPreparedDemandURLMatchesDemandRecord(5)")
         expectEqual(c2.phase, EcholetKeyboardSessionController.Phase.starting, "testPreparedDemandURLMatchesDemandRecord(6)")
     }
@@ -719,6 +761,7 @@ enum EcholetKeyboardSessionTests {
         h.writeWarmLive(epoch: h.appEpoch, active: true, tsMs: h.now)
         let c = h.controller()
         c.handleAppeared()
+        c.handlePrimaryButtonTap()
         let req = h.lastRequest()!
         h.writeResponse(sessionId: req.sessionId, ackReq: req.requestId, ackSeq: req.sequence, rev: 1, state: .listening)
         c.handleTimerTick()
@@ -753,15 +796,19 @@ enum EcholetKeyboardSessionTests {
         // Controller must recognize old warm record is stale due to epoch mismatch
         expectTrue(!c.freshWarmLiveExists(), "testColdProcessRecoveryNewEpoch(1)")
 
-        // Appearance should trigger fresh open attempt
+        // Appearance is strictly on-demand (no auto open)
         c.handleAppeared()
-        expectEqual(h.openCallsRaw.count, 1, "testColdProcessRecoveryNewEpoch(2)")
-        expectEqual(c.phase, EcholetKeyboardSessionController.Phase.opening, "testColdProcessRecoveryNewEpoch(3)")
+        expectEqual(h.openCallsRaw.count, 0, "testColdProcessRecoveryNewEpoch(2)")
+
+        // User taps start -> cold app detected -> open attempt triggered
+        c.handlePrimaryButtonTap()
+        expectEqual(h.openCallsRaw.count, 1, "testColdProcessRecoveryNewEpoch(3)")
+        expectEqual(c.phase, EcholetKeyboardSessionController.Phase.opening, "testColdProcessRecoveryNewEpoch(4)")
 
         // Newly launched app publishes warm-ready phase for the demand nonce under epoch-2-new
         guard let url = h.openCallsRaw.last?.url,
               let parsed = EcholetLaunch.parseDictationPrepareURL(url) else {
-            recordFailure("testColdProcessRecoveryNewEpoch(4)", "missing parsed URL")
+            recordFailure("testColdProcessRecoveryNewEpoch(5)", "missing parsed URL")
             return
         }
         _ = EcholetLaunch.writePhase(
@@ -784,9 +831,9 @@ enum EcholetKeyboardSessionTests {
 
         // Tick resolves warmReady evidence and issues v2 START with new app epoch
         c.handleTimerTick()
-        expectEqual(c.phase, EcholetKeyboardSessionController.Phase.starting, "testColdProcessRecoveryNewEpoch(5)")
+        expectEqual(c.phase, EcholetKeyboardSessionController.Phase.starting, "testColdProcessRecoveryNewEpoch(6)")
         let req = h.lastRequest()!
-        expectEqual(req.appEpoch, "epoch-2-new", "testColdProcessRecoveryNewEpoch(6)")
+        expectEqual(req.appEpoch, "epoch-2-new", "testColdProcessRecoveryNewEpoch(7)")
     }
 
     static func testPreparedDemandURLRotatesNearExpiry() {
@@ -805,6 +852,105 @@ enum EcholetKeyboardSessionTests {
         expectTrue(demand1.nonce != demand2.nonce, "testPreparedDemandURLRotatesNearExpiry(2)")
         let parsed = EcholetLaunch.parseDictationPrepareURL(url2)!
         expectEqual(parsed.nonce, demand2.nonce, "testPreparedDemandURLRotatesNearExpiry(3)")
+    }
+
+    static func testExplicitStartIntentHandoffAfterColdLaunch() {
+        let h = FakeHarness()
+        let c = h.controller()
+
+        // 1. Keyboard appears: idle, no requests sent, no open calls
+        c.handleAppeared()
+        expectEqual(h.openCallsRaw.count, 0, "testExplicitStartIntentHandoffAfterColdLaunch(1)")
+        expectEqual(c.phase, EcholetKeyboardSessionController.Phase.ready, "testExplicitStartIntentHandoffAfterColdLaunch(2)")
+        expectEqual(h.lastRequest(), nil, "testExplicitStartIntentHandoffAfterColdLaunch(3)")
+
+        // 2. User taps Start Listening: records PendingStartIntent and opens app
+        c.handlePrimaryButtonTap()
+        expectEqual(h.openCallsRaw.count, 1, "testExplicitStartIntentHandoffAfterColdLaunch(4)")
+        expectEqual(c.phase, EcholetKeyboardSessionController.Phase.opening, "testExplicitStartIntentHandoffAfterColdLaunch(5)")
+
+        let intent = EcholetLaunch.readPendingStartIntent(defaults: h.defaults)
+        expectTrue(intent != nil, "testExplicitStartIntentHandoffAfterColdLaunch(6)")
+
+        // 3. User switches to main app (keyboard disappears)
+        c.handleDisappeared()
+
+        // 4. Main app warms up mic and returns to host
+        h.now += 800
+        h.writeWarmLive(epoch: h.appEpoch, active: true, tsMs: h.now)
+
+        // 5. User returns to host (keyboard appears)
+        c.handleAppeared()
+
+        // Controller must have adopted the PendingStartIntent, cleared it, and immediately issued START!
+        expectEqual(c.phase, EcholetKeyboardSessionController.Phase.starting, "testExplicitStartIntentHandoffAfterColdLaunch(7)")
+        let req = h.lastRequest()
+        expectEqual(req?.command, EcholetIPC.Command.start, "testExplicitStartIntentHandoffAfterColdLaunch(8)")
+        expectEqual(EcholetLaunch.readPendingStartIntent(defaults: h.defaults), nil, "testExplicitStartIntentHandoffAfterColdLaunch(9)")
+    }
+
+    static func testRecreatedKeyboardAdoptsPendingStartIntent() {
+        let h = FakeHarness()
+        let c1 = h.controller()
+
+        // User taps Start Listening on instance 1
+        c1.handleAppeared()
+        c1.handlePrimaryButtonTap()
+        expectEqual(h.openCallsRaw.count, 1, "testRecreatedKeyboardAdoptsPendingStartIntent(1)")
+        c1.handleDisappeared()
+
+        // Main app warms mic
+        h.now += 600
+        h.writeWarmLive(epoch: h.appEpoch, active: true, tsMs: h.now)
+
+        // System kills c1 and instantiates brand new controller instance c2
+        let c2 = h.controller()
+        expectEqual(c2.phase, EcholetKeyboardSessionController.Phase.ready, "testRecreatedKeyboardAdoptsPendingStartIntent(2)")
+
+        // c2 appears in host: should recover pending intent from defaults and issue START directly!
+        c2.handleAppeared()
+        expectEqual(c2.phase, EcholetKeyboardSessionController.Phase.starting, "testRecreatedKeyboardAdoptsPendingStartIntent(3)")
+        let req = h.lastRequest()
+        expectEqual(req?.command, EcholetIPC.Command.start, "testRecreatedKeyboardAdoptsPendingStartIntent(4)")
+        expectEqual(EcholetLaunch.readPendingStartIntent(defaults: h.defaults), nil, "testRecreatedKeyboardAdoptsPendingStartIntent(5)")
+    }
+
+    static func testStaleHostReturnContextRejectedForDifferentNonce() {
+        let h = FakeHarness()
+        // Simulate previous launch with nonce-1 in Chrome
+        let hostChrome = EcholetLaunch.HostReturnContext(
+            launchNonce: "nonce-1-chrome",
+            hostBundleId: "com.google.chrome.ios",
+            capturedAtMs: h.now
+        )
+        _ = EcholetLaunch.writeHostReturnContext(hostChrome, defaults: h.defaults)
+
+        // New launch starts with nonce-2 (e.g. In Notes where probe failed)
+        let activeNonce = "nonce-2-notes"
+        EcholetLaunch.clearHostReturnContext(defaults: h.defaults)
+
+        // Probe fails -> no context written for nonce-2
+        let freshContext = EcholetLaunch.freshHostReturnContext(forNonce: activeNonce, nowMs: h.now + 100, defaults: h.defaults)
+        // Must be nil! Chrome must NOT be returned
+        expectEqual(freshContext, nil, "testStaleHostReturnContextRejectedForDifferentNonce(1)")
+    }
+
+    static func testIntentHandoffExpiresIfColdLaunchTimesOut() {
+        let h = FakeHarness()
+        let c = h.controller()
+
+        c.handleAppeared()
+        c.handlePrimaryButtonTap()
+        c.handleDisappeared()
+
+        // Time elapses past TTL without warm live mic
+        h.now += EcholetLaunch.defaultDemandTtlMs + 5_000
+
+        // Keyboard appears: intent has expired
+        c.handleAppeared()
+        expectEqual(c.phase, EcholetKeyboardSessionController.Phase.ready, "testIntentHandoffExpiresIfColdLaunchTimesOut(1)")
+        expectEqual(h.lastRequest(), nil, "testIntentHandoffExpiresIfColdLaunchTimesOut(2)")
+        expectEqual(EcholetLaunch.readPendingStartIntent(defaults: h.defaults), nil, "testIntentHandoffExpiresIfColdLaunchTimesOut(3)")
     }
 }
 

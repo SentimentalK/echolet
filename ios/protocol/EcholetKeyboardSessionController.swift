@@ -67,6 +67,8 @@ public final class EcholetKeyboardSessionController {
         /// The controller records it at session start and at the real
         /// `.listening` ACK, and fails closed at insert time on mismatch.
         public let docFingerprint: () -> (before: String?, after: String?, selected: String?)
+        /// Host return context capture tied to a launch nonce.
+        public let captureHostReturnContext: ((String) -> Void)?
         public let log: ((String) -> Void)?
 
         public init(
@@ -77,6 +79,7 @@ public final class EcholetKeyboardSessionController {
             insertText: @escaping (String) -> Bool,
             deleteBackward: @escaping (Int) -> Void,
             docFingerprint: @escaping () -> (before: String?, after: String?, selected: String?),
+            captureHostReturnContext: ((String) -> Void)? = nil,
             log: ((String) -> Void)? = nil
         ) {
             self.defaults = defaults
@@ -86,6 +89,7 @@ public final class EcholetKeyboardSessionController {
             self.insertText = insertText
             self.deleteBackward = deleteBackward
             self.docFingerprint = docFingerprint
+            self.captureHostReturnContext = captureHostReturnContext
             self.log = log
         }
     }
@@ -219,36 +223,63 @@ public final class EcholetKeyboardSessionController {
 
     // MARK: - Appearance lifecycle
 
-    /// Recognition of REAL warm readiness happens here: if a positively
-    /// fresh warm recorder record exists for the current epoch, START is
-    /// issued directly and the containing app is NOT relaunched.
+    /// On-Demand dictation model:
+    /// Appearance is strictly a NO-OP for automated launches and automated ASR.
+    /// It NEVER automatically opens the containing app and NEVER automatically begins
+    /// dictation on its own.
+    ///
+    /// The ONLY automated start permitted is when the user EXPLICITLY tapped "Start Listening"
+    /// prior to this appearance (recorded in a fresh `PendingStartIntent`), and the containing
+    /// app has now armed and returned to the host.
     public func handleAppeared() {
         autoAttemptDoneForCurrentAppearance = false
         log("KBD_APPEAR")
         _ = consumePendingResponse() // surface state written while hidden
-        // Resume an in-flight launch instead of re-attempting: the demand is
-        // already written and the app may be mid-prepare (or the user may
-        // have just opened it manually — the foreground hand path).
-        if let ctx = launchContext, env.nowMs() - ctx.startedAtMs <= EcholetLaunch.defaultDemandTtlMs {
+
+        let now = env.nowMs()
+
+        // 1. Recover in-flight launch context from defaults if instance was recreated
+        if launchContext == nil, let intent = EcholetLaunch.freshPendingStartIntent(nowMs: now, defaults: env.defaults) {
+            if let demand = EcholetLaunch.readDemand(defaults: env.defaults), demand.nonce == intent.launchNonce {
+                let url = try? EcholetLaunch.makeDictationPrepareURL(nonce: intent.launchNonce, tsMs: intent.initiatedAtMs)
+                if let url = url {
+                    launchContext = LaunchContext(nonce: intent.launchNonce, url: url, startedAtMs: intent.initiatedAtMs, autoStartIssued: false)
+                    preparedDemandURL = url
+                    if phase == .ready {
+                        setPhase(.opening)
+                        log("OPEN_RESUMED(recovered_pending_start_intent)")
+                    }
+                }
+            }
+        } else if let ctx = launchContext, now - ctx.startedAtMs <= EcholetLaunch.defaultDemandTtlMs {
             preparedDemandURL = ctx.url
             if phase == .ready {
                 setPhase(.opening)
                 log("OPEN_RESUMED(inflight_launch)")
             }
-        } else if phase == .ready {
+        }
+
+        // 2. Check for explicit intent handoff:
+        // If a fresh user-initiated start intent exists and warm mic / warmReady is now live,
+        // automatically adopt the session and transition to listening (no second tap needed!).
+        if EcholetLaunch.freshPendingStartIntent(nowMs: now, defaults: env.defaults) != nil {
             if freshWarmLiveExists() {
+                log("INTENT_HANDOFF(warm_live_adopted)")
+                EcholetLaunch.clearPendingStartIntent(defaults: env.defaults)
+                launchContext = nil
                 preparedDemandURL = nil
-                log("OPEN_SKIPPED(warm_live_fresh)")
-                beginStart(reason: "auto_adopt_warm")
-            } else {
-                ensurePreparedDemandURL()
-                attemptLaunch(auto: true)
+                if phase == .ready || phase == .opening {
+                    setPhase(.ready)
+                    beginStart(reason: "user_intent_handoff_warm_live")
+                }
             }
         }
-        // Expired launch context evaporates truthfully.
-        if let ctx = launchContext, env.nowMs() - ctx.startedAtMs > EcholetLaunch.defaultDemandTtlMs {
+
+        // 3. Expired launch context / stale intents evaporate truthfully.
+        if let ctx = launchContext, now - ctx.startedAtMs > EcholetLaunch.defaultDemandTtlMs {
             launchContext = nil
             preparedDemandURL = nil
+            EcholetLaunch.clearPendingStartIntent(defaults: env.defaults)
             log("BLOCKED(launch_nonce_expired)")
             if phase == .opening {
                 setPhase(.ready)
@@ -313,6 +344,14 @@ public final class EcholetKeyboardSessionController {
             ttlMs: EcholetLaunch.defaultDemandTtlMs
         )
         _ = EcholetLaunch.writeDemand(demand, defaults: env.defaults)
+
+        // Capture host return context tied specifically to this launch nonce
+        env.captureHostReturnContext?(nonce)
+
+        // Persist explicit user start intent for recoverable handoff
+        let intent = EcholetLaunch.PendingStartIntent(launchNonce: nonce, initiatedAtMs: now)
+        _ = EcholetLaunch.writePendingStartIntent(intent, defaults: env.defaults)
+
         launchContext = LaunchContext(nonce: nonce, url: url, startedAtMs: now, autoStartIssued: false)
         preparedDemandURL = url
         setPhase(.opening)
@@ -333,6 +372,7 @@ public final class EcholetKeyboardSessionController {
     private func failOpen(reason: String) {
         autoLaunchUnsupportedReason = reason
         launchContext = nil
+        EcholetLaunch.clearPendingStartIntent(defaults: env.defaults)
         if !reason.contains("AUTO_LAUNCH_UNSUPPORTED") {
             preparedDemandURL = nil
         }
@@ -552,13 +592,16 @@ public final class EcholetKeyboardSessionController {
         }
 
         // Alternative genuine evidence: warm recorder now live.
-        if phase == .opening, freshWarmLiveExists() {
-            log("OPEN_RESULT(evidence_warm_live)")
-            launchContext = nil
-            preparedDemandURL = nil
-            setPhase(.ready)
-            beginStart(reason: "warm_live_evidence")
-            return
+        if (phase == .opening || phase == .ready), freshWarmLiveExists() {
+            if EcholetLaunch.freshPendingStartIntent(nowMs: now, defaults: env.defaults) != nil || phase == .opening {
+                log("OPEN_RESULT(evidence_warm_live)")
+                EcholetLaunch.clearPendingStartIntent(defaults: env.defaults)
+                launchContext = nil
+                preparedDemandURL = nil
+                setPhase(.ready)
+                beginStart(reason: "warm_live_evidence")
+                return
+            }
         }
 
         if phase == .opening, now - ctx.startedAtMs > EcholetKeyboardSessionController.openEvidenceTimeoutMs {
@@ -578,6 +621,7 @@ public final class EcholetKeyboardSessionController {
         guard activeSession == nil else { return }
         // warmReady evidence authorizes the START regardless of the current
         // opening presentation state; evidence is consumed exactly once.
+        EcholetLaunch.clearPendingStartIntent(defaults: env.defaults)
         launchContext = nil
         preparedDemandURL = nil
         setPhase(.ready)

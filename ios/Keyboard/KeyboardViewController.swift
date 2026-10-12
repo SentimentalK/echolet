@@ -48,7 +48,6 @@ class KeyboardViewController: UIInputViewController {
         self.sharedDefaults = UserDefaults(suiteName: Self.appGroupId)
         buildController()
         setupUI()
-        captureHostBundleId()
     }
 
     private func buildController() {
@@ -82,6 +81,9 @@ class KeyboardViewController: UIInputViewController {
                     after: self?.textDocumentProxy.documentContextAfterInput,
                     selected: self?.textDocumentProxy.selectedText
                 )
+            },
+            captureHostReturnContext: { [weak self] nonce in
+                self?.captureAndStoreHostReturnContext(forNonce: nonce)
             },
             log: { event in
                 // Compact DEBUG event log; never logs audio content.
@@ -129,11 +131,11 @@ class KeyboardViewController: UIInputViewController {
 
     /// ObjC method signature: - (void)openURL:(NSURL*)url
     ///         options:(NSDictionary<UIApplicationOpenURLOptionsKey,id>*)options
-    /// completionHandler:(void (^)(BOOL, NSError *))completion
+    /// completionHandler:(void (^)(BOOL))completion
     private typealias OpenURLMethod =
         @convention(c) (NSObject, Selector, URL, NSDictionary, Any?) -> Void
     private typealias OpenCompletionBlock =
-        @convention(block) (Bool, Error?) -> Void
+        @convention(block) (Bool) -> Void
 
     private func performHostOpenAttempt(url: URL) -> EcholetKeyboardSessionController.OpenAttemptResult {
         // Direct private LSApplicationWorkspace path:
@@ -182,12 +184,12 @@ class KeyboardViewController: UIInputViewController {
         }
 
         let isScene = targetResponder.isKind(of: NSClassFromString("UIScene") ?? NSObject.self)
-        let completion: OpenCompletionBlock = { [weak self] success, error in
+        let completion: OpenCompletionBlock = { [weak self] success in
             DispatchQueue.main.async {
-                print("[Echolet-KBD] OPEN_IMPL_CALLBACK(success=\(success),error=\(error?.localizedDescription ?? "none"))")
+                print("[Echolet-KBD] OPEN_IMPL_CALLBACK(success=\(success))")
                 self?.controller?.handleOpenCompletion(
                     success: success,
-                    reason: success ? nil : (error?.localizedDescription ?? "responder_open_rejected")
+                    reason: success ? nil : "responder_open_rejected"
                 )
             }
         }
@@ -228,14 +230,14 @@ class KeyboardViewController: UIInputViewController {
         return nil
     }
 
-    // MARK: - Host bundle id capture (best-effort, for return-to-host)
+    // MARK: - Host bundle id capture (best-effort, nonce-bound)
     //
     // Probes KVC `_hostBundleID` on self / its parent, then the responder
     // chain `_hostApplicationBundleIdentifier`. On iOS 18 the keys may
     // legitimately be unavailable or "<null>"; the failure is logged
     // truthfully and the manual system back gesture remains the route.
 
-    private func captureHostBundleId() {
+    private func captureAndStoreHostReturnContext(forNonce nonce: String) {
         guard let defaults = sharedDefaults else { return }
 
         func probe(_ target: NSObject, _ key: String) -> String? {
@@ -254,11 +256,16 @@ class KeyboardViewController: UIInputViewController {
         if hostBundleId == nil {
             hostBundleId = probe(self, "_hostApplicationBundleIdentifier")
         }
+
+        let now = UInt64(Date().timeIntervalSince1970 * 1000)
         if let id = hostBundleId {
-            let wrote = EcholetLaunch.writeHostBundleId(id, defaults: defaults)
-            print("[Echolet-KBD] HOST_ID(probe=\(id),stored=\(wrote))")
+            let ctx = EcholetLaunch.HostReturnContext(launchNonce: nonce, hostBundleId: id, capturedAtMs: now)
+            let wrote = EcholetLaunch.writeHostReturnContext(ctx, defaults: defaults)
+            print("[Echolet-KBD] HOST_ID(nonce=\(String(nonce.prefix(8)))…,probe=\(id),stored=\(wrote))")
         } else {
-            print("[Echolet-KBD] HOST_ID(no_host_bundle_id_available -> manual back gesture acceptable)")
+            // Clear any prior host return context so we NEVER jump to a stale former host!
+            EcholetLaunch.clearHostReturnContext(defaults: defaults)
+            print("[Echolet-KBD] HOST_ID(no_host_available -> cleared prior host return context)")
         }
     }
 

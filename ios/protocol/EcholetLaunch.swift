@@ -36,14 +36,141 @@ public enum EcholetLaunch {
     /// live recorder (hardware start/stop events are the only writers).
     public static let defaultWarmLiveFreshnessMs: UInt64 = 10_000
 
-    /// Host bundle id of the app the keyboard was summoned into. Written by
-    /// the keyboard (best-effort responder-chain/KVC probe, may legitimately
-    /// be unavailable on iOS 18); read by the app after MIC_NATIVE_READY to
-    /// attempt returning the user to the host app.
+    /// Host return context tied strictly to a launch nonce. Written by the
+    /// keyboard immediately before opening the containing app; read by the app
+    /// after MIC_NATIVE_READY to attempt returning the user to the host app.
+    public static let hostReturnContextKey = "echolet.keyboard.host.return.context.v2"
+    public static let defaultHostReturnTtlMs: UInt64 = 60_000
+
+    /// Explicit user-initiated Start intent. Written ONLY when the user taps
+    /// "Start Listening" and triggers a cold app launch. Enables the keyboard
+    /// to resume and automatically transition to listening upon returning to host.
+    public static let pendingStartIntentKey = "echolet.keyboard.pending.start.intent.v1"
+    public static let defaultPendingStartIntentTtlMs: UInt64 = 60_000
+
+    /// Legacy host bundle id key (maintained for backward compatibility)
     public static let hostBundleIdKey = "echolet.keyboard.host.bundleid.v1"
 
-    // MARK: - Demand record (keyboard-written)
+    // MARK: - Host Return Context (keyboard-written, nonce-bound)
 
+    public struct HostReturnContext: Codable, Equatable {
+        public let launchNonce: String
+        public let hostBundleId: String
+        public let capturedAtMs: UInt64
+
+        public init(launchNonce: String, hostBundleId: String, capturedAtMs: UInt64) {
+            self.launchNonce = launchNonce
+            self.hostBundleId = hostBundleId
+            self.capturedAtMs = capturedAtMs
+        }
+    }
+
+    // MARK: - Pending Start Intent (user-tap initiated, recoverable handoff)
+
+    public struct PendingStartIntent: Codable, Equatable {
+        public let launchNonce: String
+        public let initiatedAtMs: UInt64
+        public let ttlMs: UInt64
+
+        public init(launchNonce: String, initiatedAtMs: UInt64, ttlMs: UInt64 = defaultPendingStartIntentTtlMs) {
+            self.launchNonce = launchNonce
+            self.initiatedAtMs = initiatedAtMs
+            self.ttlMs = ttlMs
+        }
+    }
+
+    // MARK: - Host bundle id helpers
+
+    /// Guards against nil, empty, or KVC "<null>" markers. Returns the
+    /// normalized id or nil.
+    public static func normalizeHostBundleId(_ raw: String?) -> String? {
+        guard var id = raw else { return nil }
+        id = id.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !id.isEmpty, id != "<null>", id != "(null)" else { return nil }
+        return id
+    }
+
+    public static func writeHostReturnContext(_ ctx: HostReturnContext, defaults: UserDefaults) -> Bool {
+        guard isInstanceValid(ctx.launchNonce), let normId = normalizeHostBundleId(ctx.hostBundleId) else { return false }
+        let cleanCtx = HostReturnContext(launchNonce: ctx.launchNonce, hostBundleId: normId, capturedAtMs: ctx.capturedAtMs)
+        guard let data = try? makeEncoder().encode(cleanCtx) else { return false }
+        defaults.set(data, forKey: hostReturnContextKey)
+        // Also update legacy key
+        defaults.set(normId, forKey: hostBundleIdKey)
+        defaults.synchronize()
+        return true
+    }
+
+    public static func readHostReturnContext(defaults: UserDefaults) -> HostReturnContext? {
+        guard let data = defaults.data(forKey: hostReturnContextKey) else { return nil }
+        return try? makeDecoder().decode(HostReturnContext.self, from: data)
+    }
+
+    public static func clearHostReturnContext(defaults: UserDefaults) {
+        defaults.removeObject(forKey: hostReturnContextKey)
+        defaults.removeObject(forKey: hostBundleIdKey)
+        defaults.synchronize()
+    }
+
+    public static func freshHostReturnContext(
+        forNonce nonce: String,
+        nowMs: UInt64,
+        defaults: UserDefaults,
+        ttlMs: UInt64 = defaultHostReturnTtlMs
+    ) -> HostReturnContext? {
+        guard let ctx = readHostReturnContext(defaults: defaults),
+              ctx.launchNonce == nonce,
+              nowMs >= ctx.capturedAtMs,
+              nowMs - ctx.capturedAtMs <= ttlMs else {
+            return nil
+        }
+        return ctx
+    }
+
+    // MARK: - Pending Start Intent helpers
+
+    public static func writePendingStartIntent(_ intent: PendingStartIntent, defaults: UserDefaults) -> Bool {
+        guard isInstanceValid(intent.launchNonce) else { return false }
+        guard let data = try? makeEncoder().encode(intent) else { return false }
+        defaults.set(data, forKey: pendingStartIntentKey)
+        defaults.synchronize()
+        return true
+    }
+
+    public static func readPendingStartIntent(defaults: UserDefaults) -> PendingStartIntent? {
+        guard let data = defaults.data(forKey: pendingStartIntentKey) else { return nil }
+        return try? makeDecoder().decode(PendingStartIntent.self, from: data)
+    }
+
+    public static func clearPendingStartIntent(defaults: UserDefaults) {
+        defaults.removeObject(forKey: pendingStartIntentKey)
+        defaults.synchronize()
+    }
+
+    public static func freshPendingStartIntent(
+        nowMs: UInt64,
+        defaults: UserDefaults
+    ) -> PendingStartIntent? {
+        guard let intent = readPendingStartIntent(defaults: defaults),
+              nowMs >= intent.initiatedAtMs,
+              nowMs - intent.initiatedAtMs <= intent.ttlMs else {
+            return nil
+        }
+        return intent
+    }
+
+    /// Legacy writer maintained for compatibility; writes legacy key only.
+    public static func writeHostBundleId(_ raw: String?, defaults: UserDefaults) -> Bool {
+        guard let id = normalizeHostBundleId(raw) else { return false }
+        defaults.set(id, forKey: hostBundleIdKey)
+        defaults.synchronize()
+        return true
+    }
+
+    public static func readHostBundleId(defaults: UserDefaults) -> String? {
+        guard let id = defaults.string(forKey: hostBundleIdKey) else { return nil }
+        return normalizeHostBundleId(id)
+    }
     public struct DemandRecord: Codable, Equatable {
         public let nonce: String
         public let createdAtMs: UInt64
@@ -75,32 +202,6 @@ public enum EcholetLaunch {
         public let appEpoch: String
         public let recorderActive: Bool
         public let updatedAtMs: UInt64
-    }
-
-    // MARK: - Host bundle id (keyboard-written, best-effort)
-
-    /// Guards against nil, empty, or KVC "<null>" markers. Returns the
-    /// normalized id or nil.
-    public static func normalizeHostBundleId(_ raw: String?) -> String? {
-        guard var id = raw else { return nil }
-        id = id.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !id.isEmpty, id != "<null>", id != "(null)" else { return nil }
-        return id
-    }
-
-    /// Keyboard-side writer; stores the observed host bundle id into the
-    /// App Group. A nil id clears nothing (never destroys a previously
-    /// observed valid id).
-    public static func writeHostBundleId(_ raw: String?, defaults: UserDefaults) -> Bool {
-        guard let id = normalizeHostBundleId(raw) else { return false }
-        defaults.set(id, forKey: hostBundleIdKey)
-        defaults.synchronize()
-        return true
-    }
-
-    public static func readHostBundleId(defaults: UserDefaults) -> String? {
-        guard let id = defaults.string(forKey: hostBundleIdKey) else { return nil }
-        return normalizeHostBundleId(id)
     }
 
     // MARK: - Errors

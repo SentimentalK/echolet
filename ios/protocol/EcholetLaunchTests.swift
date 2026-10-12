@@ -38,6 +38,8 @@ enum EcholetLaunchTests {
         testPhaseFencing()
         testWarmLiveAuthority()
         testWarmLiveInactiveAndStaleEpochFails()
+        testHostReturnContextScoping()
+        testPendingStartIntentHandoff()
 
         if failures.isEmpty {
             print("EcholetLaunchTests: ALL PASS")
@@ -156,6 +158,51 @@ enum EcholetLaunchTests {
 
         // No app epoch published at all.
         expectNil(EcholetLaunch.freshWarmLive(nowMs: now, currentAppEpoch: nil, defaults: defaults), "testWarmLiveNoEpoch(4)")
+    }
+
+    // MARK: - Nonce-bound HostReturnContext & PendingStartIntent tests
+
+    static func testHostReturnContextScoping() {
+        let defaults = freshDefaults()
+        let now: UInt64 = 100_000
+        let nonceA = "nonce-alpha-1234"
+        let nonceB = "nonce-bravo-5678"
+
+        let ctxA = EcholetLaunch.HostReturnContext(launchNonce: nonceA, hostBundleId: "com.google.chrome.ios", capturedAtMs: now)
+        expectTrue(EcholetLaunch.writeHostReturnContext(ctxA, defaults: defaults), "testHostReturnContextScoping(1)")
+
+        // Matching nonce recovers the correct bundle ID
+        let readA = EcholetLaunch.freshHostReturnContext(forNonce: nonceA, nowMs: now, defaults: defaults)
+        expectEqual(readA?.hostBundleId, "com.google.chrome.ios", "testHostReturnContextScoping(2)")
+
+        // Unmatched nonce fails closed (prevent jumping back to Chrome from another app!)
+        let readB = EcholetLaunch.freshHostReturnContext(forNonce: nonceB, nowMs: now, defaults: defaults)
+        expectNil(readB, "testHostReturnContextScoping(3)")
+
+        // Clear removes context
+        EcholetLaunch.clearHostReturnContext(defaults: defaults)
+        expectNil(EcholetLaunch.readHostReturnContext(defaults: defaults), "testHostReturnContextScoping(4)")
+    }
+
+    static func testPendingStartIntentHandoff() {
+        let defaults = freshDefaults()
+        let now: UInt64 = 100_000
+        let nonce = "nonce-intent-4321"
+
+        let intent = EcholetLaunch.PendingStartIntent(launchNonce: nonce, initiatedAtMs: now, ttlMs: 45_000)
+        expectTrue(EcholetLaunch.writePendingStartIntent(intent, defaults: defaults), "testPendingStartIntentHandoff(1)")
+
+        // Fresh intent is readable
+        let fresh = EcholetLaunch.freshPendingStartIntent(nowMs: now + 500, defaults: defaults)
+        expectEqual(fresh?.launchNonce, nonce, "testPendingStartIntentHandoff(2)")
+
+        // Expired intent fails closed
+        let expired = EcholetLaunch.freshPendingStartIntent(nowMs: now + 45_001, defaults: defaults)
+        expectNil(expired, "testPendingStartIntentHandoff(3)")
+
+        // Clear removes intent
+        EcholetLaunch.clearPendingStartIntent(defaults: defaults)
+        expectNil(EcholetLaunch.readPendingStartIntent(defaults: defaults), "testPendingStartIntentHandoff(4)")
     }
 }
 
