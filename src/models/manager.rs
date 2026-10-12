@@ -1,4 +1,5 @@
 use crate::config::EcholetConfig;
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 use crate::models::download::{download_and_install_model_with_progress, ProgressCallback};
 use crate::models::manifest::ModelManifest;
 use crate::models::registry::ModelRegistry;
@@ -191,6 +192,10 @@ impl ModelManager {
     /// On success the freshly installed model is registered from its actual
     /// on-disk manifest. The active model is intentionally **not** changed; the
     /// caller must explicitly call [`ModelManager::set_active_model`].
+    ///
+    /// Desktop-only: the iOS containing app performs its own URLSession
+    /// transport and installs via `install_model_from_archive` instead.
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     pub fn install_registry_model(
         &mut self,
         model_id: &str,

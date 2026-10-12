@@ -18,6 +18,13 @@ use std::os::raw::{c_char, c_float, c_int};
 
 #[cfg(target_os = "ios")]
 mod probe {
+
+    #[cfg(target_os = "ios")]
+    #[path = "model.rs"]
+    pub mod model;
+    // FFI symbols are #[no_mangle] exports; a wildcard re-export would only
+    // trigger dead-code warnings.
+
     use super::{c_char, c_float, c_int};
     use echolet::asr::{OnlineRecognizer, OnlineStream};
     use std::ffi::CStr;
