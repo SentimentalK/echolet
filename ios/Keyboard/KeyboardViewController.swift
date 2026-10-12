@@ -40,6 +40,7 @@ class KeyboardViewController: UIInputViewController {
     private let globeRow = UIStackView()
 
     private var pollTimer: Timer?
+    private var lastKnownHostBundleId: String?
 
     // MARK: - Lifecycle
 
@@ -95,6 +96,10 @@ class KeyboardViewController: UIInputViewController {
 
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
+        if let probed = probeCurrentHostBundleId() {
+            lastKnownHostBundleId = probed
+            print("[Echolet-KBD] APPEAR_HOST_PROBE(\(probed))")
+        }
         controller?.handleAppeared()
         startPolling()
         renderDisplay()
@@ -232,36 +237,84 @@ class KeyboardViewController: UIInputViewController {
 
     // MARK: - Host bundle id capture (best-effort, nonce-bound)
     //
-    // Probes KVC `_hostBundleID` on self / its parent, then the responder
-    // chain `_hostApplicationBundleIdentifier`. On iOS 18 the keys may
-    // legitimately be unavailable or "<null>"; the failure is logged
-    // truthfully and the manual system back gesture remains the route.
+    // Probes runtime ivars and selectors for `_hostBundleID`, `_hostApplicationBundleIdentifier`,
+    // etc. across parent, self, extensionContext, responder chain, and window.
+    // Falls back gracefully if unavailable.
+
+    private func probeCurrentHostBundleId() -> String? {
+        func probeTarget(_ target: AnyObject, key: String) -> String? {
+            // 1. Selector probe
+            let sel = NSSelectorFromString(key)
+            if let obj = target as? NSObject, obj.responds(to: sel) {
+                if let raw = obj.perform(sel), let str = raw.takeUnretainedValue() as? String {
+                    if let norm = EcholetLaunch.normalizeHostBundleId(str) {
+                        return norm
+                    }
+                }
+            }
+            // 2. Safe ivar probe via ObjC runtime (no NSException possible)
+            var cls: AnyClass? = type(of: target)
+            while let currentCls = cls {
+                if let ivar = class_getInstanceVariable(currentCls, key) {
+                    if let raw = object_getIvar(target, ivar) as? String {
+                        if let norm = EcholetLaunch.normalizeHostBundleId(raw) {
+                            return norm
+                        }
+                    }
+                }
+                cls = class_getSuperclass(currentCls)
+            }
+            return nil
+        }
+
+        func probeAllKeys(on target: AnyObject?) -> String? {
+            guard let target = target else { return nil }
+            let candidateKeys = [
+                "_hostBundleID",
+                "hostBundleID",
+                "_hostApplicationBundleIdentifier",
+                "hostApplicationBundleIdentifier",
+                "_hostIdentifier",
+                "hostIdentifier",
+                "_hostProcessBundleIdentifier"
+            ]
+            for key in candidateKeys {
+                if let found = probeTarget(target, key: key) {
+                    return found
+                }
+            }
+            return nil
+        }
+
+        if let p = self.parent, let found = probeAllKeys(on: p) { return found }
+        if let found = probeAllKeys(on: self) { return found }
+        if let extCtx = self.extensionContext, let found = probeAllKeys(on: extCtx) { return found }
+
+        var responder: UIResponder? = self.next
+        while let r = responder {
+            if let found = probeAllKeys(on: r) { return found }
+            responder = r.next
+        }
+
+        if let win = self.view.window, let found = probeAllKeys(on: win) { return found }
+        return nil
+    }
 
     private func captureAndStoreHostReturnContext(forNonce nonce: String) {
         guard let defaults = sharedDefaults else { return }
 
-        func probe(_ target: NSObject, _ key: String) -> String? {
-            // Undefined-key KVC raises NSException (not catchable via
-            // Swift try?), so gate on the getter responding first.
-            let getter = NSSelectorFromString(key)
-            guard target.responds(to: getter) else { return nil }
-            guard let raw = target.perform(getter), let str = raw.takeUnretainedValue() as? String else { return nil }
-            return EcholetLaunch.normalizeHostBundleId(str)
+        let probed = probeCurrentHostBundleId()
+        if let p = probed {
+            lastKnownHostBundleId = p
         }
-
-        var hostBundleId: String? = probe(self, "_hostBundleID")
-        if hostBundleId == nil, let parent = parent {
-            hostBundleId = probe(parent, "_hostBundleID")
-        }
-        if hostBundleId == nil {
-            hostBundleId = probe(self, "_hostApplicationBundleIdentifier")
-        }
+        let targetHost = probed ?? lastKnownHostBundleId
 
         let now = UInt64(Date().timeIntervalSince1970 * 1000)
-        if let id = hostBundleId {
+        if let id = targetHost {
             let ctx = EcholetLaunch.HostReturnContext(launchNonce: nonce, hostBundleId: id, capturedAtMs: now)
             let wrote = EcholetLaunch.writeHostReturnContext(ctx, defaults: defaults)
-            print("[Echolet-KBD] HOST_ID(nonce=\(String(nonce.prefix(8)))…,probe=\(id),stored=\(wrote))")
+            _ = EcholetLaunch.writeHostBundleId(id, defaults: defaults)
+            print("[Echolet-KBD] HOST_ID(nonce=\(String(nonce.prefix(8)))…,host=\(id),stored=\(wrote))")
         } else {
             // Clear any prior host return context so we NEVER jump to a stale former host!
             EcholetLaunch.clearHostReturnContext(defaults: defaults)

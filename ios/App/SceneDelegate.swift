@@ -17,8 +17,12 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         // Cold launch coordination:
         // Handle URL contexts if present, or check fresh demand / ordered warm prepare.
         let coldURL = connectionOptions.urlContexts.first?.url
+        let sourceApp = connectionOptions.urlContexts.first?.options.sourceApplication
         let urlCount = connectionOptions.urlContexts.count
-        print("[Echolet-APP] SCENE_COLD_CONNECT(contexts=\(urlCount))")
+        print("[Echolet-APP] SCENE_COLD_CONNECT(contexts=\(urlCount),sourceApp=\(sourceApp ?? "nil"))")
+        if let source = sourceApp, !source.isEmpty, !source.contains("echolet") {
+            WarmIPCService.shared.setLastReceivedSourceApp(source)
+        }
         WarmIPCService.shared.coordinatedForegroundBootstrap(
             url: coldURL,
             source: "cold_connect",
@@ -27,7 +31,13 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
     }
 
     func scene(_ scene: UIScene, openURLContexts URLContexts: Set<UIOpenURLContext>) {
-        guard let url = URLContexts.first?.url else { return }
+        guard let context = URLContexts.first else { return }
+        let url = context.url
+        let sourceApp = context.options.sourceApplication
+        print("[Echolet-APP] OPEN_URL_CONTEXTS(url=\(url),sourceApp=\(sourceApp ?? "nil"))")
+        if let source = sourceApp, !source.isEmpty, !source.contains("echolet") {
+            WarmIPCService.shared.setLastReceivedSourceApp(source)
+        }
         WarmIPCService.shared.coordinatedForegroundBootstrap(
             url: url,
             source: "openURLContexts",

@@ -34,7 +34,7 @@ public enum EcholetLaunch {
     public static let defaultPhaseTtlMs: UInt64 = 45_000
     /// A WarmLive record must be at most this old to count as a genuinely
     /// live recorder (hardware start/stop events are the only writers).
-    public static let defaultWarmLiveFreshnessMs: UInt64 = 10_000
+    public static let defaultWarmLiveFreshnessMs: UInt64 = 2_500
 
     /// Host return context tied strictly to a launch nonce. Written by the
     /// keyboard immediately before opening the containing app; read by the app
@@ -355,6 +355,11 @@ public enum EcholetLaunch {
     public static func readWarmLiveRecord(defaults: UserDefaults) -> WarmLiveRecord? {
         guard let data = defaults.data(forKey: warmLiveKey) else { return nil }
         return try? makeDecoder().decode(WarmLiveRecord.self, from: data)
+    }
+
+    public static func clearWarmLive(defaults: UserDefaults) {
+        defaults.removeObject(forKey: warmLiveKey)
+        defaults.synchronize()
     }
 
     /// Keyboard-side authority check: a positively FRESH, ACTIVE warm recorder

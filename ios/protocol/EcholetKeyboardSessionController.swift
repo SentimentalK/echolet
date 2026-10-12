@@ -158,6 +158,7 @@ public final class EcholetKeyboardSessionController {
     private var launchContext: LaunchContext?
     private var autoAttemptDoneForCurrentAppearance = false
     private var lastStartAttemptMs: UInt64 = 0
+    private var lastLaunchAttemptMs: UInt64 = 0
     private var lastRevisionArrivalMs: UInt64 = 0
 
     public init(environment: Environment) {
@@ -317,8 +318,8 @@ public final class EcholetKeyboardSessionController {
     /// Auto attempt: at most once per fresh appearance, never relaunching
     /// over an existing fresh warm recorder, never during a recent
     /// warmReady window (reentry-loop fence).
-    private func attemptLaunch(auto: Bool) {
-        if freshWarmLiveExists() {
+    private func attemptLaunch(auto: Bool, force: Bool = false) {
+        if !force && freshWarmLiveExists() {
             log("OPEN_SKIPPED(warm_live_fresh)")
             beginStart(reason: auto ? "auto_adopt_warm" : "tap_adopt_warm")
             return
@@ -335,8 +336,8 @@ public final class EcholetKeyboardSessionController {
             autoAttemptDoneForCurrentAppearance = true
         }
 
-        let nonce = UUID().uuidString
         let now = env.nowMs()
+        let nonce = UUID().uuidString
         guard let url = try? EcholetLaunch.makeDictationPrepareURL(nonce: nonce, tsMs: now) else {
             return
         }
@@ -639,7 +640,8 @@ public final class EcholetKeyboardSessionController {
                now - lastStartAttemptMs >= EcholetKeyboardSessionController.startAckTimeoutMs {
                 log("START_ACK_TIMEOUT(fallback_to_launch)")
                 activeSession = nil
-                attemptLaunch(auto: false)
+                EcholetLaunch.clearWarmLive(defaults: env.defaults)
+                attemptLaunch(auto: false, force: true)
             }
         case .finalizing:
             let base = lastRevisionArrivalMs > 0 ? lastRevisionArrivalMs : lastStartAttemptMs

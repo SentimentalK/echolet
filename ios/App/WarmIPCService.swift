@@ -73,6 +73,14 @@ public final class WarmIPCService {
     // to publish the completed response snapshot.
     private let pendingFinalTranscriptsLock = NSLock()
     private var pendingFinalTranscripts: [String: String] = [:]
+    private var lastReceivedSourceApp: String?
+
+    public func setLastReceivedSourceApp(_ bundleId: String) {
+        ipcQueue.async { [weak self] in
+            self?.lastReceivedSourceApp = bundleId
+            print("[Echolet-APP] SOURCE_APP_RECORDED(\(bundleId))")
+        }
+    }
 
     private func setupStopTranscriptProvider() {
         self.flowCoordinator.stopFinalTranscriptProvider = { [weak self] sessionId in
@@ -248,27 +256,45 @@ public final class WarmIPCService {
         if let nonce = nonce, let ctx = EcholetLaunch.freshHostReturnContext(forNonce: nonce, nowMs: now, defaults: defaults) {
             targetHost = ctx.hostBundleId
             print("[Echolet-APP] RETURN_ATTEMPT(nonce_matched=\(String(nonce.prefix(8)))… host=\(ctx.hostBundleId) reason=\(reason))")
+        } else if let fallback = self.lastReceivedSourceApp, !fallback.isEmpty, !fallback.contains("echolet") {
+            targetHost = fallback
+            print("[Echolet-APP] RETURN_ATTEMPT(fallback_source_app host=\(fallback) reason=\(reason))")
         } else {
-            // If no fresh nonce-matching context exists, fail closed: do NOT use stale/unrelated host ID!
+            // If no fresh nonce-matching context exists and no fallback source app, fail closed:
             print("[Echolet-APP] RETURN_SKIPPED(no_fresh_host_return_context nonce=\(nonce ?? "nil") reason=\(reason) -> user stays in Echolet)")
             return
         }
 
         guard let hostBundleId = targetHost else { return }
 
-        guard let workspaceClass = NSClassFromString("LSApplicationWorkspace") as? LSApplicationWorkspaceShim.Type else {
-            print("[Echolet-APP] RETURN_RESULT(false LSApplicationWorkspace unavailable) user stays in Echolet")
+        // Give the audio session and mic engine 150ms to settle in foreground before background transition
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+            Self.performWorkspaceOpen(bundleId: hostBundleId)
+        }
+    }
+
+    private static func performWorkspaceOpen(bundleId: String) {
+        guard let workspaceClass = NSClassFromString("LSApplicationWorkspace") as? NSObject.Type else {
+            print("[Echolet-APP] RETURN_RESULT(false LSApplicationWorkspace class unavailable) user stays in Echolet")
             return
         }
-        guard let workspace = workspaceClass.defaultWorkspace?() else {
+        let defaultWorkspaceSel = NSSelectorFromString("defaultWorkspace")
+        guard workspaceClass.responds(to: defaultWorkspaceSel),
+              let workspace = workspaceClass.perform(defaultWorkspaceSel)?.takeUnretainedValue() as? NSObject else {
             print("[Echolet-APP] RETURN_RESULT(false defaultWorkspace nil) user stays in Echolet")
             return
         }
-        if let opened = workspace.openApplicationWithBundleID?(hostBundleId) {
-            print("[Echolet-APP] RETURN_RESULT(openApplicationWithBundleID=\(opened) host=\(hostBundleId))")
-        } else {
-            print("[Echolet-APP] RETURN_RESULT(false openApplicationWithBundleID missing) user stays in Echolet")
+
+        let openSel = NSSelectorFromString("openApplicationWithBundleID:")
+        guard workspace.responds(to: openSel) else {
+            print("[Echolet-APP] RETURN_RESULT(false openApplicationWithBundleID: missing) user stays in Echolet")
+            return
         }
+
+        typealias OpenAppFn = @convention(c) (NSObject, Selector, NSString) -> Bool
+        let fn = unsafeBitCast(workspace.method(for: openSel), to: OpenAppFn.self)
+        let opened = fn(workspace, openSel, bundleId as NSString)
+        print("[Echolet-APP] RETURN_RESULT(openApplicationWithBundleID=\(opened) host=\(bundleId))")
     }
 
     // MARK: - User Arming State
@@ -1109,12 +1135,4 @@ public final class WarmIPCService {
         }
     }
     #endif
-}
-
-/// Best-effort private shim for the app -> host return (user explicitly
-/// permits non-public APIs). All selectors are optional so iOS 18 builds
-/// where LSApplicationWorkspace does not expose them degrade honestly.
-@objc private protocol LSApplicationWorkspaceShim {
-    @objc optional static func defaultWorkspace() -> AnyObject?
-    @objc optional func openApplicationWithBundleID(_ bundleID: String) -> Bool
 }

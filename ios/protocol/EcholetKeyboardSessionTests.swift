@@ -719,10 +719,10 @@ enum EcholetKeyboardSessionTests {
         c.handleAppeared()
         c.handlePrimaryButtonTap()
         expectTrue(c.phase == .starting, "testStartAckTimeout(1)")
-        // Expire the warm record so timeout launch attempt won't just re-adopt
-        h.now += EcholetLaunch.defaultWarmLiveFreshnessMs + EcholetKeyboardSessionController.startAckTimeoutMs + 1
+        // Advance only the startAckTimeoutMs; timeout immediately clears warm live and forces launch!
+        h.now += EcholetKeyboardSessionController.startAckTimeoutMs + 1
         c.handleTimerTick()
-        // Controller automatically falls back to launch attempt without dead-ending!
+        // Controller immediately falls back to launch attempt without stalling!
         expectEqual(c.phase, EcholetKeyboardSessionController.Phase.opening, "testStartAckTimeout(2)")
         expectEqual(h.openCallsRaw.count, 1, "testStartAckTimeout(3)")
     }
