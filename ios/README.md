@@ -189,12 +189,9 @@ and verified at link/bundle level; product keyboard ASR remains future work.
   Package.swift) and ORT **1.27.1** (`onnxruntime-ios-static-xcframework-1.27.1.xcframework.zip`,
   sha256 `985deaff345c7bcfbe4979b2daeec09d7a745b1e9cb73f37f4077364eb578e62`).
   Artifacts land in git-ignored `.local-runtime/ios-native/lib/`.
-- `ios/probe/` (new): opt-in `EcholetNativeProbe` debug app (separate
-  XcodeGen spec, never part of the main `Echolet.xcodeproj`) linking the
-  bridge + sherpa archives and running the probe lifecycle on-device,
-  optionally performing real offline recognition against the bundled
-  `bilingual-zh-en` model folder (X-ASR zh-en 480ms, `echolet-xasr-zh-en-480ms-…`,
-  16 kHz, sha-tracked upstream r1) with the official test wav as input.
+- `ios/probe/` (retired): initial standalone `EcholetNativeProbe` debug app used
+  for J4A validation of static Rust/sherpa linking and offline model inference.
+  Retired and removed once full ASR and warm mic support were integrated into `EcholetApp`.
 
 ### Status gates (as probed 2026-10-10, physical iPad mini 6, iPadOS 18.7.7, devicectl)
 | Gate | Status |
