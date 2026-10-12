@@ -3,7 +3,8 @@ import Darwin
 
 /// Echolet Voice Keyboard (J5 compact voice row).
 ///
-/// ONE horizontal primary row drives the entire flow:
+/// ONE horizontal primary row mimics the system keyboard geometry:
+/// [Globe keycap][Start/Stop filling the middle][Backspace keycap].
 /// * Dark "Start Listening" while idle — tapping begins an exact-session
 ///   v2 START when a genuinely warm recorder is already live, or (bounded,
 ///   once per fresh appearance automatically / on every tap otherwise)
@@ -17,7 +18,8 @@ import Darwin
 /// * An adjacent native BACKSPACE keycap (`delete.left.fill`): one tap
 ///   deletes exactly one preceding grapheme, enabled ONLY when the session
 ///   controller reports a positively idle-ready, session-free state.
-/// * A required Apple globe/next-keyboard key.
+/// * An Apple Globe key in the same row (leading edge, system-keyboard
+///   convention) for next-keyboard switching.
 ///
 /// All decision logic lives in the pure Foundation
 /// `EcholetKeyboardSessionController` (CLI-testable); this controller is the
@@ -39,7 +41,6 @@ class KeyboardViewController: UIInputViewController {
     private let backspaceButton = UIButton(type: .system)
     private let hintLabel = UILabel()
     private let nextKeyboardButton = UIButton(type: .system)
-    private let globeRow = UIStackView()
     private let primaryRow = UIStackView()
 
     private var pollTimer: Timer?
@@ -657,15 +658,33 @@ class KeyboardViewController: UIInputViewController {
             mainStack.bottomAnchor.constraint(lessThanOrEqualTo: view.bottomAnchor, constant: -2)
         ])
 
-        // ONE primary row across the full keyboard width:
-        // Start/Stop occupies most of it; a fixed-size native BACKSPACE
-        // keycap sits adjacent (≥44pt touch target). Never a trash icon.
+        // ONE primary row across the full keyboard width, mimicking the
+        // system keyboard geometry the user is used to:
+        // [Globe keycap][ Start/Stop fills the middle ][Backspace keycap]
+        // Both keycaps are fixed ≥44pt targets; no trash icon anywhere.
         primaryRow.translatesAutoresizingMaskIntoConstraints = false
         primaryRow.axis = .horizontal
         primaryRow.alignment = .fill
         primaryRow.distribution = .fill
         primaryRow.spacing = 6
         mainStack.addArrangedSubview(primaryRow)
+
+        // Globe / next-keyboard affordance styled as a native keycap,
+        // leading edge like the system keyboard.
+        nextKeyboardButton.backgroundColor = Self.keycapColor
+        nextKeyboardButton.tintColor = Self.keycapIconColor
+        nextKeyboardButton.setImage(
+            UIImage(systemName: "globe", withConfiguration: UIImage.SymbolConfiguration(pointSize: 17, weight: .medium)),
+            for: .normal
+        )
+        nextKeyboardButton.accessibilityLabel = "Next keyboard"
+        nextKeyboardButton.accessibilityTraits = .button
+        nextKeyboardButton.isAccessibilityElement = true
+        nextKeyboardButton.layer.cornerRadius = 6
+        nextKeyboardButton.translatesAutoresizingMaskIntoConstraints = false
+        nextKeyboardButton.setContentHuggingPriority(.required, for: .horizontal)
+        nextKeyboardButton.addTarget(self, action: #selector(handleInputModeList(from:with:)), for: .allTouchEvents)
+        primaryRow.addArrangedSubview(nextKeyboardButton)
 
         primaryButton.titleLabel?.font = .boldSystemFont(ofSize: 17)
         primaryButton.setTitleColor(.white, for: .normal)
@@ -685,6 +704,8 @@ class KeyboardViewController: UIInputViewController {
         backspaceButton.addAction(UIAction { [weak self] _ in self?.didTapBackspace() }, for: .touchUpInside)
         primaryRow.addArrangedSubview(backspaceButton)
         NSLayoutConstraint.activate([
+            nextKeyboardButton.widthAnchor.constraint(equalToConstant: 46),
+            nextKeyboardButton.heightAnchor.constraint(equalToConstant: 46),
             backspaceButton.widthAnchor.constraint(equalToConstant: 46),
             backspaceButton.heightAnchor.constraint(equalToConstant: 46),
             primaryButton.heightAnchor.constraint(equalToConstant: 46)
@@ -712,19 +733,6 @@ class KeyboardViewController: UIInputViewController {
         hintLabel.isHidden = true
         mainStack.addArrangedSubview(hintLabel)
         hintLabel.widthAnchor.constraint(equalTo: mainStack.widthAnchor).isActive = true
-
-        // Apple-required globe / next keyboard affordance
-        globeRow.axis = .horizontal
-        globeRow.spacing = 12
-        globeRow.alignment = .leading
-
-        nextKeyboardButton.setTitle("🌐", for: .normal)
-        nextKeyboardButton.setTitleColor(.secondaryLabel, for: .normal)
-        nextKeyboardButton.setContentHuggingPriority(.required, for: .horizontal)
-        nextKeyboardButton.addTarget(self, action: #selector(handleInputModeList(from:with:)), for: .allTouchEvents)
-        globeRow.addArrangedSubview(nextKeyboardButton)
-
-        mainStack.addArrangedSubview(globeRow)
 
         renderDisplay()
     }
