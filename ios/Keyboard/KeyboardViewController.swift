@@ -642,37 +642,36 @@ class KeyboardViewController: UIInputViewController {
     // MARK: - UI Setup
 
     private func setupUI() {
-        view.backgroundColor = .systemGray5
+        view.backgroundColor = Self.keyboardCanvasColor
 
         let mainStack = UIStackView()
         mainStack.translatesAutoresizingMaskIntoConstraints = false
         mainStack.axis = .vertical
         mainStack.alignment = .center
-        mainStack.spacing = 4
+        mainStack.spacing = 6
         view.addSubview(mainStack)
 
         NSLayoutConstraint.activate([
-            mainStack.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 4),
-            mainStack.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 6),
-            mainStack.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -6),
-            mainStack.bottomAnchor.constraint(lessThanOrEqualTo: view.bottomAnchor, constant: -2)
+            mainStack.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 8),
+            mainStack.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 3),
+            mainStack.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -3),
+            mainStack.bottomAnchor.constraint(lessThanOrEqualTo: view.bottomAnchor, constant: -8)
         ])
 
-        // ONE primary row across the full keyboard width, mimicking the
-        // system keyboard geometry the user is used to:
-        // [Globe keycap][ Start/Stop fills the middle ][Backspace keycap]
-        // Both keycaps are fixed ≥44pt targets; no trash icon anywhere.
+        // ONE key row spanning the full keyboard width, mirroring the system
+        // keyboard bottom row the user types on every day:
+        // [Globe][ Start/Stop takes the space-bar slot, wide ][Backspace]
+        // Keys run edge-to-edge with system-like gutters; both fixed keys
+        // are ≥44pt targets. No trash icon anywhere.
         primaryRow.translatesAutoresizingMaskIntoConstraints = false
         primaryRow.axis = .horizontal
         primaryRow.alignment = .fill
         primaryRow.distribution = .fill
-        primaryRow.spacing = 6
+        primaryRow.spacing = 8
         mainStack.addArrangedSubview(primaryRow)
 
-        // Globe / next-keyboard affordance styled as a native keycap,
-        // leading edge like the system keyboard.
-        nextKeyboardButton.backgroundColor = Self.keycapColor
-        nextKeyboardButton.tintColor = Self.keycapIconColor
+        // Globe / next-keyboard affordance, leading edge like the system
+        // keyboard, native keycap look.
         nextKeyboardButton.setImage(
             UIImage(systemName: "globe", withConfiguration: UIImage.SymbolConfiguration(pointSize: 17, weight: .medium)),
             for: .normal
@@ -680,28 +679,26 @@ class KeyboardViewController: UIInputViewController {
         nextKeyboardButton.accessibilityLabel = "Next keyboard"
         nextKeyboardButton.accessibilityTraits = .button
         nextKeyboardButton.isAccessibilityElement = true
-        nextKeyboardButton.layer.cornerRadius = 6
         nextKeyboardButton.translatesAutoresizingMaskIntoConstraints = false
         nextKeyboardButton.setContentHuggingPriority(.required, for: .horizontal)
         nextKeyboardButton.addTarget(self, action: #selector(handleInputModeList(from:with:)), for: .allTouchEvents)
+        styleAsSystemKeycap(nextKeyboardButton)
         primaryRow.addArrangedSubview(nextKeyboardButton)
 
         primaryButton.titleLabel?.font = .boldSystemFont(ofSize: 17)
         primaryButton.setTitleColor(.white, for: .normal)
-        primaryButton.layer.cornerRadius = 10
+        primaryButton.showsTouchWhenHighlighted = true
         primaryButton.setContentHuggingPriority(.defaultLow, for: .horizontal)
         primaryButton.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         primaryButton.addTarget(self, action: #selector(didTapPrimary), for: .touchUpInside)
         primaryRow.addArrangedSubview(primaryButton)
 
-        backspaceButton.tintColor = Self.keycapIconColor
         backspaceButton.accessibilityLabel = "Backspace"
         backspaceButton.accessibilityTraits = .button
         backspaceButton.isAccessibilityElement = true
-        backspaceButton.layer.cornerRadius = 6
-        backspaceButton.backgroundColor = Self.keycapColor
         backspaceButton.translatesAutoresizingMaskIntoConstraints = false
         backspaceButton.addAction(UIAction { [weak self] _ in self?.didTapBackspace() }, for: .touchUpInside)
+        styleAsSystemKeycap(backspaceButton)
         primaryRow.addArrangedSubview(backspaceButton)
         NSLayoutConstraint.activate([
             nextKeyboardButton.widthAnchor.constraint(equalToConstant: 46),
@@ -712,14 +709,16 @@ class KeyboardViewController: UIInputViewController {
         ])
         applyBackspace(enabled: false, animated: false)
 
-        // Single-line truthful status.
+        // Status/hint appear ONLY when there is something to say; the idle
+        // keyboard is just the three keys with clean vertical breathing room.
         statusLabel.font = .systemFont(ofSize: 12, weight: .medium)
-        statusLabel.textColor = .label
+        statusLabel.textColor = Self.statusTextColor
         statusLabel.textAlignment = .center
         statusLabel.numberOfLines = 1
         statusLabel.adjustsFontSizeToFitWidth = true
         statusLabel.minimumScaleFactor = 0.8
         statusLabel.lineBreakMode = .byTruncatingTail
+        statusLabel.isHidden = true
         mainStack.addArrangedSubview(statusLabel)
         statusLabel.widthAnchor.constraint(equalTo: mainStack.widthAnchor).isActive = true
 
@@ -737,7 +736,20 @@ class KeyboardViewController: UIInputViewController {
         renderDisplay()
     }
 
-    // MARK: - Dynamic appearance colors (dark/light contrast)
+    // MARK: - Native keycap styling (system keyboard look)
+
+    private func styleAsSystemKeycap(_ button: UIButton) {
+        button.backgroundColor = Self.keycapColor
+        button.tintColor = Self.keycapIconColor
+        button.layer.cornerRadius = 5
+        // The system keyboard keys carry a crisp 1pt bottom shadow edge.
+        button.layer.shadowColor = UIColor.black.cgColor
+        button.layer.shadowOpacity = 0.16
+        button.layer.shadowOffset = CGSize(width: 0, height: 1)
+        button.layer.shadowRadius = 0.5
+    }
+
+    // MARK: - Dynamic appearance colors (system keyboard palette)
 
     /// Dark charcoal Start, native-active in dark mode via lightened shade.
     private static let darkStartColor = UIColor { trait in
@@ -745,15 +757,28 @@ class KeyboardViewController: UIInputViewController {
             ? UIColor(red: 0.30, green: 0.30, blue: 0.33, alpha: 1.0)
             : UIColor(red: 0.09, green: 0.09, blue: 0.11, alpha: 1.0)
     }
+    /// System keyboard canvas: cool light gray / near-black dark canvas.
+    private static let keyboardCanvasColor = UIColor { trait in
+        trait.userInterfaceStyle == .dark
+            ? UIColor(red: 0.11, green: 0.11, blue: 0.13, alpha: 1.0)
+            : UIColor(red: 0.82, green: 0.83, blue: 0.85, alpha: 1.0)
+    }
+    /// White keycaps in light mode; mid-gray keycaps in dark mode, like the
+    /// system keyboard's special keys.
     private static let keycapColor = UIColor { trait in
         trait.userInterfaceStyle == .dark
-            ? UIColor(white: 0.32, alpha: 1.0)
-            : UIColor(white: 1.0, alpha: 1.0)
+            ? UIColor(red: 0.42, green: 0.42, blue: 0.45, alpha: 1.0)
+            : UIColor.white
     }
     private static let keycapIconColor = UIColor { trait in
         trait.userInterfaceStyle == .dark
-            ? UIColor(white: 0.92, alpha: 1.0)
+            ? UIColor(white: 0.95, alpha: 1.0)
             : UIColor(white: 0.15, alpha: 1.0)
+    }
+    private static let statusTextColor = UIColor { trait in
+        trait.userInterfaceStyle == .dark
+            ? UIColor(white: 0.88, alpha: 1.0)
+            : UIColor(white: 0.20, alpha: 1.0)
     }
 
     // MARK: - Rendering (truthful, derived from controller state)
@@ -766,6 +791,7 @@ class KeyboardViewController: UIInputViewController {
 
         guard let controller = controller else {
             statusLabel.text = "App Group Unavailable: Entitlement Missing"
+            statusLabel.isHidden = false
             primaryButton.isHidden = false
             primaryButton.isEnabled = false
             primaryButton.setTitle("Start Listening", for: .normal)
@@ -789,12 +815,16 @@ class KeyboardViewController: UIInputViewController {
         }
 
         statusLabel.text = compactStatusText(for: controller)
+        // Idle-ready keyboards stay clean: only show a status line when
+        // something meaningful is happening or failing.
+        statusLabel.isHidden = (statusLabel.text == nil)
         updateHint(for: controller)
     }
 
-    private func compactStatusText(for controller: EcholetKeyboardSessionController) -> String {
+    /// nil means "nothing to say" — the status row collapses entirely.
+    private func compactStatusText(for controller: EcholetKeyboardSessionController) -> String? {
         switch controller.phase {
-        case .ready: return "Ready"
+        case .ready: return nil
         case .opening: return "Opening Echolet…"
         case .starting: return "Starting…"
         case .listening: return "Listening…"
