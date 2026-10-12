@@ -36,7 +36,9 @@ public final class EcholetKeyboardSessionController {
     public static let intentSequenceStorageKey = "echolet.keyboard.intent_sequence_counter"
 
     /// Waiting for the START to surface a real mic `.listening` ACK.
-    public static let startAckTimeoutMs: UInt64 = 15_000
+    /// If not acknowledged within 1200ms, the main app process is deemed dead or suspended,
+    /// so the controller immediately triggers containing-app launch without prolonged stalling.
+    public static let startAckTimeoutMs: UInt64 = 1_200
     /// Waiting for launch evidence (phase record, warm-live truth, or open
     /// callback) before declaring the automatic launch honestly failed.
     public static let openEvidenceTimeoutMs: UInt64 = 6_000
@@ -635,9 +637,9 @@ public final class EcholetKeyboardSessionController {
         case .starting:
             if now >= lastStartAttemptMs,
                now - lastStartAttemptMs >= EcholetKeyboardSessionController.startAckTimeoutMs {
-                log("BLOCKED(start_ack_timeout)")
+                log("START_ACK_TIMEOUT(fallback_to_launch)")
                 activeSession = nil
-                setPhase(.blocked(reason: "Mic start not acknowledged in time. Try again."))
+                attemptLaunch(auto: false)
             }
         case .finalizing:
             let base = lastRevisionArrivalMs > 0 ? lastRevisionArrivalMs : lastStartAttemptMs

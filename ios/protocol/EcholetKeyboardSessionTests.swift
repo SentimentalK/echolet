@@ -719,15 +719,12 @@ enum EcholetKeyboardSessionTests {
         c.handleAppeared()
         c.handlePrimaryButtonTap()
         expectTrue(c.phase == .starting, "testStartAckTimeout(1)")
-        h.now += EcholetKeyboardSessionController.startAckTimeoutMs + 1
+        // Expire the warm record so timeout launch attempt won't just re-adopt
+        h.now += EcholetLaunch.defaultWarmLiveFreshnessMs + EcholetKeyboardSessionController.startAckTimeoutMs + 1
         c.handleTimerTick()
-        if case .blocked(let reason) = c.phase {
-            expectTrue(reason.contains("not acknowledged"), "testStartAckTimeout(2)")
-        } else {
-            recordFailure("testStartAckTimeout(3)", "expected blocked phase, got \(c.phase)")
-        }
-        // Session was closed truthfully (fail closed) and is startable again.
-        expectEqual(c.isPrimaryButtonInteractive, true, "testStartAckTimeout(4)")
+        // Controller automatically falls back to launch attempt without dead-ending!
+        expectEqual(c.phase, EcholetKeyboardSessionController.Phase.opening, "testStartAckTimeout(2)")
+        expectEqual(h.openCallsRaw.count, 1, "testStartAckTimeout(3)")
     }
 
     static func testPreparedDemandURLMatchesDemandRecord() {
