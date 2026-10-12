@@ -669,6 +669,13 @@ class KeyboardViewController: UIInputViewController {
         primaryRow.distribution = .fill
         primaryRow.spacing = 8
         mainStack.addArrangedSubview(primaryRow)
+        // The key row must span the ENTIRE keyboard width (the parent uses
+        // center alignment, which would otherwise hug content and shrink
+        // the wide speaking key to its label size).
+        NSLayoutConstraint.activate([
+            primaryRow.leadingAnchor.constraint(equalTo: mainStack.leadingAnchor),
+            primaryRow.trailingAnchor.constraint(equalTo: mainStack.trailingAnchor)
+        ])
 
         // Globe / next-keyboard affordance, leading edge like the system
         // keyboard, native keycap look.
@@ -687,6 +694,11 @@ class KeyboardViewController: UIInputViewController {
 
         primaryButton.titleLabel?.font = .boldSystemFont(ofSize: 17)
         primaryButton.setTitleColor(.white, for: .normal)
+        // Rounded key with real horizontal padding between the label and
+        // the key edges on both sides.
+        primaryButton.layer.cornerRadius = 10
+        primaryButton.layer.masksToBounds = true
+        primaryButton.titleEdgeInsets = UIEdgeInsets(top: 0, left: 14, bottom: 0, right: 14)
         primaryButton.showsTouchWhenHighlighted = true
         primaryButton.setContentHuggingPriority(.defaultLow, for: .horizontal)
         primaryButton.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
