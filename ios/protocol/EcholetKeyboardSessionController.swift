@@ -599,7 +599,14 @@ public final class EcholetKeyboardSessionController {
                 break
             case .failed:
                 log("OPEN_RESULT(app_failed_\(record.errorCode ?? "unknown"))")
-                failOpen(reason: "app_activation_failed_\(record.errorCode ?? "unknown")")
+                if let code = record.errorCode, code.contains("no_model_installed") {
+                    // Targeted honest projection: the containing app has no
+                    // model installed yet; dictation cannot start.
+                    failOpen(reason: "NO_MODEL_installed_open_Echolet_and_download")
+                    setPhase(.blocked(reason: "No model installed. Open Echolet and download the verified model first."))
+                } else {
+                    failOpen(reason: "app_activation_failed_\(record.errorCode ?? "unknown")")
+                }
             }
             return
         }

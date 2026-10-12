@@ -28,12 +28,10 @@ targets:
       - path: protocol/EcholetLaunch.swift
       - path: protocol/EcholetKeyboardSessionController.swift
       - path: protocol/EcholetHomePresenter.swift
-      # J4-E2E: frozen local zh-en model folder bundled as a non-repo folder
-      # resource (git-ignored). Never committed; only the exact frozen
-      # bilingual-zh-en dir recognized by its model.json id marker.
-      - path: ../.local-runtime/models/bilingual-zh-en
-        type: folder
-        buildPhase: resources
+      - path: protocol/EcholetModelGate.swift
+      - path: protocol/EcholetModelSwitch.swift
+      - path: protocol/EcholetModelDownloadPolicy.swift
+      - path: protocol/EcholetModelError.swift
     settings:
       PRODUCT_BUNDLE_IDENTIFIER: com.mainstayx.echolet.app
       INFOPLIST_FILE: App/Info.plist

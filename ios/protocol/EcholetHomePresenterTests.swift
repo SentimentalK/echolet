@@ -25,6 +25,9 @@ enum EcholetHomePresenterTests {
         testArmedWithoutHardwareIsPending()
         testModelStateProjection()
         testModelSwitchNoticeExists()
+        testModelCatalogRows()
+        testModelCatalogTransferStates()
+        testExperimentalRowsReadOnly()
 
         if failures.isEmpty {
             print("EcholetHomePresenterTests: ALL PASS")
@@ -79,34 +82,138 @@ enum EcholetHomePresenterTests {
     }
 
     static func testModelStateProjection() {
-        let notLoaded = EcholetHomePresenter.projectModel(modelState: "notLoaded", modelName: nil)
-        expectEqual(notLoaded.title, "X-ASR bilingual (installed offline pack)", "testModelStateProjection(1)")
-        expectTrue(notLoaded.loadButtonEnabled, "testModelStateProjection(2)")
-        expectTrue(notLoaded.capabilityLine.contains("Chinese") && notLoaded.capabilityLine.contains("English"), "testModelStateProjection(3)")
+        // NoModel home: prepare disabled until the user downloads + selects.
+        let p = EcholetHomePresenter.project(EcholetHomePresenter.Inputs(modelInstalled: true))
+        expectEqual(p.headline, "Ready", "testModelStateProjection(1)")
+        expectTrue(p.prepareEnabled, "testModelStateProjection(2)")
 
-        let loading = EcholetHomePresenter.projectModel(modelState: "loading", modelName: "Chinese + English (X-ASR / 480ms)")
-        expectEqual(loading.title, "Chinese + English (X-ASR / 480ms)", "testModelStateProjection(4)")
-        expectEqual(loading.loadButtonEnabled, false, "testModelStateProjection(5)")
-        expectTrue(loading.stateLine.lowercased().contains("loading"), "testModelStateProjection(6)")
-
-        let loaded = EcholetHomePresenter.projectModel(modelState: "loaded", modelName: "Chinese + English (X-ASR / 480ms)")
-        expectTrue(loaded.stateLine.lowercased().contains("loaded"), "testModelStateProjection(7)")
-        expectEqual(loaded.loadButtonEnabled, false, "testModelStateProjection(8)")
-
-        let failed = EcholetHomePresenter.projectModel(modelState: "failed", modelName: nil)
-        expectTrue(failed.stateLine.lowercased().contains("fail"), "testModelStateProjection(9)")
-        expectTrue(failed.loadButtonEnabled, "testModelStateProjection(10)")
-
-        let unknown = EcholetHomePresenter.projectModel(modelState: "mystery", modelName: nil)
-        expectEqual(unknown.stateLine, "mystery", "testModelStateProjection(11)")
-        expectEqual(unknown.loadButtonEnabled, false, "testModelStateProjection(12)")
+        let noModel = EcholetHomePresenter.project(EcholetHomePresenter.Inputs(modelInstalled: false))
+        expectEqual(noModel.headline, "No Model", "testModelStateProjection(3)")
+        expectEqual(noModel.prepareEnabled, false, "testModelStateProjection(4)")
+        expectTrue(
+            noModel.micDetail.lowercased().contains("download"),
+            "testModelStateProjection(5)"
+        )
+        // Browsing models never auto-starts the mic.
+        expectEqual(noModel.micHardwareOn, false, "testModelStateProjection(6)")
     }
 
     static func testModelSwitchNoticeExists() {
-        expectTrue(EcholetHomePresenter.modelSwitchNotice.contains("not implemented"), "testModelSwitchNoticeExists(1)")
+        // Any no-model state must point at a real download, not a promise.
+        let noModel = EcholetHomePresenter.project(EcholetHomePresenter.Inputs(modelInstalled: false))
         expectTrue(
-            EcholetHomePresenter.modelSwitchNotice.lowercased().contains("installed"),
+            noModel.micDetail.lowercased().contains("verified"),
+            "testModelSwitchNoticeExists(1)"
+        )
+        expectTrue(
+            !noModel.micDetail.lowercased().contains("automatically"),
             "testModelSwitchNoticeExists(2)"
+        )
+    }
+
+    static func verifiedXasr(
+        installed: Bool,
+        active: Bool
+    ) -> EcholetHomePresenter.ModelEntry {
+        return EcholetHomePresenter.ModelEntry(
+            id: "echolet-xasr-zh-en-480ms-689ff18c584d29910da37b6fe904db0c1489c9d1",
+            displayName: "X-ASR 0.16B",
+            version: "2026",
+            languages: ["zh", "en"],
+            verificationStatus: "Echolet Verified",
+            runtimeCompatible: true,
+            installed: installed,
+            active: active,
+            downloadSizeBytes: 551847917,
+            installedSizeBytes: 614596718
+        )
+    }
+
+    static func experimentalKroko(installed: Bool) -> EcholetHomePresenter.ModelEntry {
+        return EcholetHomePresenter.ModelEntry(
+            id: "echolet-kroko-streaming-en-2025-08-06-r1",
+            displayName: "Kroko English Streaming 0.066B",
+            version: "2025",
+            languages: ["en"],
+            verificationStatus: "Experimental",
+            runtimeCompatible: false,
+            installed: installed,
+            active: false,
+            downloadSizeBytes: 57267600,
+            installedSizeBytes: 71053214
+        )
+    }
+
+    static func testModelCatalogRows() {
+        // Not installed + verified → honest Not Installed + Download CTA.
+        let download = EcholetHomePresenter.projectModelRow(verifiedXasr(installed: false, active: false), transfer: .idle)
+        expectEqual(download.stateLine, "Not installed", "testModelCatalogRows(1)")
+        expectEqual(download.action, .download, "testModelCatalogRows(2)")
+        expectTrue(download.stateLine.lowercased().contains("not installed"), "testModelCatalogRows(3)")
+
+        // Installed selected → read-only Selected (no fake re-Select).
+        let selected = EcholetHomePresenter.projectModelRow(verifiedXasr(installed: true, active: true), transfer: .idle)
+        expectEqual(selected.stateLine, "Selected", "testModelCatalogRows(4)")
+        expectEqual(selected.action, .selected, "testModelCatalogRows(5)")
+
+        // Installed unselected → Select action (proven runtime only).
+        let selectable = EcholetHomePresenter.projectModelRow(verifiedXasr(installed: true, active: false), transfer: .idle)
+        expectEqual(selectable.stateLine, "Installed", "testModelCatalogRows(6)")
+        expectEqual(selectable.action, .select, "testModelCatalogRows(7)")
+    }
+
+    static func testModelCatalogTransferStates() {
+        let entry = verifiedXasr(installed: false, active: false)
+
+        let downloading = EcholetHomePresenter.projectModelRow(
+            entry,
+            transfer: .downloading(downloadedBytes: 300_000_000, totalBytes: 551_847_917)
+        )
+        expectTrue(downloading.stateLine.lowercased().contains("downloading"), "testModelCatalogTransferStates(1)")
+        expectTrue(downloading.stateLine.contains("%"), "testModelCatalogTransferStates(2)")
+        expectEqual(downloading.action, .none, "testModelCatalogTransferStates(3)")
+
+        let verifying = EcholetHomePresenter.projectModelRow(entry, transfer: .verifying)
+        expectEqual(verifying.stateLine, "Verifying checksum…", "testModelCatalogTransferStates(4)")
+
+        let installing = EcholetHomePresenter.projectModelRow(entry, transfer: .installing)
+        expectEqual(installing.stateLine, "Installing…", "testModelCatalogTransferStates(5)")
+
+        // Installed ONLY after the real Rust read-back.
+        let installed = EcholetHomePresenter.projectModelRow(
+            verifiedXasr(installed: true, active: false),
+            transfer: .installed
+        )
+        expectTrue(installed.stateLine.lowercased().contains("ready"), "testModelCatalogTransferStates(6)")
+        expectEqual(installed.action, .select, "testModelCatalogTransferStates(7)")
+        // A not-yet-installed entry must NEVER claim installed.
+        let premature = EcholetHomePresenter.projectModelRow(
+            verifiedXasr(installed: false, active: false),
+            transfer: .installed
+        )
+        expectTrue(!premature.stateLine.lowercased().contains("ready to select"), "testModelCatalogTransferStates(8)")
+
+        let failed = EcholetHomePresenter.projectModelRow(entry, transfer: .failed(message: "HTTP 404"))
+        expectTrue(failed.stateLine.lowercased().contains("4"), "testModelCatalogTransferStates(9)")
+        expectEqual(failed.action, .retryDownload, "testModelCatalogTransferStates(10)")
+    }
+
+    static func testExperimentalRowsReadOnly() {
+        // Experimental entries: visible, but NEVER selectable on iOS today.
+        let idle = EcholetHomePresenter.projectModelRow(experimentalKroko(installed: false), transfer: .idle)
+        expectEqual(idle.action, .none, "testExperimentalRowsReadOnly(1)")
+        expectTrue(idle.detail.lowercased().contains("experimental"), "testExperimentalRowsReadOnly(2)")
+
+        let evenInstalled = EcholetHomePresenter.projectModelRow(
+            experimentalKroko(installed: true),
+            transfer: .installed
+        )
+        // Installed experimental models must not expose a select action
+        // without tested iOS runtime evidence.
+        expectEqual(evenInstalled.action, .none, "testExperimentalRowsReadOnly(3)")
+        expectTrue(
+            evenInstalled.detail.lowercased().contains("experimental"),
+            "testExperimentalRowsReadOnly(4)"
         )
     }
 }

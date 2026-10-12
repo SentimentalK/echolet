@@ -876,6 +876,13 @@ public final class WarmIPCService {
         return ipcQueue.sync { self.flowCoordinator.activeSessionToken != nil }
     }
 
+    /// Queue-serialized truth for the model-select gate: a keyboard START
+    /// activation is pending (bootstrap/prepare in flight). Mutated only on
+    /// `ipcQueue`; readers never mutate queue state.
+    public var hasPendingActivation: Bool {
+        return ipcQueue.sync { self.pendingActivation != nil }
+    }
+
     // MARK: - Manual Audio Capture Ownership Bridge
     public func registerManualStartCapture(completion: @escaping (Bool, String?) -> Void) {
         ipcQueue.async { [weak self] in

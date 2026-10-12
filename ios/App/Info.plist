@@ -78,7 +78,7 @@
 		<string>chatgpt</string>
 	</array>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>Echolet requires microphone access to capture real audio for on-device speech-to-text recognition test.</string>
+	<string>Echolet converts your speech to text on this device only. Audio is processed locally by the installed Echolet model and never leaves the device.</string>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>audio</string>

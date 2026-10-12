@@ -74,6 +74,9 @@ final class EcholetAsrService {
     private var recognizer: UnsafeMutableRawPointer?
     private var recognizerLoadStartedMs: UInt64?
     private var loadInProgress = false
+    /// Directory of the model the live recognizer was created from (asrQueue
+    /// only). Nil while no recognizer is loaded.
+    private var loadedModelDirectory: String?
 
     /// Active streaming pipeline; nil when no session is active.
     private var session: AsrPipeline?
@@ -110,11 +113,72 @@ final class EcholetAsrService {
     @_silgen_name("echolet_ios_ring_dropped_total")
     static func ffi_ring_dropped_total(_ ring: UnsafeMutableRawPointer?) -> UInt64
 
+    // MARK: - Model switching state (mirrors; mutated only on asrQueue)
+
+    /// Lock-protected switch-truth mirror so other queues (model store gate,
+    /// UI) can poll honest busy facts WITHOUT synchronizing inside asrQueue.
+    private let switchTruthLock = NSLock()
+    /// Barrier engaged by an in-flight model switch: new ASR starts are
+    /// rejected until it closes.
+    private var barrierEngaged = false
+    /// Mirrors `session != nil` (updated on asrQueue only).
+    private var hasLiveSessionMirror = false
+    /// Mirrors `loadInProgress`.
+    private var loadInFlightMirror = false
+
+    /// Queue-safe truth for the model-select gate (never syncs asrQueue).
+    public var isBusyForModelSwitch: Bool {
+        switchTruthLock.lock()
+        defer { switchTruthLock.unlock() }
+        return barrierEngaged || hasLiveSessionMirror || loadInFlightMirror
+    }
+
+    /// Queue barrier for an in-flight select: new ASR starts are rejected
+    /// until the owner closes it. Called by EcholetModelStore's coordinator.
+    public func setSwitchBarrier(_ on: Bool) {
+        asrQueue.async { [weak self] in
+            guard let self = self else { return }
+            self.barrierEngaged = on
+            self.switchTruthLock.lock()
+            self.switchTruth_unlockedStore(barrier: on)
+            self.switchTruthLock.unlock()
+        }
+    }
+
+    /// asrQueue-only internal mirror writer.
+    private func switchTruth_unlockedStore(
+        sessionActive: Bool? = nil,
+        loadInProgress: Bool? = nil,
+        barrier: Bool? = nil
+    ) {
+        if let sessionActive = sessionActive { self.hasLiveSessionMirror = sessionActive }
+        if let loadInProgress = loadInProgress { self.loadInFlightMirror = loadInProgress }
+        if let barrier = barrier { self.barrierEngaged = barrier }
+    }
+
+    /// Publishes the REAL active installed model directory discovered by the
+    /// Rust manager (EcholetModelStore). NULL = no usable model directory.
+    /// Mutated only on asrQueue; `loadModelIfNeeded` consumes it there.
+    private var activeModelDirectoryMirror: String?
+    public func publishActiveModelDirectory(_ directory: String?) {
+        asrQueue.async { [weak self] in
+            guard let self = self else { return }
+            self.activeModelDirectoryMirror = directory
+        }
+    }
+
     // MARK: - Bundled model resolution
 
     /// Path of the bundled (git-ignored) bilingual-zh-en model folder resource.
+    /// PRODUCT PATH NOTE: the product flow never loads from the bundle; this
+    /// DEBUG-only fallback keeps the development harness (synthetic WAV
+    /// regressions) usable on worktrees that stage the local model resource.
     static func bundledModelDirectory() -> String? {
+        #if DEBUG
         return Bundle.main.path(forResource: "bilingual-zh-en", ofType: nil, inDirectory: nil)
+        #else
+        return nil
+        #endif
     }
 
     /// Main-thread-safe immutable snapshot of the current model state.
@@ -158,8 +222,10 @@ final class EcholetAsrService {
 
     // MARK: - Model loading
 
-    /// Asynchronously loads the pinned offline recognizer bundle. Never
-    /// blocks the caller thread; completion runs on an arbitrary queue.
+    /// Asynchronously loads the active installed offline model (the Rust
+    /// canonical selection) into a recognizer. Never blocks the caller;
+    /// completion runs on an arbitrary queue. Honest failures:
+    /// `no_model_installed`, `model_switch_in_progress`, `model_load_in_progress`.
     func loadModelIfNeeded(completion: @escaping (Bool, String?) -> Void) {
         asrQueue.async { [weak self] in
             guard let self = self else {
@@ -170,24 +236,37 @@ final class EcholetAsrService {
                 completion(true, nil)
                 return
             }
+            if self.barrierEngaged {
+                completion(false, "model_switch_in_progress")
+                return
+            }
             guard !self.loadInProgress else {
                 completion(false, "model_load_in_progress")
                 return
             }
 
-            guard let modelDir = Self.bundledModelDirectory() else {
-                print("[EcholetAsr] bundled model resource missing: bilingual-zh-en")
-                completion(false, "bundled_model_missing")
+            // Product truth: the ACTIVE directory published by the Rust
+            // model manager. No .app bundle resource is required.
+            guard let modelDir = self.activeModelDirectoryMirror
+                ?? Self.bundledModelDirectory() else {
+                print("[EcholetAsr] no active installed model (selection required)")
+                completion(false, "no_model_installed")
                 return
             }
 
             self.loadInProgress = true
+            self.switchTruthLock.lock()
+            self.switchTruth_unlockedStore(loadInProgress: true)
+            self.switchTruthLock.unlock()
             self.modelState = .loading
             self.recognizerLoadStartedMs = nowMs()
             self.notifyModelState()
 
             guard let rec = Self.ffi_recognizer_create((modelDir as NSString).utf8String) else {
                 self.loadInProgress = false
+                self.switchTruthLock.lock()
+                self.switchTruth_unlockedStore(loadInProgress: false)
+                self.switchTruthLock.unlock()
                 self.modelState = .failed
                 self.notifyModelState()
                 print("[EcholetAsr] recognizer_create FAILED (invalid model or sherpa init error)")
@@ -195,13 +274,57 @@ final class EcholetAsrService {
                 return
             }
             self.recognizer = rec
+            self.loadedModelDirectory = modelDir
             self.loadInProgress = false
+            self.switchTruthLock.lock()
+            self.switchTruth_unlockedStore(loadInProgress: false)
+            self.switchTruthLock.unlock()
             self.modelState = .loaded
             if let started = self.recognizerLoadStartedMs {
                 print("[EcholetAsr] offline model loaded load_ms=\(nowMs() - started) (on-device only)")
             }
             self.notifyModelState()
             completion(true, nil)
+        }
+    }
+
+    /// Create-then-swap serialized recognizer switch (asrQueue only).
+    ///
+    /// The prior recognizer stays valid until the NEW one exists: a failure
+    /// preserves the known-good loaded model exactly (fail-closed, no phantom
+    /// ready). Called by EcholetModelStore's switch coordinator with the
+    /// barrier already engaged (no live session by gate; double-checked).
+    func swapRecognizer(toDirectory directory: String, done: @escaping (Bool, String?) -> Void) {
+        asrQueue.async { [weak self] in
+            guard let self = self else { done(false, "asr service unavailable"); return }
+            if self.session != nil {
+                // Gate violation; fail closed without touching state.
+                done(false, "model_switch_session_still_active")
+                return
+            }
+            if directory == self.loadedModelDirectory, self.recognizer != nil, self.modelState == .loaded {
+                done(true, nil)
+                return
+            }
+            guard let rec = Self.ffi_recognizer_create((directory as NSString).utf8String) else {
+                print("[EcholetAsr] recognizer swap FAILED for \(directory) (prior recognizer preserved)")
+                if self.recognizer == nil {
+                    self.modelState = .failed
+                    self.notifyModelState()
+                }
+                done(false, "recognizer_create_failed")
+                return
+            }
+            let old = self.recognizer
+            self.recognizer = rec
+            self.loadedModelDirectory = directory
+            if let old = old {
+                Self.ffi_recognizer_destroy(old)
+            }
+            self.modelState = .loaded
+            self.notifyModelState()
+            print("[EcholetAsr] recognizer swapped to installed model dir (prior destroyed after swap)")
+            done(true, nil)
         }
     }
 
@@ -309,6 +432,15 @@ final class EcholetAsrService {
     ) {
         asrQueue.async { [weak self] in
             guard let self = self else { completion?(false, "asr service unavailable"); return }
+            if self.barrierEngaged {
+                // Model switch in flight: reject honestly until it closes.
+                self.switchTruthLock.lock()
+                self.switchTruth_unlockedStore(sessionActive: false)
+                self.switchTruthLock.unlock()
+                self.mainSessionFailure(sessionId: sessionId, errorCode: "model_switch_in_progress")
+                completion?(false, "model_switch_in_progress")
+                return
+            }
             guard self.modelState == .loaded, let recognizer = self.recognizer else {
                 print("[EcholetAsr] beginSession rejected: model not loaded")
                 self.mainSessionFailure(sessionId: sessionId, errorCode: "asr_model_not_loaded")
@@ -370,6 +502,9 @@ final class EcholetAsrService {
             )
             pipeline.ringDroppedAtBegin = droppedAtBegin
             self.session = pipeline
+            self.switchTruthLock.lock()
+            self.switchTruth_unlockedStore(sessionActive: true)
+            self.switchTruthLock.unlock()
             self.observability.beganAtMs = nowMs()
 
             pipeline.pumpTimer = DispatchSource.makeTimerSource(queue: self.asrQueue)
@@ -587,12 +722,14 @@ final class EcholetAsrService {
         guard let text = readResultLocked(pipeline, flush: true) else {
             Self.ffi_stream_destroy(pipeline.stream)
             self.session = nil
+            self.storeSwitchMirrorSession(force: true)
             return nil
         }
 
         // 3. Destroy the stream FIRST, keeping the recognizer handle.
         Self.ffi_stream_destroy(pipeline.stream)
         self.session = nil
+        self.storeSwitchMirrorSession(force: true)
         self.observability.finalizedAfterMs = nowMs() - self.observability.beganAtMs
         print("[EcholetAsr] session finalized id_prefix=\(pipeline.sessionId.prefix(8)) kind=\(pipeline.kind.rawValue) pump_cycles=\(pipeline.pumpCycleCount) native_popped=\(pipeline.framesPoppedTotal) converted_16k=\(pipeline.framesConvertedTotal) elapsed_ms=\(self.observability.finalizedAfterMs) (no PCM persisted)")
         if pipeline.kind == .warmKeyboard || pipeline.kind == .liveDictation {
@@ -630,6 +767,14 @@ final class EcholetAsrService {
         return String(cString: buf)
     }
 
+
+    /// asrQueue-only switch-truth mirror updater for backend mutations.
+    private func storeSwitchMirrorSession(force: Bool) {
+        switchTruthLock.lock()
+        switchTruth_unlockedStore(sessionActive: self.session != nil)
+        switchTruthLock.unlock()
+    }
+
     /// Must run on asrQueue. Destroys the stream; recognizer survives.
     private func disposePipelineLocked(_ pipeline: AsrPipeline, reason: String) {
         pipeline.ended = true
@@ -639,6 +784,7 @@ final class EcholetAsrService {
         if self.session === pipeline {
             self.session = nil
         }
+        self.storeSwitchMirrorSession(force: true)
         print("[EcholetAsr] session disposed id_prefix=\(pipeline.sessionId.prefix(8)) reason=\(reason) (stream destroyed first, recognizer kept)")
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
@@ -655,6 +801,7 @@ final class EcholetAsrService {
         if self.session === pipeline {
             self.session = nil
         }
+        self.storeSwitchMirrorSession(force: true)
         print("[EcholetAsr] session FAILED id_prefix=\(pipeline.sessionId.prefix(8)) code=\(errorCode)")
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }

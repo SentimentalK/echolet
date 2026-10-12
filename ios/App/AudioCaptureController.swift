@@ -192,6 +192,15 @@ public final class AudioCaptureController: NSObject {
         }
     }
 
+    /// Queue-safe truth for the model-select gate: a manual capture is
+    /// currently recording (any path, main thread included).
+    public var recordingFromAnyPathWindow: Bool {
+        if Thread.isMainThread {
+            return _publishedStatus == .recording
+        }
+        return stateQueue.sync { lifecycleGate.state == .recording }
+    }
+
     // Published values cached for main thread reads
     private var _publishedStatus: Status = .idle
     private var _publishedMetrics: Metrics = Metrics()
