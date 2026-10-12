@@ -36,12 +36,16 @@ class KeyboardViewController: UIInputViewController {
     private var controller: EcholetKeyboardSessionController?
 
     // MARK: - UI Components
-    private let statusLabel = UILabel()
     private let primaryButton = UIButton(type: .custom)
     private let backspaceButton = UIButton(type: .system)
     private let hintLabel = UILabel()
     private let nextKeyboardButton = UIButton(type: .system)
     private let primaryRow = UIStackView()
+
+    /// Press feedback: uses the device Taptic engine when the device has
+    /// one (iPhone). Devices without a Taptic engine (all iPads to date)
+    /// simply produce nothing; no permission or Full Access is required.
+    private let touchHaptic = UIImpactFeedbackGenerator(style: .light)
 
     private var pollTimer: Timer?
     private var lastKnownHostBundleId: String?
@@ -51,6 +55,7 @@ class KeyboardViewController: UIInputViewController {
     override func viewDidLoad() {
         super.viewDidLoad()
         self.sharedDefaults = UserDefaults(suiteName: Self.appGroupId)
+        touchHaptic.prepare()
         buildController()
         setupUI()
     }
@@ -721,21 +726,8 @@ class KeyboardViewController: UIInputViewController {
         ])
         applyBackspace(enabled: false, animated: false)
 
-        // Status/hint appear ONLY when there is something to say; the idle
-        // keyboard is just the three keys with clean vertical breathing room.
-        statusLabel.font = .systemFont(ofSize: 12, weight: .medium)
-        statusLabel.textColor = Self.statusTextColor
-        statusLabel.textAlignment = .center
-        statusLabel.numberOfLines = 1
-        statusLabel.adjustsFontSizeToFitWidth = true
-        statusLabel.minimumScaleFactor = 0.8
-        statusLabel.lineBreakMode = .byTruncatingTail
-        statusLabel.isHidden = true
-        mainStack.addArrangedSubview(statusLabel)
-        statusLabel.widthAnchor.constraint(equalTo: mainStack.widthAnchor).isActive = true
-
-        // Short failure-only hint. Hidden unless manual return/fallback
-        // guidance is actually needed.
+        // No status row at all: the primary button's own label/color IS the
+        // truthful status. Only a short failure-only hint may appear below.
         hintLabel.font = .systemFont(ofSize: 10)
         hintLabel.textColor = .secondaryLabel
         hintLabel.textAlignment = .center
@@ -787,11 +779,6 @@ class KeyboardViewController: UIInputViewController {
             ? UIColor(white: 0.95, alpha: 1.0)
             : UIColor(white: 0.15, alpha: 1.0)
     }
-    private static let statusTextColor = UIColor { trait in
-        trait.userInterfaceStyle == .dark
-            ? UIColor(white: 0.88, alpha: 1.0)
-            : UIColor(white: 0.20, alpha: 1.0)
-    }
 
     // MARK: - Rendering (truthful, derived from controller state)
 
@@ -802,8 +789,6 @@ class KeyboardViewController: UIInputViewController {
         updateBackspace(enabled: controller?.isBackspacePermitted == true, animated: true)
 
         guard let controller = controller else {
-            statusLabel.text = "App Group Unavailable: Entitlement Missing"
-            statusLabel.isHidden = false
             primaryButton.isHidden = false
             primaryButton.isEnabled = false
             primaryButton.setTitle("Start Listening", for: .normal)
@@ -814,7 +799,8 @@ class KeyboardViewController: UIInputViewController {
         }
 
         // Warm-standby adoption needs no special UI path; the ONE dark
-        // UIKit button covers idle/open/listening states everywhere.
+        // UIKit button covers idle/open/listening states everywhere. Its
+        // own label/color IS the status presentation.
         primaryButton.isHidden = false
         primaryButton.setEnabled(interactive: controller.isPrimaryButtonInteractive)
         primaryButton.setTitle(controller.primaryButtonLabel, for: .normal)
@@ -826,23 +812,7 @@ class KeyboardViewController: UIInputViewController {
             primaryButton.backgroundColor = .systemGray3
         }
 
-        statusLabel.text = compactStatusText(for: controller)
-        // Idle-ready keyboards stay clean: only show a status line when
-        // something meaningful is happening or failing.
-        statusLabel.isHidden = (statusLabel.text == nil)
         updateHint(for: controller)
-    }
-
-    /// nil means "nothing to say" — the status row collapses entirely.
-    private func compactStatusText(for controller: EcholetKeyboardSessionController) -> String? {
-        switch controller.phase {
-        case .ready: return nil
-        case .opening: return "Opening Echolet…"
-        case .starting: return "Starting…"
-        case .listening: return "Listening…"
-        case .finalizing: return "Finalizing…"
-        case .blocked(let reason): return "Blocked: \(reason)"
-        }
     }
 
     private func updateHint(for controller: EcholetKeyboardSessionController) {
@@ -885,6 +855,7 @@ class KeyboardViewController: UIInputViewController {
     // MARK: - Actions
 
     @objc private func didTapPrimary() {
+        touchHaptic.impactOccurred()
         if let controller = controller {
             print("[Echolet-KBD-UI] PRIMARY_TAP(phase=\(controller.phase))")
         } else {
@@ -903,6 +874,7 @@ class KeyboardViewController: UIInputViewController {
             print("[Echolet-KBD-UI] BACKSPACE_IGNORED(gate_closed)")
             return
         }
+        touchHaptic.impactOccurred()
         print("[Echolet-KBD-UI] BACKSPACE_TAP")
         textDocumentProxy.deleteBackward()
         renderDisplay()
