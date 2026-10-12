@@ -865,6 +865,17 @@ public final class WarmIPCService {
         return ipcQueue.sync { self.flowCoordinator.isMicrophoneArmedByUser }
     }
 
+    /// Main-thread safe truth readouts for the Home panel hardware/session
+    /// projection (Increment B). Single reads are serialized on `ipcQueue`;
+    /// the Home view additionally subscribes to the delegate callbacks.
+    public var warmStandbyHardwareActive: Bool {
+        return ipcQueue.sync { self.flowCoordinator.isWarmStandbyHardwareActive }
+    }
+
+    public var hasActiveKeyboardSession: Bool {
+        return ipcQueue.sync { self.flowCoordinator.activeSessionToken != nil }
+    }
+
     // MARK: - Manual Audio Capture Ownership Bridge
     public func registerManualStartCapture(completion: @escaping (Bool, String?) -> Void) {
         ipcQueue.async { [weak self] in

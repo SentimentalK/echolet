@@ -10,7 +10,10 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
     ) {
         guard let windowScene = (scene as? UIWindowScene) else { return }
         let window = UIWindow(windowScene: windowScene)
-        window.rootViewController = AppStatusViewController()
+        // Product Home (Increment B): clean control panel replacing the
+        // development-harness root. The harness remains reachable through
+        // the DEBUG-only Diagnostics entry on Home.
+        window.rootViewController = UINavigationController(rootViewController: EcholetHomeViewController())
         self.window = window
         window.makeKeyAndVisible()
 
