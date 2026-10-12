@@ -182,7 +182,7 @@ public final class EcholetKeyboardSessionController {
 
     public var isPrimaryButtonInteractive: Bool {
         switch phase {
-        case .ready, .blocked: return true
+        case .ready, .blocked, .listening: return true
         default: return false
         }
     }
