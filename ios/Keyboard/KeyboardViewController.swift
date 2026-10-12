@@ -1,24 +1,4 @@
 import UIKit
-import SwiftUI
-
-/// SwiftUI Link button for idle Start Listening navigation on iOS/iPadOS.
-/// Visual styling strictly matches the dark UIKit Start Listening button:
-/// font: bold 17pt, white text, 10pt corner radius, dark background (white 0.15), 46pt height.
-private struct StartListeningLinkView: View {
-    let url: URL
-
-    var body: some View {
-        Link(destination: url) {
-            Text("Start Listening")
-                .font(.system(size: 17, weight: .bold))
-                .foregroundColor(.white)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-        }
-        .frame(height: 46)
-        .background(Color(white: 0.15))
-        .cornerRadius(10)
-    }
-}
 
 /// Echolet Voice Keyboard (J5 single-button).
 ///
@@ -26,22 +6,24 @@ private struct StartListeningLinkView: View {
 /// * Dark "Start Listening" while idle — tapping begins an exact-session
 ///   v2 START when a genuinely warm recorder is already live, or (bounded,
 ///   once per fresh appearance automatically / on every tap otherwise)
-///   attempts to foreground the Echolet containing app through the only
-///   public extension-safe open seam and shows neutral "Starting…" while
-///   the prepare handshake progresses.
+///   attempts to open the Echolet containing app through the responder
+///   chain (`open(_:options:completionHandler:)` on the UIApplication
+///   instance found by walking `UIResponder.next`; the user explicitly
+///   permits this non-public path) and shows neutral "Starting…" while the
+///   prepare handshake progresses.
 /// * Red "Stop Listening" exclusively AFTER a real `.listening` ACK for the
 ///   current session; sends exact STOP (fresh requestId, sequence+1).
 /// * Neutral "Finalizing…" while waiting for the correlated final transcript
 ///   which is then inserted into the editable host EXACTLY ONCE via
-///   `textDocumentProxy` (no manual Consume gesture in primary UX).
+///   `textDocumentProxy`.
 /// * A required Apple globe/next-keyboard key.
 ///
 /// All decision logic lives in the pure Foundation
 /// `EcholetKeyboardSessionController` (CLI-testable); this controller is the
-/// iOS wiring: App Group defaults, textDocumentProxy, extension open seam,
-/// bounded response polling. Strictly no microphone access here and no
-/// private/hidden APIs — if the OS refuses the automatic open, the UI says
-/// so honestly and the keyboard keeps working on the tap/manual path.
+/// iOS wiring: App Group defaults, textDocumentProxy, responder-chain open,
+/// host bundle id probe, bounded response polling. Strictly no microphone
+/// access here; if the OS refuses the open, the UI says so honestly and the
+/// keyboard keeps working on the tap/manual path.
 class KeyboardViewController: UIInputViewController {
 
     static let appGroupId = "group.com.mainstayx.echolet.dev"
@@ -53,8 +35,6 @@ class KeyboardViewController: UIInputViewController {
     // MARK: - UI Components
     private let statusLabel = UILabel()
     private let primaryButton = UIButton(type: .custom)
-    private var startHostingController: UIHostingController<StartListeningLinkView>?
-    private var startHostingContainer = UIView()
     private let hintLabel = UILabel()
     private let nextKeyboardButton = UIButton(type: .system)
     private let globeRow = UIStackView()
@@ -68,6 +48,7 @@ class KeyboardViewController: UIInputViewController {
         self.sharedDefaults = UserDefaults(suiteName: Self.appGroupId)
         buildController()
         setupUI()
+        captureHostBundleId()
     }
 
     private func buildController() {
@@ -137,21 +118,97 @@ class KeyboardViewController: UIInputViewController {
         renderDisplay()
     }
 
-    // MARK: - Public extension open seam (only public API surface)
+    // MARK: - Containing-app open via responder chain
+    //
+    // `NSExtensionContext.open` is rejected for keyboard extensions and
+    // legacy `openURL:` is a no-op on iOS 18. The user explicitly permits
+    // the non-public path: walk `UIResponder.next` until an object that
+    // responds to `open(_:options:completionHandler:)` (the UIApplication
+    // instance) is found, then invoke it through method-for-selector /
+    // unsafeBitCast to the IMP signature.
+
+    /// ObjC method signature: - (void)openURL:(NSURL*)url
+    ///         options:(NSDictionary<UIApplicationOpenURLOptionsKey,id>*)options
+    /// completionHandler:(void (^)(BOOL, NSError *))completion
+    private typealias OpenURLMethod =
+        @convention(c) (NSObject, Selector, URL, NSDictionary, Any?) -> Void
+    private typealias OpenCompletionBlock =
+        @convention(block) (Bool, Error?) -> Void
 
     private func performHostOpenAttempt(url: URL) -> EcholetKeyboardSessionController.OpenAttemptResult {
-        guard let context = extensionContext else {
-            return .unsupported(reason: "no_extension_context")
+        let openSelector = NSSelectorFromString("openURL:options:completionHandler:")
+        guard let targetResponder = findOpenURLResponder(matching: openSelector) else {
+            print("[Echolet-KBD] OPEN_RESOLVER(no_responder_with_open_options_completion)")
+            return .unsupported(reason: "no_open_responder")
         }
-        guard context.responds(to: NSSelectorFromString("openURL:completionHandler:")) else {
-            return .unsupported(reason: "no_public_open_api")
-        }
-        context.open(url) { [weak self] success in
+
+        let completion: OpenCompletionBlock = { [weak self] success, error in
             DispatchQueue.main.async {
-                self?.controller?.handleOpenCompletion(success: success, reason: success ? nil : "ext_open_rejected")
+                print("[Echolet-KBD] OPEN_IMPL_CALLBACK(success=\(success),error=\(error?.localizedDescription ?? "none"))")
+                self?.controller?.handleOpenCompletion(
+                    success: success,
+                    reason: success ? nil : (error?.localizedDescription ?? "responder_open_rejected")
+                )
             }
         }
+        let method: OpenURLMethod?
+        if let target = targetResponder as? NSObject, target.responds(to: openSelector) {
+            method = unsafeBitCast(target.method(for: openSelector), to: OpenURLMethod.self)
+        } else {
+            method = nil
+        }
+        guard let method = method else {
+            return .unsupported(reason: "no_open_responder")
+        }
+        let options: NSDictionary = [:]
+        method(targetResponder, openSelector, url, options, completion)
+        print("[Echolet-KBD] OPEN_IMPL_INITIATED(host=\(url.host ?? ""))")
         return .initiated
+    }
+
+    private func findOpenURLResponder(matching selector: Selector) -> UIResponder? {
+        var responder: UIResponder? = self
+        while let currentResponder = responder {
+            if currentResponder.responds(to: selector) {
+                return currentResponder
+            }
+            responder = currentResponder.next
+        }
+        return nil
+    }
+
+    // MARK: - Host bundle id capture (best-effort, for return-to-host)
+    //
+    // Probes KVC `_hostBundleID` on self / its parent, then the responder
+    // chain `_hostApplicationBundleIdentifier`. On iOS 18 the keys may
+    // legitimately be unavailable or "<null>"; the failure is logged
+    // truthfully and the manual system back gesture remains the route.
+
+    private func captureHostBundleId() {
+        guard let defaults = sharedDefaults else { return }
+
+        func probe(_ target: NSObject, _ key: String) -> String? {
+            // Undefined-key KVC raises NSException (not catchable via
+            // Swift try?), so gate on the getter responding first.
+            let getter = NSSelectorFromString(key)
+            guard target.responds(to: getter) else { return nil }
+            guard let raw = target.perform(getter), let str = raw.takeUnretainedValue() as? String else { return nil }
+            return EcholetLaunch.normalizeHostBundleId(str)
+        }
+
+        var hostBundleId: String? = probe(self, "_hostBundleID")
+        if hostBundleId == nil, let parent = parent {
+            hostBundleId = probe(parent, "_hostBundleID")
+        }
+        if hostBundleId == nil {
+            hostBundleId = probe(self, "_hostApplicationBundleIdentifier")
+        }
+        if let id = hostBundleId {
+            let wrote = EcholetLaunch.writeHostBundleId(id, defaults: defaults)
+            print("[Echolet-KBD] HOST_ID(probe=\(id),stored=\(wrote))")
+        } else {
+            print("[Echolet-KBD] HOST_ID(no_host_bundle_id_available -> manual back gesture acceptable)")
+        }
     }
 
     // MARK: - UI Setup
@@ -180,7 +237,7 @@ class KeyboardViewController: UIInputViewController {
         statusLabel.numberOfLines = 2
         mainStack.addArrangedSubview(statusLabel)
 
-        // ONE prominent primary button
+        // ONE prominent primary button (dark Start / red Stop / neutral intermediate)
         primaryButton.titleLabel?.font = .boldSystemFont(ofSize: 17)
         primaryButton.setTitleColor(.white, for: .normal)
         primaryButton.layer.cornerRadius = 10
@@ -189,13 +246,6 @@ class KeyboardViewController: UIInputViewController {
         mainStack.addArrangedSubview(primaryButton)
         primaryButton.widthAnchor.constraint(equalTo: mainStack.widthAnchor).isActive = true
         primaryButton.heightAnchor.constraint(equalToConstant: 46).isActive = true
-
-        // SwiftUI Link container for idle Start Listening navigation
-        startHostingContainer.translatesAutoresizingMaskIntoConstraints = false
-        startHostingContainer.isHidden = true
-        mainStack.addArrangedSubview(startHostingContainer)
-        startHostingContainer.widthAnchor.constraint(equalTo: mainStack.widthAnchor).isActive = true
-        startHostingContainer.heightAnchor.constraint(equalToConstant: 46).isActive = true
 
         // Compact honest hint: manual fallback instruction + privacy note
         hintLabel.font = .systemFont(ofSize: 10)
@@ -227,7 +277,6 @@ class KeyboardViewController: UIInputViewController {
         guard let controller = controller else {
             statusLabel.text = "App Group Unavailable: Entitlement Missing"
             primaryButton.isHidden = false
-            startHostingContainer.isHidden = true
             primaryButton.isEnabled = false
             primaryButton.setTitle("Start Listening", for: .normal)
             primaryButton.setTitleColor(UIColor(white: 1.0, alpha: 0.4), for: .normal)
@@ -235,24 +284,17 @@ class KeyboardViewController: UIInputViewController {
             return
         }
 
-        let showSwiftUILink = (controller.phase == .ready && !controller.freshWarmLiveExists() && controller.preparedDemandURL != nil)
-
-        if showSwiftUILink, let url = controller.preparedDemandURL {
-            primaryButton.isHidden = true
-            startHostingContainer.isHidden = false
-            updateSwiftUILinkHosting(url: url)
+        // Warm-standby adoption needs no special UI path; the ONE dark
+        // UIKit button covers idle/open/listening states everywhere.
+        primaryButton.isHidden = false
+        primaryButton.setEnabled(interactive: controller.isPrimaryButtonInteractive)
+        primaryButton.setTitle(controller.primaryButtonLabel, for: .normal)
+        if controller.shouldShowRedStopButton {
+            primaryButton.backgroundColor = .systemRed
+        } else if controller.isPrimaryButtonInteractive {
+            primaryButton.backgroundColor = UIColor(white: 0.15, alpha: 1.0) // dark Start
         } else {
-            primaryButton.isHidden = false
-            startHostingContainer.isHidden = true
-            primaryButton.setEnabled(interactive: controller.isPrimaryButtonInteractive)
-            primaryButton.setTitle(controller.primaryButtonLabel, for: .normal)
-            if controller.shouldShowRedStopButton {
-                primaryButton.backgroundColor = .systemRed
-            } else if controller.isPrimaryButtonInteractive {
-                primaryButton.backgroundColor = UIColor(white: 0.15, alpha: 1.0) // dark Start
-            } else {
-                primaryButton.backgroundColor = .systemGray3
-            }
+            primaryButton.backgroundColor = .systemGray3
         }
 
         statusLabel.numberOfLines = 2
@@ -273,26 +315,6 @@ class KeyboardViewController: UIInputViewController {
             statusLabel.text = "Finalizing…"
         case .blocked(let reason):
             statusLabel.text = "Blocked: \(reason)"
-        }
-    }
-
-    private func updateSwiftUILinkHosting(url: URL) {
-        if let existing = startHostingController {
-            existing.rootView = StartListeningLinkView(url: url)
-        } else {
-            let hosting = UIHostingController(rootView: StartListeningLinkView(url: url))
-            hosting.view.translatesAutoresizingMaskIntoConstraints = false
-            hosting.view.backgroundColor = .clear
-            addChild(hosting)
-            startHostingContainer.addSubview(hosting.view)
-            NSLayoutConstraint.activate([
-                hosting.view.topAnchor.constraint(equalTo: startHostingContainer.topAnchor),
-                hosting.view.leadingAnchor.constraint(equalTo: startHostingContainer.leadingAnchor),
-                hosting.view.trailingAnchor.constraint(equalTo: startHostingContainer.trailingAnchor),
-                hosting.view.bottomAnchor.constraint(equalTo: startHostingContainer.bottomAnchor)
-            ])
-            hosting.didMove(toParent: self)
-            self.startHostingController = hosting
         }
     }
 

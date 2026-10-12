@@ -1,5 +1,6 @@
 import Foundation
 import CoreFoundation
+import AVFoundation
 
 /// Delegate protocol for `WarmIPCService` events.
 public protocol WarmIPCServiceDelegate: AnyObject {
@@ -56,6 +57,7 @@ public final class WarmIPCService {
         setupDarwinObserver()
         setupStopTranscriptProvider()
         setupLivePartialForwarding()
+        setupInterruptionObserver()
     }
 
     deinit {
@@ -168,6 +170,95 @@ public final class WarmIPCService {
     private func handleDarwinNotification() {
         ipcQueue.async { [weak self] in
             self?.pollIncomingRequestsInternal()
+        }
+    }
+
+    // MARK: - Audio Interruption / Hardware Loss (warm persist fence)
+    //
+    // iOS refuses starting an audio session from the background. An audio
+    // session interruption or capture failure kills the recorder; the warm
+    // persist path must then collapse truthfully and publish warm-live
+    // recorderActive=false so the keyboard falls back to opening the app.
+    private var interruptionObserverInstalled = false
+
+    private func setupInterruptionObserver() {
+        guard !interruptionObserverInstalled else { return }
+        let center = NotificationCenter.default
+        center.addObserver(
+            self,
+            selector: #selector(handleRecorderInterruption(_:)),
+            name: AVAudioSession.interruptionNotification,
+            object: nil
+        )
+        center.addObserver(
+            self,
+            selector: #selector(handleRoutePulled(_:)),
+            name: AVAudioSession.routeChangeNotification,
+            object: nil
+        )
+        interruptionObserverInstalled = true
+    }
+
+    @objc private func handleRecorderInterruption(_ notification: Notification) {
+        guard let userInfo = notification.userInfo,
+              let typeValue = userInfo[AVAudioSessionInterruptionTypeKey] as? UInt,
+              AVAudioSession.InterruptionType(rawValue: typeValue) == .began else {
+            return
+        }
+        ipcQueue.async { [weak self] in
+            self?.collapseForcedHardwareLoss(reason: "audio_session_interruption")
+        }
+    }
+
+    @objc private func handleRoutePulled(_ notification: Notification) {
+        guard let userInfo = notification.userInfo,
+              let reasonValue = userInfo[AVAudioSessionRouteChangeReasonKey] as? UInt,
+              AVAudioSession.RouteChangeReason(rawValue: reasonValue) == .oldDeviceUnavailable else {
+            return
+        }
+        ipcQueue.async { [weak self] in
+            self?.collapseForcedHardwareLoss(reason: "audio_route_pulled")
+        }
+    }
+
+    /// Runs on ipcQueue: collapses live warm capture when the recorder was
+    /// forcibly lost, so warmLive recorderActive=false is published.
+    private func collapseForcedHardwareLoss(reason: String) {
+        let effects = self.flowCoordinator.handleMicrophoneHardwareInterrupted(reason: reason)
+        guard !effects.isEmpty else { return }
+        print("[Echolet-APP] RECORDER_INTERRUPTED(\(reason)) warm persist collapsed")
+        self.executeFlowEffects(effects, triggeringRequestId: nil, triggeringSessionId: nil, triggeringSequence: nil)
+    }
+
+    // MARK: - Best-effort Return To Host App (openApplicationWithBundleID)
+    //
+    // After MIC_NATIVE_READY for a keyboard demand, if the keyboard stored
+    // the host app bundle id it was summoned into, try to return the user
+    // there via LSApplicationWorkspace (user explicitly accepts private API
+    // usage). Every step is logged; any failure leaves the user in the
+    // Echolet app (never suspends the process).
+    private func attemptReturnToHostApp(reason: String) {
+        guard let defaults = sharedDefaults else {
+            print("[Echolet-APP] RETURN_ATTEMPT(unavailable_defaults reason=\(reason))")
+            return
+        }
+        guard let hostBundleId = EcholetLaunch.readHostBundleId(defaults: defaults) else {
+            print("[Echolet-APP] RETURN_ATTEMPT(no_host_bundle_id_known reason=\(reason) -> user stays in Echolet)")
+            return
+        }
+        print("[Echolet-APP] RETURN_ATTEMPT(host=\(hostBundleId) reason=\(reason))")
+        guard let workspaceClass = NSClassFromString("LSApplicationWorkspace") as? LSApplicationWorkspaceShim.Type else {
+            print("[Echolet-APP] RETURN_RESULT(false LSApplicationWorkspace unavailable) user stays in Echolet")
+            return
+        }
+        guard let workspace = workspaceClass.defaultWorkspace?() else {
+            print("[Echolet-APP] RETURN_RESULT(false defaultWorkspace nil) user stays in Echolet")
+            return
+        }
+        if let opened = workspace.openApplicationWithBundleID?(hostBundleId) {
+            print("[Echolet-APP] RETURN_RESULT(openApplicationWithBundleID=\(opened) host=\(hostBundleId))")
+        } else {
+            print("[Echolet-APP] RETURN_RESULT(false openApplicationWithBundleID missing) user stays in Echolet")
         }
     }
 
@@ -323,7 +414,7 @@ public final class WarmIPCService {
                 defaults: defaults
             )
             print("[Echolet-APP] MIC_NATIVE_READY(adopted_existing_recorder,nonce=\(String(nonce.prefix(8)))…)")
-            print("[Echolet-APP] RETURN_ATTEMPT(auto_return_unsupported -> manual system return)")
+            self.attemptReturnToHostApp(reason: "mic_native_ready_adopted_existing_recorder")
             return
         }
 
@@ -595,6 +686,43 @@ public final class WarmIPCService {
                     }
                 }
 
+            case .finalizeAsrReturnToWarmStandby(let directive):
+                // Warm persist: dispose ONLY the ASR session (the recorder
+                // hardware stays live; it is the app-owned warm standby the
+                // keyboard re-adopts later). A keyboard STOP finalizes the
+                // real transcript first; cancel/disposal ends without
+                // fabricating text. The exact completed ACK for the stop
+                // identity is emitted by the coordinator afterward.
+                if directive.reason == "keyboard_stop" {
+                    EcholetAsrService.shared.finalizeSession(sessionId: directive.sessionId) { [weak self] finalText in
+                        guard let self = self else { return }
+                        self.ipcQueue.async {
+                            self.pendingFinalTranscriptsLock.lock()
+                            self.pendingFinalTranscripts[directive.sessionId] = finalText
+                            self.pendingFinalTranscriptsLock.unlock()
+                            let stopEffects = self.flowCoordinator.handleKeyboardSessionEndedReturnToWarmStandby(directive: directive)
+                            self.executeFlowEffects(
+                                stopEffects,
+                                triggeringRequestId: directive.requestId,
+                                triggeringSessionId: directive.sessionId,
+                                triggeringSequence: directive.sequence
+                            )
+                        }
+                    }
+                } else {
+                    EcholetAsrService.shared.disposeSession(
+                        sessionId: directive.sessionId,
+                        reason: "warm_persist_\(directive.reason)"
+                    )
+                    let stopEffects = self.flowCoordinator.handleKeyboardSessionEndedReturnToWarmStandby(directive: directive)
+                    self.executeFlowEffects(
+                        stopEffects,
+                        triggeringRequestId: directive.requestId,
+                        triggeringSessionId: directive.sessionId,
+                        triggeringSequence: directive.sequence
+                    )
+                }
+
             case .stopHardwareManual:
                 AudioCaptureController.shared.stopCapture()
 
@@ -709,11 +837,10 @@ public final class WarmIPCService {
                     }
                     self.pendingActivation = nil
                     print("[Echolet-APP] MIC_NATIVE_READY (nonce=\(String(pending.nonce.prefix(8)))…)")
-                    // Honest return attempt: iOS offers no public automatic
-                    // app<->keyboard return on this path; the user's system
-                    // "Back to previous app" UI remains the explicit route.
-                    print("[Echolet-APP] RETURN_ATTEMPT(auto_return_unsupported -> manual system return)")
-                    print("[Echolet-APP] RETURN_RESULT(manual): keyboard auto-STARTs once warm-live is fresh.")
+                    // Best-effort return to the app the keyboard was summoned
+                    // into (LSApplicationWorkspace via responder/perform; if
+                    // it fails, the user simply stays in the Echolet app).
+                    self.attemptReturnToHostApp(reason: "mic_native_ready")
                 }
                 DispatchQueue.main.async { [weak self] in
                     guard let self = self else { return }
@@ -923,4 +1050,12 @@ public final class WarmIPCService {
         }
     }
     #endif
+}
+
+/// Best-effort private shim for the app -> host return (user explicitly
+/// permits non-public APIs). All selectors are optional so iOS 18 builds
+/// where LSApplicationWorkspace does not expose them degrade honestly.
+@objc private protocol LSApplicationWorkspaceShim {
+    @objc optional static func defaultWorkspace() -> AnyObject?
+    @objc optional func openApplicationWithBundleID(_ bundleID: String) -> Bool
 }

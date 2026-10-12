@@ -127,6 +127,11 @@ public final class WarmCaptureFlowCoordinator {
         case startHardwareWarmStandby(token: SessionToken)
         case adoptWarmStandbyAsr(token: SessionToken)
         case notifyWarmStandbyActive(active: Bool)
+        // Warm persist (session end without hardware stop): dispose the ASR
+        // session, keep the recorder running, return ownership to warm
+        // standby, and ACK the exact STOP/CANCEL identity afterward via
+        // handleKeyboardSessionEndedReturnToWarmStandby.
+        case finalizeAsrReturnToWarmStandby(directive: HardwareStopDirective)
     }
 
     // Process & Gate state
@@ -769,11 +774,26 @@ public final class WarmCaptureFlowCoordinator {
             }
 
             // Keyboard owned or none:
-            captureOwner = .none
-            // Register the exact stop directive awaiting its hardware-completed ACK.
-            // Identity: exact app epoch, stop request id/session/intent/sequence —
-            // a stale STOP can never ACK a newer intent (even same sessionId).
-            if let directive = mintQualifiedStopDirective(
+            // Warm persist: a keyboard-owned session end (STOP after its
+            // final transcript, CANCEL, or keyboard hidden) must NOT stop
+            // the mic hardware. The ASR session is disposed (executor) and
+            // ownership returns to .warmStandby with the recorder still
+            // running, so the keyboard can adopt the warm mic again on its
+            // next appearance. Hardware stops ONLY on explicit user disarm,
+            // audio-session interruption/failure, or process death.
+            if case .warmStandby = captureOwner {
+                // Warm standby with no adopted keyboard session (spurious
+                // STOP against warm capture): no touch of hardware.
+                effects.append(.writeResponse(
+                    sessionId: request.sessionId,
+                    requestId: request.requestId,
+                    sequence: request.sequence,
+                    state: .completed,
+                    recognizedText: nil,
+                    isFinal: true,
+                    errorCode: nil
+                ))
+            } else if let directive = mintQualifiedStopDirective(
                 sessionId: request.sessionId,
                 intentSequence: request.intentSequence,
                 requestId: request.requestId,
@@ -782,9 +802,10 @@ public final class WarmCaptureFlowCoordinator {
             ) {
                 // Single-writer: any previous in-flight stop ACK is superseded.
                 pendingStopAcknowledgmentDirective = directive
-                effects.append(.stopHardwareKeyboard(directive: directive))
+                effects.append(.finalizeAsrReturnToWarmStandby(directive: directive))
             }
-            // Note: completed snapshot will be written after stop completion confirms
+            // Completed snapshot is written by the executor after the ASR
+            // session disposal confirms (manual test owner untouched above).
             return effects
         }
     }
@@ -979,6 +1000,122 @@ public final class WarmCaptureFlowCoordinator {
             errorCode: finalText == nil ? "asr_final_transcript_unavailable" : nil
         ))
         effects.append(.notifyStopAdmitted(sessionId: directive.sessionId, intentSequence: directive.intentSequence))
+        return effects
+    }
+
+    // MARK: - Keyboard Session End -> Warm Standby (hardware keeps running)
+
+    /// Completion intake for a keyboard session end (STOP/CANCEL) that did
+    /// NOT stop the hardware. Mirrors the exact-ACK/intent fencing of
+    /// `handleHardwareStopCompletion`, consumes the final transcript
+    /// provider exactly once, then returns ownership to `.warmStandby` with
+    /// the recorder still genuinely running (`isWarmStandbyHardwareActive`
+    /// stays/becomes true) so the next keyboard appearance abandons no
+    /// session and can adopt the warm mic again. The completed response for
+    /// the exact stop identity is written exactly once here.
+    public func handleKeyboardSessionEndedReturnToWarmStandby(directive: HardwareStopDirective) -> [FlowEffect] {
+        var effects: [FlowEffect] = []
+
+        // Exact-ACK matching: only the directive registered at STOP/CANCEL
+        // admission may finalize this session end.
+        guard let pendingAck = pendingStopAcknowledgmentDirective, pendingAck == directive else {
+            return effects
+        }
+        // Intent fencing: a stale end completion must never ACK a newer
+        // pending intent (including same-sessionId reuse).
+        if let currentActive = activeSessionToken, currentActive.intentSequence > directive.intentSequence {
+            return effects
+        }
+        if let pending = pendingStartToken, pending.intentSequence > directive.intentSequence {
+            return effects
+        }
+        if let pendingRep = pendingReplacementStartToken, pendingRep.intentSequence > directive.intentSequence {
+            return effects
+        }
+        pendingStopAcknowledgmentDirective = nil
+
+        // FINAL recognized text injected by WarmIPCService (real decoder
+        // result, "" for genuine no-speech, or nil after an ASR error /
+        // cancel disposal). Consumed exactly once via the provider.
+        let finalText = stopFinalTranscriptProvider?(directive.sessionId)
+
+        // Warm persist decision, fenced against a NEWER keyboard session:
+        // only revert ownership when this session still owns capture (or it
+        // already acked to none). A newer keyboard session NEVER becomes
+        // warm standby due to this late completion.
+        var returnsToWarmStandby = false
+        if case .warmStandby = captureOwner {
+            returnsToWarmStandby = true
+        } else if case .keyboard(let ownerSessionId, let ownerIntent) = captureOwner {
+            returnsToWarmStandby = (ownerSessionId == directive.sessionId && ownerIntent <= directive.intentSequence)
+        } else if activeSessionToken == nil && pendingStartToken == nil && pendingReplacementStartToken == nil {
+            returnsToWarmStandby = true
+        } else if case .none = captureOwner {
+            returnsToWarmStandby = true
+        }
+        if returnsToWarmStandby {
+            activeSessionToken = nil
+            warmStandbyToken = nil
+            captureOwner = .warmStandby
+            isWarmStandbyHardwareActive = true // recorder is still running (never stopped)
+        }
+
+        effects.append(.writeResponse(
+            sessionId: directive.sessionId,
+            requestId: directive.requestId,
+            sequence: directive.sequence,
+            state: .completed,
+            recognizedText: finalText,
+            isFinal: true,
+            errorCode: finalText == nil ? "asr_final_transcript_unavailable" : nil
+        ))
+        effects.append(.notifyStopAdmitted(sessionId: directive.sessionId, intentSequence: directive.intentSequence))
+        if returnsToWarmStandby {
+            // Publish hardware truth: recorder remains live (heartbeat keeps
+            // writing recorderActive=true on the poller; this re-asserts it).
+            effects.append(.notifyWarmStandbyActive(active: true))
+        }
+        return effects
+    }
+
+    // MARK: - Audio Session Interruption / Hardware Failure (warm persist fence)
+
+    /// Forced hardware loss intake (audio-session interruption, route pull,
+    /// or capture failure). The recorder can no longer be trusted: all
+    /// session state collapses truthfully, the hardware flag clears, and
+    /// warm-live is published as recorderActive=false so the keyboard falls
+    /// back to opening the containing app instead of adopting. This is one
+    /// of the ONLY paths that stop the warm hardware implicitly.
+    public func handleMicrophoneHardwareInterrupted(reason: String) -> [FlowEffect] {
+        guard isWarmStandbyHardwareActive || activeSessionToken != nil ||
+              pendingStartToken != nil || pendingReplacementStartToken != nil else {
+            return []
+        }
+        advanceCancelGeneration()
+        var effects: [FlowEffect] = []
+        if let active = activeSessionToken {
+            admissionGate?.endActiveSession()
+            effects.append(.writeResponse(
+                sessionId: active.sessionId,
+                requestId: active.requestId,
+                sequence: active.sequence,
+                state: .blocked,
+                recognizedText: nil,
+                isFinal: true,
+                errorCode: "audio_session_interrupted"
+            ))
+        }
+        activeSessionToken = nil
+        pendingStartToken = nil
+        pendingReplacementStartToken = nil
+        pendingReplacementStopDirective = nil
+        isWaitingForHardwareStopToStartReplacement = false
+        pendingStopAcknowledgmentDirective = nil
+        warmStandbyToken = nil
+        captureOwner = .none
+        isWarmStandbyHardwareActive = false
+        effects.append(.notifyBlocked(reason: "Microphone interrupted/captured failed: \(reason)"))
+        effects.append(.notifyWarmStandbyActive(active: false))
         return effects
     }
 

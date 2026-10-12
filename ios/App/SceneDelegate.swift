@@ -16,12 +16,19 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
 
         // Cold launch through the echolet:// deep link: the URL contexts
         // arrive with the scene connection options.
+        var hasDeepLink = false
         for context in connectionOptions.urlContexts {
+            hasDeepLink = true
             WarmIPCService.shared.handleDictationActivationURL(context.url, source: "cold_launch")
         }
         // J5 manual foreground hand: a fresh unfulfilled keyboard demand
         // (attempted open was refused) is honored the same as a deep link.
         WarmIPCService.shared.activatePendingDemandIfFresh(source: "cold_connect")
+
+        if !hasDeepLink {
+            // Auto-prepare warm dictation and microphone on launch so keyboard can use it immediately.
+            WarmIPCService.shared.prepareWarmDictation()
+        }
     }
 
     func scene(_ scene: UIScene, openURLContexts URLContexts: Set<UIOpenURLContext>) {
@@ -35,6 +42,8 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         WarmIPCService.shared.startPolling()
         // Manual foreground hand for pending keyboard launch demands.
         WarmIPCService.shared.activatePendingDemandIfFresh(source: "foreground")
+        // Ensure warm dictation and mic are armed and prepared whenever the app enters foreground
+        WarmIPCService.shared.prepareWarmDictation()
     }
 
     func sceneDidEnterBackground(_ scene: UIScene) {

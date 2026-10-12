@@ -332,7 +332,9 @@ public final class EcholetKeyboardSessionController {
     private func failOpen(reason: String) {
         autoLaunchUnsupportedReason = reason
         launchContext = nil
-        preparedDemandURL = nil
+        if !reason.contains("AUTO_LAUNCH_UNSUPPORTED") {
+            preparedDemandURL = nil
+        }
         if phase == .opening {
             setPhase(.ready)
         }

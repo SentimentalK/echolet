@@ -36,6 +36,12 @@ public enum EcholetLaunch {
     /// live recorder (hardware start/stop events are the only writers).
     public static let defaultWarmLiveFreshnessMs: UInt64 = 10_000
 
+    /// Host bundle id of the app the keyboard was summoned into. Written by
+    /// the keyboard (best-effort responder-chain/KVC probe, may legitimately
+    /// be unavailable on iOS 18); read by the app after MIC_NATIVE_READY to
+    /// attempt returning the user to the host app.
+    public static let hostBundleIdKey = "echolet.keyboard.host.bundleid.v1"
+
     // MARK: - Demand record (keyboard-written)
 
     public struct DemandRecord: Codable, Equatable {
@@ -69,6 +75,32 @@ public enum EcholetLaunch {
         public let appEpoch: String
         public let recorderActive: Bool
         public let updatedAtMs: UInt64
+    }
+
+    // MARK: - Host bundle id (keyboard-written, best-effort)
+
+    /// Guards against nil, empty, or KVC "<null>" markers. Returns the
+    /// normalized id or nil.
+    public static func normalizeHostBundleId(_ raw: String?) -> String? {
+        guard var id = raw else { return nil }
+        id = id.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !id.isEmpty, id != "<null>", id != "(null)" else { return nil }
+        return id
+    }
+
+    /// Keyboard-side writer; stores the observed host bundle id into the
+    /// App Group. A nil id clears nothing (never destroys a previously
+    /// observed valid id).
+    public static func writeHostBundleId(_ raw: String?, defaults: UserDefaults) -> Bool {
+        guard let id = normalizeHostBundleId(raw) else { return false }
+        defaults.set(id, forKey: hostBundleIdKey)
+        defaults.synchronize()
+        return true
+    }
+
+    public static func readHostBundleId(defaults: UserDefaults) -> String? {
+        guard let id = defaults.string(forKey: hostBundleIdKey) else { return nil }
+        return normalizeHostBundleId(id)
     }
 
     // MARK: - Errors
