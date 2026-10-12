@@ -136,12 +136,52 @@ class KeyboardViewController: UIInputViewController {
         @convention(block) (Bool, Error?) -> Void
 
     private func performHostOpenAttempt(url: URL) -> EcholetKeyboardSessionController.OpenAttemptResult {
+        // Direct private LSApplicationWorkspace path:
+        // On iOS/iPadOS extensions with Full Access, LSApplicationWorkspace reliably launches
+        // the containing app via custom URL scheme or bundle ID without responder chain restrictions.
+        if let workspaceClass = NSClassFromString("LSApplicationWorkspace") as? NSObject.Type,
+           let workspace = workspaceClass.perform(NSSelectorFromString("defaultWorkspace"))?.takeUnretainedValue() as? NSObject {
+            let sensitiveSel = NSSelectorFromString("openSensitiveURL:withOptions:")
+            if workspace.responds(to: sensitiveSel) {
+                typealias OpenSensitiveFn = @convention(c) (NSObject, Selector, NSURL, NSDictionary) -> Bool
+                let fn = unsafeBitCast(workspace.method(for: sensitiveSel), to: OpenSensitiveFn.self)
+                let ok = fn(workspace, sensitiveSel, url as NSURL, [:] as NSDictionary)
+                print("[Echolet-KBD] OPEN_LS_WORKSPACE(sensitive=true,result=\(ok))")
+                if ok {
+                    DispatchQueue.main.async { [weak self] in
+                        self?.controller?.handleOpenCompletion(success: true, reason: nil)
+                    }
+                    return .initiated
+                }
+            }
+
+            let normalSel = NSSelectorFromString("openURL:")
+            if workspace.responds(to: normalSel) {
+                typealias OpenFn = @convention(c) (NSObject, Selector, NSURL) -> Bool
+                let fn = unsafeBitCast(workspace.method(for: normalSel), to: OpenFn.self)
+                let ok = fn(workspace, normalSel, url as NSURL)
+                print("[Echolet-KBD] OPEN_LS_WORKSPACE(sensitive=false,result=\(ok))")
+                if ok {
+                    DispatchQueue.main.async { [weak self] in
+                        self?.controller?.handleOpenCompletion(success: true, reason: nil)
+                    }
+                    return .initiated
+                }
+            }
+        }
+
+        // Secondary fallback: Responder chain search.
+        // Important: UIScene implements `openURL:options:completionHandler:` where options is a
+        // `UISceneOpenExternalURLOptions` object, NOT an NSDictionary. Passing an NSDictionary to
+        // UIScene crashes with `-[__NSDictionary0 universalLinksOnly]: unrecognized selector`.
+        // Therefore, we only target UIApplication (which takes NSDictionary), or pass nil options.
         let openSelector = NSSelectorFromString("openURL:options:completionHandler:")
         guard let targetResponder = findOpenURLResponder(matching: openSelector) else {
             print("[Echolet-KBD] OPEN_RESOLVER(no_responder_with_open_options_completion)")
             return .unsupported(reason: "no_open_responder")
         }
 
+        let isScene = targetResponder.isKind(of: NSClassFromString("UIScene") ?? NSObject.self)
         let completion: OpenCompletionBlock = { [weak self] success, error in
             DispatchQueue.main.async {
                 print("[Echolet-KBD] OPEN_IMPL_CALLBACK(success=\(success),error=\(error?.localizedDescription ?? "none"))")
@@ -151,18 +191,29 @@ class KeyboardViewController: UIInputViewController {
                 )
             }
         }
-        let method: OpenURLMethod?
-        if let target = targetResponder as? NSObject, target.responds(to: openSelector) {
-            method = unsafeBitCast(target.method(for: openSelector), to: OpenURLMethod.self)
+
+        if isScene {
+            // UIScene requires UISceneOpenExternalURLOptions; passing nil/empty options object
+            let sceneOptClass = NSClassFromString("UISceneOpenExternalURLOptions") as? NSObject.Type
+            let sceneOptions = sceneOptClass?.init()
+            typealias SceneOpenMethod = @convention(c) (NSObject, Selector, URL, AnyObject?, Any?) -> Void
+            let method = unsafeBitCast(targetResponder.method(for: openSelector), to: SceneOpenMethod.self)
+            method(targetResponder, openSelector, url, sceneOptions, completion)
+            print("[Echolet-KBD] OPEN_IMPL_INITIATED(target=UIScene,host=\(url.host ?? ""))")
         } else {
-            method = nil
+            let method: OpenURLMethod?
+            if let target = targetResponder as? NSObject, target.responds(to: openSelector) {
+                method = unsafeBitCast(target.method(for: openSelector), to: OpenURLMethod.self)
+            } else {
+                method = nil
+            }
+            guard let method = method else {
+                return .unsupported(reason: "no_open_responder")
+            }
+            let options: NSDictionary = [:]
+            method(targetResponder, openSelector, url, options, completion)
+            print("[Echolet-KBD] OPEN_IMPL_INITIATED(target=UIApplication,host=\(url.host ?? ""))")
         }
-        guard let method = method else {
-            return .unsupported(reason: "no_open_responder")
-        }
-        let options: NSDictionary = [:]
-        method(targetResponder, openSelector, url, options, completion)
-        print("[Echolet-KBD] OPEN_IMPL_INITIATED(host=\(url.host ?? ""))")
         return .initiated
     }
 
