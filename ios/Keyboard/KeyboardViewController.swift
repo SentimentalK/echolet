@@ -1,22 +1,22 @@
 import UIKit
 import Darwin
 
-/// Echolet Voice Keyboard (J5 single-button).
+/// Echolet Voice Keyboard (J5 compact voice row).
 ///
-/// One prominent primary button for the entire flow:
+/// ONE horizontal primary row drives the entire flow:
 /// * Dark "Start Listening" while idle — tapping begins an exact-session
 ///   v2 START when a genuinely warm recorder is already live, or (bounded,
 ///   once per fresh appearance automatically / on every tap otherwise)
-///   attempts to open the Echolet containing app through the responder
-///   chain (`open(_:options:completionHandler:)` on the UIApplication
-///   instance found by walking `UIResponder.next`; the user explicitly
-///   permits this non-public path) and shows neutral "Starting…" while the
-///   prepare handshake progresses.
+///   attempts to open the Echolet containing app and shows neutral
+///   "Starting…" while the prepare handshake progresses.
 /// * Red "Stop Listening" exclusively AFTER a real `.listening` ACK for the
 ///   current session; sends exact STOP (fresh requestId, sequence+1).
 /// * Neutral "Finalizing…" while waiting for the correlated final transcript
 ///   which is then inserted into the editable host EXACTLY ONCE via
 ///   `textDocumentProxy`.
+/// * An adjacent native BACKSPACE keycap (`delete.left.fill`): one tap
+///   deletes exactly one preceding grapheme, enabled ONLY when the session
+///   controller reports a positively idle-ready, session-free state.
 /// * A required Apple globe/next-keyboard key.
 ///
 /// All decision logic lives in the pure Foundation
@@ -36,9 +36,11 @@ class KeyboardViewController: UIInputViewController {
     // MARK: - UI Components
     private let statusLabel = UILabel()
     private let primaryButton = UIButton(type: .custom)
+    private let backspaceButton = UIButton(type: .system)
     private let hintLabel = UILabel()
     private let nextKeyboardButton = UIButton(type: .system)
     private let globeRow = UIStackView()
+    private let primaryRow = UIStackView()
 
     private var pollTimer: Timer?
     private var lastKnownHostBundleId: String?
@@ -645,40 +647,71 @@ class KeyboardViewController: UIInputViewController {
         mainStack.translatesAutoresizingMaskIntoConstraints = false
         mainStack.axis = .vertical
         mainStack.alignment = .center
-        mainStack.spacing = 6
+        mainStack.spacing = 4
         view.addSubview(mainStack)
 
         NSLayoutConstraint.activate([
-            mainStack.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 6),
-            mainStack.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 10),
-            mainStack.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -10),
-            mainStack.bottomAnchor.constraint(lessThanOrEqualTo: view.bottomAnchor, constant: -6)
+            mainStack.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 4),
+            mainStack.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 6),
+            mainStack.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -6),
+            mainStack.bottomAnchor.constraint(lessThanOrEqualTo: view.bottomAnchor, constant: -2)
         ])
 
-        // Status
-        statusLabel.font = .systemFont(ofSize: 12, weight: .medium)
-        statusLabel.textColor = .label
-        statusLabel.textAlignment = .center
-        statusLabel.numberOfLines = 2
-        mainStack.addArrangedSubview(statusLabel)
+        // ONE primary row across the full keyboard width:
+        // Start/Stop occupies most of it; a fixed-size native BACKSPACE
+        // keycap sits adjacent (≥44pt touch target). Never a trash icon.
+        primaryRow.translatesAutoresizingMaskIntoConstraints = false
+        primaryRow.axis = .horizontal
+        primaryRow.alignment = .fill
+        primaryRow.distribution = .fill
+        primaryRow.spacing = 6
+        mainStack.addArrangedSubview(primaryRow)
 
-        // ONE prominent primary button (dark Start / red Stop / neutral intermediate)
         primaryButton.titleLabel?.font = .boldSystemFont(ofSize: 17)
         primaryButton.setTitleColor(.white, for: .normal)
         primaryButton.layer.cornerRadius = 10
-        primaryButton.translatesAutoresizingMaskIntoConstraints = false
+        primaryButton.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        primaryButton.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         primaryButton.addTarget(self, action: #selector(didTapPrimary), for: .touchUpInside)
-        mainStack.addArrangedSubview(primaryButton)
-        primaryButton.widthAnchor.constraint(equalTo: mainStack.widthAnchor).isActive = true
-        primaryButton.heightAnchor.constraint(equalToConstant: 46).isActive = true
+        primaryRow.addArrangedSubview(primaryButton)
 
-        // Compact honest hint: manual fallback instruction + privacy note
+        backspaceButton.tintColor = Self.keycapIconColor
+        backspaceButton.accessibilityLabel = "Backspace"
+        backspaceButton.accessibilityTraits = .button
+        backspaceButton.isAccessibilityElement = true
+        backspaceButton.layer.cornerRadius = 6
+        backspaceButton.backgroundColor = Self.keycapColor
+        backspaceButton.translatesAutoresizingMaskIntoConstraints = false
+        backspaceButton.addAction(UIAction { [weak self] _ in self?.didTapBackspace() }, for: .touchUpInside)
+        primaryRow.addArrangedSubview(backspaceButton)
+        NSLayoutConstraint.activate([
+            backspaceButton.widthAnchor.constraint(equalToConstant: 46),
+            backspaceButton.heightAnchor.constraint(equalToConstant: 46),
+            primaryButton.heightAnchor.constraint(equalToConstant: 46)
+        ])
+        applyBackspace(enabled: false, animated: false)
+
+        // Single-line truthful status.
+        statusLabel.font = .systemFont(ofSize: 12, weight: .medium)
+        statusLabel.textColor = .label
+        statusLabel.textAlignment = .center
+        statusLabel.numberOfLines = 1
+        statusLabel.adjustsFontSizeToFitWidth = true
+        statusLabel.minimumScaleFactor = 0.8
+        statusLabel.lineBreakMode = .byTruncatingTail
+        mainStack.addArrangedSubview(statusLabel)
+        statusLabel.widthAnchor.constraint(equalTo: mainStack.widthAnchor).isActive = true
+
+        // Short failure-only hint. Hidden unless manual return/fallback
+        // guidance is actually needed.
         hintLabel.font = .systemFont(ofSize: 10)
         hintLabel.textColor = .secondaryLabel
         hintLabel.textAlignment = .center
         hintLabel.numberOfLines = 2
-        hintLabel.text = "Audio runs inside the Echolet app only. If auto-return is blocked, open Echolet, then switch back to this app."
+        hintLabel.lineBreakMode = .byTruncatingTail
+        hintLabel.isHidden = true
         mainStack.addArrangedSubview(hintLabel)
+        hintLabel.widthAnchor.constraint(equalTo: mainStack.widthAnchor).isActive = true
 
         // Apple-required globe / next keyboard affordance
         globeRow.axis = .horizontal
@@ -696,16 +729,41 @@ class KeyboardViewController: UIInputViewController {
         renderDisplay()
     }
 
+    // MARK: - Dynamic appearance colors (dark/light contrast)
+
+    /// Dark charcoal Start, native-active in dark mode via lightened shade.
+    private static let darkStartColor = UIColor { trait in
+        trait.userInterfaceStyle == .dark
+            ? UIColor(red: 0.30, green: 0.30, blue: 0.33, alpha: 1.0)
+            : UIColor(red: 0.09, green: 0.09, blue: 0.11, alpha: 1.0)
+    }
+    private static let keycapColor = UIColor { trait in
+        trait.userInterfaceStyle == .dark
+            ? UIColor(white: 0.32, alpha: 1.0)
+            : UIColor(white: 1.0, alpha: 1.0)
+    }
+    private static let keycapIconColor = UIColor { trait in
+        trait.userInterfaceStyle == .dark
+            ? UIColor(white: 0.92, alpha: 1.0)
+            : UIColor(white: 0.15, alpha: 1.0)
+    }
+
     // MARK: - Rendering (truthful, derived from controller state)
 
     private func renderDisplay() {
+        // Backspace projection: single production gate read; UIKit adds no
+        // phase/session policy of its own. Disabled safest before any
+        // controller value can be consulted.
+        updateBackspace(enabled: controller?.isBackspacePermitted == true, animated: true)
+
         guard let controller = controller else {
             statusLabel.text = "App Group Unavailable: Entitlement Missing"
             primaryButton.isHidden = false
             primaryButton.isEnabled = false
             primaryButton.setTitle("Start Listening", for: .normal)
             primaryButton.setTitleColor(UIColor(white: 1.0, alpha: 0.4), for: .normal)
-            primaryButton.backgroundColor = UIColor(white: 0.2, alpha: 1.0)
+            primaryButton.backgroundColor = Self.darkStartColor
+            showHint("Open the Echolet app once so this keyboard can reach it.")
             return
         }
 
@@ -717,34 +775,61 @@ class KeyboardViewController: UIInputViewController {
         if controller.shouldShowRedStopButton {
             primaryButton.backgroundColor = .systemRed
         } else if controller.isPrimaryButtonInteractive {
-            primaryButton.backgroundColor = UIColor(white: 0.15, alpha: 1.0) // dark Start
+            primaryButton.backgroundColor = Self.darkStartColor // dark Start
         } else {
             primaryButton.backgroundColor = .systemGray3
         }
 
-        statusLabel.numberOfLines = 2
+        statusLabel.text = compactStatusText(for: controller)
+        updateHint(for: controller)
+    }
+
+    private func compactStatusText(for controller: EcholetKeyboardSessionController) -> String {
         switch controller.phase {
-        case .ready:
-            if let unsupported = controller.autoLaunchUnsupportedReason {
-                statusLabel.text = "Ready. (Auto-launch note: \(shortUnsupported(unsupported)). Tap to open Echolet; return via App Switcher if blocked.)"
-            } else {
-                statusLabel.text = "Tap the button to start."
-            }
-        case .opening:
-            statusLabel.text = "Starting… opening Echolet app…"
-        case .starting:
-            statusLabel.text = "Starting… Echolet is arming the offline model + mic."
-        case .listening:
-            statusLabel.text = "Listening… speak now, then tap Stop."
-        case .finalizing:
-            statusLabel.text = "Finalizing…"
-        case .blocked(let reason):
-            statusLabel.text = "Blocked: \(reason)"
+        case .ready: return "Ready"
+        case .opening: return "Opening Echolet…"
+        case .starting: return "Starting…"
+        case .listening: return "Listening…"
+        case .finalizing: return "Finalizing…"
+        case .blocked(let reason): return "Blocked: \(reason)"
         }
     }
 
-    private func shortUnsupported(_ reason: String) -> String {
-        reason.count > 48 ? String(reason.prefix(48)) + "…" : reason
+    private func updateHint(for controller: EcholetKeyboardSessionController) {
+        var hint: String? = nil
+        switch controller.phase {
+        case .ready, .opening:
+            if controller.autoLaunchUnsupportedReason != nil {
+                hint = "Open the Echolet app by hand, then switch back here."
+            }
+        case .blocked(let reason):
+            let lower = reason.lowercased()
+            if lower.contains("echolet") || lower.contains("open") {
+                hint = "Open the Echolet app by hand, then switch back here."
+            }
+        case .starting, .listening, .finalizing:
+            break
+        }
+        showHint(hint)
+    }
+
+    private func showHint(_ text: String?) {
+        hintLabel.text = text
+        hintLabel.isHidden = (text == nil)
+    }
+
+    // MARK: - Backspace key projection
+
+    private func updateBackspace(enabled: Bool, animated: Bool) {
+        backspaceButton.isEnabled = enabled
+        backspaceButton.alpha = enabled ? 1.0 : 0.4
+    }
+
+    private func applyBackspace(enabled: Bool, animated: Bool) {
+        let config = UIImage.SymbolConfiguration(pointSize: 22, weight: .semibold)
+        backspaceButton.setImage(UIImage(systemName: "delete.left.fill", withConfiguration: config), for: .normal)
+        backspaceButton.setImage(UIImage(systemName: "delete.left", withConfiguration: config), for: .disabled)
+        updateBackspace(enabled: enabled, animated: animated)
     }
 
     // MARK: - Actions
@@ -756,6 +841,20 @@ class KeyboardViewController: UIInputViewController {
             print("[Echolet-KBD-UI] PRIMARY_TAP(no_controller)")
         }
         controller?.handlePrimaryButtonTap()
+        renderDisplay()
+    }
+
+    /// One tap deletes exactly ONE preceding grapheme via the OS authority
+    /// (`textDocumentProxy.deleteBackward`). No transcript buffer mutation,
+    /// no repeat, no ASR race: the button is enabled only when the session
+    /// controller reports the positively idle-ready state.
+    private func didTapBackspace() {
+        guard let controller = controller, controller.isBackspacePermitted else {
+            print("[Echolet-KBD-UI] BACKSPACE_IGNORED(gate_closed)")
+            return
+        }
+        print("[Echolet-KBD-UI] BACKSPACE_TAP")
+        textDocumentProxy.deleteBackward()
         renderDisplay()
     }
 

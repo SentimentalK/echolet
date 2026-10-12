@@ -166,6 +166,8 @@ enum EcholetKeyboardSessionTests {
         testRecreatedKeyboardAdoptsPendingStartIntent()
         testStaleHostReturnContextRejectedForDifferentNonce()
         testIntentHandoffExpiresIfColdLaunchTimesOut()
+        testBackspaceGating()
+        testBackspaceGatingBlockedAndRecovery()
 
         if failures.isEmpty {
             print("EcholetKeyboardSessionTests: ALL PASS")
@@ -948,6 +950,82 @@ enum EcholetKeyboardSessionTests {
         expectEqual(c.phase, EcholetKeyboardSessionController.Phase.ready, "testIntentHandoffExpiresIfColdLaunchTimesOut(1)")
         expectEqual(h.lastRequest(), nil, "testIntentHandoffExpiresIfColdLaunchTimesOut(2)")
         expectEqual(EcholetLaunch.readPendingStartIntent(defaults: h.defaults), nil, "testIntentHandoffExpiresIfColdLaunchTimesOut(3)")
+    }
+
+    // MARK: - Backspace gating (IKB-1 read-only projection)
+
+    static func testBackspaceGating() {
+        let h = FakeHarness()
+        let c = h.controller()
+        // Idle, fresh appearance: positively ready, no session -> deletion OK.
+        c.handleAppeared()
+        expectEqual(c.isBackspacePermitted, true, "testBackspaceGating(1)")
+
+        h.writeWarmLive(epoch: h.appEpoch, active: true, tsMs: h.now)
+        c.handlePrimaryButtonTap() // warm adopt -> START
+        expectEqual(c.phase, EcholetKeyboardSessionController.Phase.starting, "testBackspaceGating(2)")
+        expectEqual(c.isBackspacePermitted, false, "testBackspaceGating(3) starting closes gate")
+
+        guard let req = h.lastRequest() else {
+            recordFailure("testBackspaceGating", "no start request")
+            return
+        }
+        h.writeResponse(sessionId: req.sessionId, ackReq: req.requestId, ackSeq: req.sequence, rev: 1, state: .listening)
+        c.handleTimerTick()
+        expectEqual(c.phase, EcholetKeyboardSessionController.Phase.listening, "testBackspaceGating(4)")
+        expectEqual(c.isBackspacePermitted, false, "testBackspaceGating(5) listening closes gate")
+
+        c.handleStopTap()
+        guard let stopReq = h.lastRequest() else {
+            recordFailure("testBackspaceGating(6)", "no stop request")
+            return
+        }
+        expectEqual(c.isBackspacePermitted, false, "testBackspaceGating(7) finalizing closes gate")
+
+        h.writeResponse(sessionId: stopReq.sessionId, ackReq: stopReq.requestId, ackSeq: stopReq.sequence, rev: 2, state: .completed, text: "done", isFinal: true)
+        c.handleTimerTick()
+        expectEqual(c.phase, EcholetKeyboardSessionController.Phase.ready, "testBackspaceGating(8)")
+        expectEqual(c.isBackspacePermitted, true, "testBackspaceGating(9) reopens after session settles")
+    }
+
+    static func testBackspaceGatingBlockedAndRecovery() {
+        let h = FakeHarness()
+        h.nextOpenResult = .unsupported(reason: "no_public_open_api")
+        let c = h.controller()
+        c.handleAppeared()
+
+        // Opening phase (launch in flight) must close the gate...
+        h.nextOpenResult = .initiated
+        c.handlePrimaryButtonTap()
+        expectEqual(c.phase, EcholetKeyboardSessionController.Phase.opening, "testBackspaceGatingBlockedAndRecovery(1)")
+        expectEqual(c.isBackspacePermitted, false, "testBackspaceGatingBlockedAndRecovery(2) opening closes gate")
+
+        // ...until the launch demand + start intent honestly expire and the
+        // controller is ready again (a fresh intent would be adopted instead).
+        h.now += EcholetLaunch.defaultPendingStartIntentTtlMs + EcholetLaunch.defaultDemandTtlMs + 1_000
+        c.handleAppeared()
+        expectEqual(c.phase, EcholetKeyboardSessionController.Phase.ready, "testBackspaceGatingBlockedAndRecovery(3)")
+        expectEqual(c.isBackspacePermitted, true, "testBackspaceGatingBlockedAndRecovery(4)")
+
+        // Blocked phases (e.g. a cancelled session after editor focus change)
+        // keep the gate closed until the controller honestly returns to ready.
+        h.appEpoch = "epoch-live-1"
+        h.writeWarmLive(epoch: h.appEpoch, active: true, tsMs: h.now)
+        c.handlePrimaryButtonTap()
+        expectEqual(c.phase, EcholetKeyboardSessionController.Phase.starting, "testBackspaceGatingBlockedAndRecovery(5)")
+        guard let blockedStartReq = h.lastRequest() else {
+            recordFailure("testBackspaceGatingBlockedAndRecovery", "no start request")
+            return
+        }
+        h.writeResponse(sessionId: blockedStartReq.sessionId, ackReq: blockedStartReq.requestId, ackSeq: blockedStartReq.sequence, rev: 1, state: .listening)
+        c.handleTimerTick()
+        expectEqual(c.phase, EcholetKeyboardSessionController.Phase.listening, "testBackspaceGatingBlockedAndRecovery(6)")
+        _ = h.makeFingerprint()
+        c.noteTextWillChange()
+        if case .blocked = c.phase {} else {
+            recordFailure("testBackspaceGatingBlockedAndRecovery(7)", "expected blocked phase, got \(c.phase)")
+        }
+        expectEqual(c.isBackspacePermitted, false, "testBackspaceGatingBlockedAndRecovery(8) blocked closes gate")
     }
 }
 

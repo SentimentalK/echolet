@@ -188,6 +188,16 @@ public final class EcholetKeyboardSessionController {
         }
     }
 
+    /// Read-only projection for manual Backspace policy (IKB-1): deletion is
+    /// permitted ONLY in the positively idle-ready state — no active dictation
+    /// session, no in-flight opening/starting/finalizing work, no blocked or
+    /// uncertain phase. UIKit never reproduces these phase/session rules;
+    /// it reads this one gate. A live ASR partial tail owned by the
+    /// controller must never race a manual delete.
+    public var isBackspacePermitted: Bool {
+        return phase == .ready && activeSession == nil
+    }
+
     // MARK: - Logging
 
     private func log(_ event: String) {
