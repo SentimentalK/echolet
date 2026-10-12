@@ -160,6 +160,8 @@ enum EcholetKeyboardSessionTests {
         testNoSpeechFinalRemovesPartial()
         testPreparedDemandURLMatchesDemandRecord()
         testGuardedPartialDeletionOnCursorMismatch()
+        testColdProcessRecoveryNewEpoch()
+        testPreparedDemandURLRotatesNearExpiry()
 
         if failures.isEmpty {
             print("EcholetKeyboardSessionTests: ALL PASS")
@@ -736,6 +738,73 @@ enum EcholetKeyboardSessionTests {
         // deleteBackward should be GUARDED and NOT called!
         expectEqual(h.deleteBackwardCounts, [] as [Int], "testGuardedPartialDeletionOnCursorMismatch(2)")
         expectTrue(h.logs.contains("STREAM_DELETE_GUARDED(tail_mismatch_or_cursor_moved)"), "testGuardedPartialDeletionOnCursorMismatch(3)")
+    }
+
+    static func testColdProcessRecoveryNewEpoch() {
+        let h = FakeHarness()
+        h.appEpoch = "epoch-1-old"
+        // Simulate app was recording before death
+        h.writeWarmLive(epoch: "epoch-1-old", active: true, tsMs: h.now)
+
+        // Process killed! New process epoch published:
+        h.appEpoch = "epoch-2-new"
+        // Old warm-live record still in defaults with epoch-1-old:
+        let c = h.controller()
+        // Controller must recognize old warm record is stale due to epoch mismatch
+        expectTrue(!c.freshWarmLiveExists(), "testColdProcessRecoveryNewEpoch(1)")
+
+        // Appearance should trigger fresh open attempt
+        c.handleAppeared()
+        expectEqual(h.openCallsRaw.count, 1, "testColdProcessRecoveryNewEpoch(2)")
+        expectEqual(c.phase, EcholetKeyboardSessionController.Phase.opening, "testColdProcessRecoveryNewEpoch(3)")
+
+        // Newly launched app publishes warm-ready phase for the demand nonce under epoch-2-new
+        guard let url = h.openCallsRaw.last?.url,
+              let parsed = EcholetLaunch.parseDictationPrepareURL(url) else {
+            recordFailure("testColdProcessRecoveryNewEpoch(4)", "missing parsed URL")
+            return
+        }
+        _ = EcholetLaunch.writePhase(
+            nonce: parsed.nonce,
+            appEpoch: "epoch-2-new",
+            phase: .warmReady,
+            nowMs: h.now + 500,
+            defaults: h.defaults
+        )
+        // Also updates fresh warm live
+        _ = EcholetLaunch.writeWarmLive(
+            appEpoch: "epoch-2-new",
+            recorderActive: true,
+            nowMs: h.now + 500,
+            defaults: h.defaults
+        )
+
+        // Advance clock so controller sees record is not from future
+        h.now += 500
+
+        // Tick resolves warmReady evidence and issues v2 START with new app epoch
+        c.handleTimerTick()
+        expectEqual(c.phase, EcholetKeyboardSessionController.Phase.starting, "testColdProcessRecoveryNewEpoch(5)")
+        let req = h.lastRequest()!
+        expectEqual(req.appEpoch, "epoch-2-new", "testColdProcessRecoveryNewEpoch(6)")
+    }
+
+    static func testPreparedDemandURLRotatesNearExpiry() {
+        let h = FakeHarness()
+        let c = h.controller()
+        let url1 = c.ensurePreparedDemandURL()!
+        let demand1 = EcholetLaunch.readDemand(defaults: h.defaults)!
+
+        // Advance time to near expiry (within 10s of TTL)
+        h.now += (EcholetLaunch.defaultDemandTtlMs - 5_000)
+        let url2 = c.ensurePreparedDemandURL()!
+        let demand2 = EcholetLaunch.readDemand(defaults: h.defaults)!
+
+        // Demand and URL must have rotated with fresh nonce!
+        expectTrue(url1 != url2, "testPreparedDemandURLRotatesNearExpiry(1)")
+        expectTrue(demand1.nonce != demand2.nonce, "testPreparedDemandURLRotatesNearExpiry(2)")
+        let parsed = EcholetLaunch.parseDictationPrepareURL(url2)!
+        expectEqual(parsed.nonce, demand2.nonce, "testPreparedDemandURLRotatesNearExpiry(3)")
     }
 }
 

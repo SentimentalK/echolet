@@ -195,7 +195,8 @@ public final class EcholetKeyboardSessionController {
     public func ensurePreparedDemandURL() -> URL? {
         if let existing = preparedDemandURL, let ctx = launchContext, existing == ctx.url {
             let now = env.nowMs()
-            if now >= ctx.startedAtMs && now - ctx.startedAtMs < EcholetLaunch.defaultDemandTtlMs {
+            // Retain existing URL only if it has plenty of lifetime remaining (at least 10 seconds)
+            if now >= ctx.startedAtMs && now - ctx.startedAtMs < (EcholetLaunch.defaultDemandTtlMs - 10_000) {
                 return existing
             }
         }

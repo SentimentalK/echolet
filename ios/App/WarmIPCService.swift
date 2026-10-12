@@ -318,68 +318,118 @@ public final class WarmIPCService {
     /// arming AND the model-dependent warm prepare both execute on the
     /// shared `ipcQueue`, and the warm-ready phase is published exclusively
     /// from the confirmed native hardware start completion path.
-    public func handleDictationActivationURL(_ url: URL, source: String) {
-        guard let parsed = EcholetLaunch.parseDictationPrepareURL(url) else {
-            print("[Echolet-APP] LAUNCH_IGNORED(unrelated_url source=\(source))")
-            return
+    /// Nonce-matched activation or ordered warm standby bootstrap.
+    ///
+    /// Cold connect, openURLContexts, and foreground transitions can arrive
+    /// in arbitrary order. This method guarantees:
+    /// 1. Exactly one execution wins on `ipcQueue`.
+    /// 2. If a matching demand is found (or was passed via URI), it is
+    ///    claimed once and processed with guaranteed arm-before-prepare ordering.
+    /// 3. If no demand exists, an ordered warm bootstrap (arm -> model -> standby)
+    ///    is executed only if explicitly allowed, ensuring mic readiness without racing.
+    public func coordinatedForegroundBootstrap(url: URL? = nil, source: String, allowStandbyIfNoDemand: Bool = true) {
+        let incomingNonce: String?
+        if let url = url {
+            guard let parsed = EcholetLaunch.parseDictationPrepareURL(url) else {
+                print("[Echolet-APP] LAUNCH_IGNORED(unrelated_url source=\(source))")
+                return
+            }
+            incomingNonce = parsed.nonce
+            print("[Echolet-APP] APP_URI_RECEIVED(source=\(source),nonce=\(String(parsed.nonce.prefix(8)))…)")
+        } else {
+            incomingNonce = nil
+            print("[Echolet-APP] APP_COORDINATION_CHECK(source=\(source))")
         }
-        let nonce = parsed.nonce
-        print("[Echolet-APP] APP_URI_RECEIVED(source=\(source),nonce=\(String(nonce.prefix(8)))…)")
+
         ipcQueue.async { [weak self] in
             guard let self = self, let defaults = self.sharedDefaults else { return }
             let now = WarmIPCService.currentTimeMs()
 
-            // Idempotent duplicate URI delivery for the SAME nonce is a no-op
-            // beyond observation (cold scene connect + openURLContexts can
-            // both deliver the same context).
-            if let pending = self.pendingActivation, pending.nonce == nonce {
-                EcholetLaunch.writePhase(
-                    nonce: nonce,
-                    appEpoch: AppDelegate.sharedEpoch,
-                    phase: .uriReceived,
-                    nowMs: now,
-                    defaults: defaults
-                )
-                print("[Echolet-APP] APP_URI_RECEIVED(duplicate_ignored)")
-                return
+            // If an activation is already in flight:
+            if let pending = self.pendingActivation {
+                if let nonce = incomingNonce, pending.nonce == nonce {
+                    // Idempotent duplicate delivery for the winning nonce
+                    EcholetLaunch.writePhase(
+                        nonce: nonce,
+                        appEpoch: AppDelegate.sharedEpoch,
+                        phase: .uriReceived,
+                        nowMs: now,
+                        defaults: defaults
+                    )
+                    print("[Echolet-APP] BOOT_PREPARE_DEDUPED(already_pending_matching_nonce=\(String(nonce.prefix(8)))…)")
+                    return
+                } else if incomingNonce == nil {
+                    // Foreground tick while activation is already in flight is deduped
+                    print("[Echolet-APP] BOOT_PREPARE_DEDUPED(activation_already_in_flight)")
+                    return
+                }
             }
 
-            // The deep link is only honored for a FRESH, nonce-matching
-            // demand that the keyboard wrote immediately before attempting
-            // the open (fan-out fabrication / stale replay fails closed).
-            guard let demand = EcholetLaunch.readDemand(defaults: defaults),
-                  demand.nonce == nonce,
-                  EcholetLaunch.isDemandFresh(demand, nowMs: now) else {
-                EcholetLaunch.writePhase(
-                    nonce: nonce,
-                    appEpoch: AppDelegate.sharedEpoch,
-                    phase: .failed,
-                    nowMs: now,
-                    errorCode: "demand_missing_or_expired",
-                    defaults: defaults
-                )
-                print("[Echolet-APP] BLOCKED(demand_missing_or_expired)")
-                return
+            // Check if there is an active demand matching incoming nonce or fresh in App Group
+            let demand = EcholetLaunch.readDemand(defaults: defaults)
+            if let incomingNonce = incomingNonce {
+                guard let demand = demand,
+                      demand.nonce == incomingNonce,
+                      EcholetLaunch.isDemandFresh(demand, nowMs: now) else {
+                    EcholetLaunch.writePhase(
+                        nonce: incomingNonce,
+                        appEpoch: AppDelegate.sharedEpoch,
+                        phase: .failed,
+                        nowMs: now,
+                        errorCode: "demand_missing_or_expired",
+                        defaults: defaults
+                    )
+                    print("[Echolet-APP] BLOCKED(demand_missing_or_expired)")
+                    return
+                }
+                print("[Echolet-APP] DEMAND_CLAIMED_ONCE(source=\(source),nonce=\(String(incomingNonce.prefix(8)))…)")
+                self.beginActivationForDemand(nonce: incomingNonce, defaults: defaults, nowMs: now)
+            } else if let demand = demand, EcholetLaunch.isDemandFresh(demand, nowMs: now) {
+                // Pending fresh keyboard demand found on foreground check
+                print("[Echolet-APP] DEMAND_CLAIMED_ONCE(source=\(source),nonce=\(String(demand.nonce.prefix(8)))…)")
+                self.beginActivationForDemand(nonce: demand.nonce, defaults: defaults, nowMs: now)
+            } else if allowStandbyIfNoDemand {
+                // No keyboard demand; perform ordered standby bootstrap if mic is armed or requested
+                print("[Echolet-APP] BOOT_PREPARE_WINNER(source=\(source),ordered_standby)")
+                self.performOrderedWarmStandbyBootstrap()
             }
-
-            self.beginActivationForDemand(nonce: nonce, defaults: defaults, nowMs: now)
         }
     }
 
-    /// MANUAL foreground entry (J5 follow-up): the user opened the Echolet
-    /// app themselves after the automatic open was refused. If a FRESH
-    /// unfulfilled keyboard launch demand exists, the app honors it exactly
-    /// like a deep link: same ordered prepare pipeline and hand-shake phase
-    /// publication. Without this, "open Echolet by hand" left the keyboard
-    /// without any acceptance evidence and the whole flow dead-ended.
+    /// SceneDelegate entry for `echolet://dictation/prepare?nonce=...&ts=...`.
+    public func handleDictationActivationURL(_ url: URL, source: String) {
+        coordinatedForegroundBootstrap(url: url, source: source, allowStandbyIfNoDemand: false)
+    }
+
+    /// MANUAL foreground entry: honors fresh keyboard demand or safe warm prepare.
     public func activatePendingDemandIfFresh(source: String = "foreground") {
-        ipcQueue.async { [weak self] in
-            guard let self = self, let defaults = self.sharedDefaults else { return }
-            guard let demand = EcholetLaunch.readDemand(defaults: defaults) else { return }
-            let now = WarmIPCService.currentTimeMs()
-            guard EcholetLaunch.isDemandFresh(demand, nowMs: now) else { return }
-            print("[Echolet-APP] APP_FOREGROUND_DEMAND(source=\(source),nonce=\(String(demand.nonce.prefix(8)))…)")
-            self.beginActivationForDemand(nonce: demand.nonce, defaults: defaults, nowMs: now)
+        coordinatedForegroundBootstrap(url: nil, source: source, allowStandbyIfNoDemand: false)
+    }
+
+    /// Ordered warm bootstrap for app-initiated preparation: arm first, load model, start mic.
+    public func performOrderedWarmStandbyBootstrap() {
+        if self.flowCoordinator.isWarmStandbyHardwareActive {
+            print("[Echolet-APP] BOOT_PREPARE_DEDUPED(mic_already_hardware_active)")
+            return
+        }
+        let armEffects = self.flowCoordinator.setUserArmMicrophone(true)
+        self.executeFlowEffects(armEffects, triggeringRequestId: nil, triggeringSessionId: nil, triggeringSequence: nil)
+        print("[Echolet-APP] MIC_ARMED_ORDERED(before_prepare_standby)")
+
+        EcholetAsrService.shared.loadModelIfNeeded { [weak self] ok, errorCode in
+            guard let self = self else { return }
+            self.ipcQueue.async {
+                guard ok else {
+                    print("[Echolet-APP] BLOCKED(model_load_\(errorCode ?? "unknown"))")
+                    if self.flowCoordinator.captureOwner != .warmStandby {
+                        self.notifyBlocked("ASR model unavailable: \(errorCode ?? "unknown")")
+                    }
+                    return
+                }
+                print("[Echolet-APP] MODEL_LOAD(ok)")
+                let effects = self.flowCoordinator.prepareWarmStandbyCapture()
+                self.executeFlowEffects(effects, triggeringRequestId: nil, triggeringSessionId: nil, triggeringSequence: nil)
+            }
         }
     }
 

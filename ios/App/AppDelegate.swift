@@ -17,6 +17,7 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
             defaults.set(Self.sharedEpoch, forKey: EcholetIPC.appEpochKey)
             defaults.synchronize()
         }
+        print("[Echolet-APP] APP_NEW_PROCESS_EPOCH(\(Self.sharedEpoch))")
 
         // Initialize and start process-owned WarmIPCService early so command intake is live
         WarmIPCService.shared.initializeGate()
