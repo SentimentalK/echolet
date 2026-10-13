@@ -36,9 +36,8 @@ public final class EcholetKeyboardSessionController {
     public static let intentSequenceStorageKey = "echolet.keyboard.intent_sequence_counter"
 
     /// Waiting for the START to surface a real mic `.listening` ACK.
-    /// If not acknowledged within 1200ms, the main app process is deemed dead or suspended,
-    /// so the controller immediately triggers containing-app launch without prolonged stalling.
-    public static let startAckTimeoutMs: UInt64 = 1_200
+    /// Bounded to 4000ms to allow cross-process scheduling latency while transitioning apps.
+    public static let startAckTimeoutMs: UInt64 = 4_000
     /// Waiting for launch evidence (phase record, warm-live truth, or open
     /// callback) before declaring the automatic launch honestly failed.
     public static let openEvidenceTimeoutMs: UInt64 = 6_000

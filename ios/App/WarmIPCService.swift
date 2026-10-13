@@ -40,7 +40,7 @@ public final class WarmIPCService {
 
     public private(set) var flowCoordinator: WarmCaptureFlowCoordinator
     private var sharedDefaults: UserDefaults?
-    private var pollTimer: Timer?
+    private var pollTimer: DispatchSourceTimer?
     private var darwinObserverInstalled = false
     /// J5 activation context; mutated ONLY on `ipcQueue`.
     private var pendingActivation: PendingActivation?
@@ -975,26 +975,35 @@ public final class WarmIPCService {
     }
 
     // MARK: - Polling Lifecycle (App-owned)
-    public func startPolling(interval: TimeInterval = 0.3) {
-        DispatchQueue.main.async { [weak self] in
+    public func startPolling(interval: TimeInterval = 0.25) {
+        ipcQueue.async { [weak self] in
             guard let self = self else { return }
-            self.stopPolling()
-            self.pollTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
-                self?.ipcQueue.async {
-                    self?.pollIncomingRequestsInternal()
-                }
+            self.stopPollingInternal()
+            let timer = DispatchSource.makeTimerSource(queue: self.ipcQueue)
+            let intervalMs = Int(interval * 1000)
+            timer.schedule(
+                deadline: .now(),
+                repeating: .milliseconds(intervalMs),
+                leeway: .milliseconds(25)
+            )
+            timer.setEventHandler { [weak self] in
+                self?.pollIncomingRequestsInternal()
             }
-            // Trigger immediate read upon start
-            self.ipcQueue.async {
-                self.pollIncomingRequestsInternal()
-            }
+            self.pollTimer = timer
+            timer.resume()
         }
     }
 
     public func stopPolling() {
-        DispatchQueue.main.async { [weak self] in
-            self?.pollTimer?.invalidate()
-            self?.pollTimer = nil
+        ipcQueue.async { [weak self] in
+            self?.stopPollingInternal()
+        }
+    }
+
+    private func stopPollingInternal() {
+        if let timer = pollTimer {
+            timer.cancel()
+            pollTimer = nil
         }
     }
 

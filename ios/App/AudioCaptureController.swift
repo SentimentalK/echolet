@@ -632,6 +632,9 @@ public final class AudioCaptureController: NSObject {
         let accepted = lifecycleGate.acceptMetricSnapshot(snapshot)
         guard accepted else { return }
 
+        // Heartbeat IPC intake while active audio metering is scheduled
+        WarmIPCService.shared.pollIncomingRequests()
+
         let latestMetrics = lifecycleGate.currentMetrics
         let currentGen = lifecycleGate.activeGeneration
 

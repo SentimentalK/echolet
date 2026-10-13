@@ -40,6 +40,7 @@ class KeyboardViewController: UIInputViewController {
     private let backspaceButton = UIButton(type: .system)
     private let hintLabel = UILabel()
     private let nextKeyboardButton = UIButton(type: .system)
+    private let settingsButton = UIButton(type: .system)
     private let primaryRow = UIStackView()
 
     /// Press feedback: uses the device Taptic engine when the device has
@@ -697,6 +698,20 @@ class KeyboardViewController: UIInputViewController {
         styleAsSystemKeycap(nextKeyboardButton)
         primaryRow.addArrangedSubview(nextKeyboardButton)
 
+        // Settings / Open Echolet App button to jump back to the main app directly
+        settingsButton.setImage(
+            UIImage(systemName: "gearshape.fill", withConfiguration: UIImage.SymbolConfiguration(pointSize: 17, weight: .medium)),
+            for: .normal
+        )
+        settingsButton.accessibilityLabel = "Open Echolet Settings"
+        settingsButton.accessibilityTraits = .button
+        settingsButton.isAccessibilityElement = true
+        settingsButton.translatesAutoresizingMaskIntoConstraints = false
+        settingsButton.setContentHuggingPriority(.required, for: .horizontal)
+        settingsButton.addTarget(self, action: #selector(didTapSettings), for: .touchUpInside)
+        styleAsSystemKeycap(settingsButton)
+        primaryRow.addArrangedSubview(settingsButton)
+
         primaryButton.titleLabel?.font = .boldSystemFont(ofSize: 17)
         primaryButton.setTitleColor(.white, for: .normal)
         // Rounded key with real horizontal padding between the label and
@@ -718,9 +733,11 @@ class KeyboardViewController: UIInputViewController {
         styleAsSystemKeycap(backspaceButton)
         primaryRow.addArrangedSubview(backspaceButton)
         NSLayoutConstraint.activate([
-            nextKeyboardButton.widthAnchor.constraint(equalToConstant: 46),
+            nextKeyboardButton.widthAnchor.constraint(equalToConstant: 44),
             nextKeyboardButton.heightAnchor.constraint(equalToConstant: 46),
-            backspaceButton.widthAnchor.constraint(equalToConstant: 46),
+            settingsButton.widthAnchor.constraint(equalToConstant: 44),
+            settingsButton.heightAnchor.constraint(equalToConstant: 46),
+            backspaceButton.widthAnchor.constraint(equalToConstant: 44),
             backspaceButton.heightAnchor.constraint(equalToConstant: 46),
             primaryButton.heightAnchor.constraint(equalToConstant: 46)
         ])
@@ -853,6 +870,13 @@ class KeyboardViewController: UIInputViewController {
     }
 
     // MARK: - Actions
+
+    @objc private func didTapSettings() {
+        touchHaptic.impactOccurred()
+        print("[Echolet-KBD-UI] SETTINGS_TAP -> Opening main Echolet app")
+        guard let url = URL(string: "echolet://app") else { return }
+        _ = performHostOpenAttempt(url: url)
+    }
 
     @objc private func didTapPrimary() {
         touchHaptic.impactOccurred()
