@@ -42,7 +42,8 @@ android {
                 storeFile = file(releaseStorePath)
                 storePassword = echoletReleaseProperty("echolet.release.storePassword")
                 keyAlias = echoletReleaseProperty("echolet.release.keyAlias")
-                keyPassword = echoletReleaseProperty("echolet.release.keyPassword")
+                val keyPass = findProperty("echolet.release.keyPassword") as? String
+                keyPassword = if (!keyPass.isNullOrBlank()) keyPass else storePassword
             }
         }
     }

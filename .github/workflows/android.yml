@@ -137,7 +137,27 @@ jobs:
             -storepass "$KEYSTORE_PASSWORD" -alias "$KEY_ALIAS" >/dev/null \
             || { echo 'Blocker: keystore/password/alias combination is INVALID; refusing to build a release APK.' >&2; exit 1; }
 
-          # Verify private key access with keytool -certreq (checks decryption of private key entry)
+          # Verify private key access using Java KeyStore.getKey (exact method invoked by AGP)
+          cat << 'EOF' > /tmp/TestKey.java
+          import java.io.File;
+          import java.security.KeyStore;
+
+          public class TestKey {
+              public static void main(String[] args) {
+                  try {
+                      KeyStore ks = KeyStore.getInstance(new File(args[0]), args[1].toCharArray());
+                      var key = ks.getKey(args[2], args[3].toCharArray());
+                      if (key != null) {
+                          System.exit(0);
+                      }
+                  } catch (Throwable t) {
+                      // failed to unlock private key with this password
+                  }
+                  System.exit(1);
+              }
+          }
+          EOF
+
           resolved_key_pass=""
           for candidate in \
             "$KEY_PASSWORD" \
@@ -145,12 +165,13 @@ jobs:
             "$KEYSTORE_PASSWORD" \
             "$(printf '%s' "$KEYSTORE_PASSWORD" | tr -d '\r\n')"; do
             [ -n "$candidate" ] || continue
-            if keytool -certreq -keystore android/app/.release/echolet-release.keystore \
-              -alias "$KEY_ALIAS" -storepass "$KEYSTORE_PASSWORD" -keypass "$candidate" >/dev/null 2>&1; then
+            if java /tmp/TestKey.java "android/app/.release/echolet-release.keystore" \
+              "$KEYSTORE_PASSWORD" "$KEY_ALIAS" "$candidate" >/dev/null 2>&1; then
               resolved_key_pass="$candidate"
               break
             fi
           done
+          rm -f /tmp/TestKey.java
 
           if [ -z "$resolved_key_pass" ]; then
             if [ "${{ inputs.upload_artifact }}" = "true" ]; then
