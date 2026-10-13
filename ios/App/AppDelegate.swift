@@ -19,6 +19,10 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         }
         print("[Echolet-APP] APP_NEW_PROCESS_EPOCH(\(Self.sharedEpoch))")
 
+        // Model catalog must exist before a cold keyboard launch asks to load
+        // and jump back. Home also calls bootstrap(); the store ignores the duplicate.
+        EcholetModelStore.shared.bootstrap()
+
         // Initialize and start process-owned WarmIPCService early so command intake is live
         WarmIPCService.shared.initializeGate()
         WarmIPCService.shared.startPolling()

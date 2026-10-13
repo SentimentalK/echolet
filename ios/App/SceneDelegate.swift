@@ -63,6 +63,8 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
 
     func sceneDidBecomeActive(_ scene: UIScene) {
         print("[Echolet-APP] SCENE_DID_BECOME_ACTIVE")
+        // Return-to-host must not fire during this incoming animation.
+        WarmIPCService.shared.noteSceneBecameActive()
     }
 
     func sceneWillResignActive(_ scene: UIScene) {

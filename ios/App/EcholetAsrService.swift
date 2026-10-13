@@ -232,60 +232,87 @@ final class EcholetAsrService {
                 completion(false, "asr service unavailable")
                 return
             }
-            if self.modelState == .loaded, self.recognizer != nil {
-                completion(true, nil)
-                return
-            }
-            if self.barrierEngaged {
-                completion(false, "model_switch_in_progress")
-                return
-            }
-            guard !self.loadInProgress else {
-                completion(false, "model_load_in_progress")
-                return
-            }
-
-            // Product truth: the ACTIVE directory published by the Rust
-            // model manager. No .app bundle resource is required.
-            guard let modelDir = self.activeModelDirectoryMirror
-                ?? Self.bundledModelDirectory() else {
-                print("[EcholetAsr] no active installed model (selection required)")
-                completion(false, "no_model_installed")
-                return
-            }
-
-            self.loadInProgress = true
-            self.switchTruthLock.lock()
-            self.switchTruth_unlockedStore(loadInProgress: true)
-            self.switchTruthLock.unlock()
-            self.modelState = .loading
-            self.recognizerLoadStartedMs = nowMs()
-            self.notifyModelState()
-
-            guard let rec = Self.ffi_recognizer_create((modelDir as NSString).utf8String) else {
-                self.loadInProgress = false
-                self.switchTruthLock.lock()
-                self.switchTruth_unlockedStore(loadInProgress: false)
-                self.switchTruthLock.unlock()
-                self.modelState = .failed
-                self.notifyModelState()
-                print("[EcholetAsr] recognizer_create FAILED (invalid model or sherpa init error)")
-                completion(false, "recognizer_create_failed")
-                return
-            }
-            self.recognizer = rec
-            self.loadedModelDirectory = modelDir
-            self.loadInProgress = false
-            self.switchTruthLock.lock()
-            self.switchTruth_unlockedStore(loadInProgress: false)
-            self.switchTruthLock.unlock()
-            self.modelState = .loaded
-            if let started = self.recognizerLoadStartedMs {
-                print("[EcholetAsr] offline model loaded load_ms=\(nowMs() - started) (on-device only)")
-            }
-            self.notifyModelState()
-            completion(true, nil)
+            self.beginLoadIfDirectoryKnown(completion: completion, allowBootstrapWait: true)
         }
+    }
+
+    /// asrQueue only. A cold keyboard launch can ask to load before the Rust
+    /// catalog has published the selected directory. Waiting once for that
+    /// publication is what lets mic-ready (and the jump back to the host app)
+    /// actually run. A second miss is an honest no-model failure.
+    private func beginLoadIfDirectoryKnown(
+        completion: @escaping (Bool, String?) -> Void,
+        allowBootstrapWait: Bool
+    ) {
+        if modelState == .loaded, recognizer != nil {
+            completion(true, nil)
+            return
+        }
+        if barrierEngaged {
+            completion(false, "model_switch_in_progress")
+            return
+        }
+        guard !loadInProgress else {
+            completion(false, "model_load_in_progress")
+            return
+        }
+
+        if let modelDir = activeModelDirectoryMirror ?? Self.bundledModelDirectory() {
+            loadInstalledModel(at: modelDir, completion: completion)
+            return
+        }
+        guard allowBootstrapWait else {
+            print("[EcholetAsr] no active installed model (selection required)")
+            completion(false, "no_model_installed")
+            return
+        }
+        EcholetModelStore.shared.activeDirectoryWhenReady { [weak self] directory in
+            self?.asrQueue.async {
+                guard let self = self else {
+                    completion(false, "asr service unavailable")
+                    return
+                }
+                if let directory = directory, !directory.isEmpty {
+                    self.activeModelDirectoryMirror = directory
+                }
+                self.beginLoadIfDirectoryKnown(completion: completion, allowBootstrapWait: false)
+            }
+        }
+    }
+
+    /// asrQueue only. Creates the recognizer from an already-resolved directory.
+    private func loadInstalledModel(at modelDir: String, completion: @escaping (Bool, String?) -> Void) {
+        loadInProgress = true
+        switchTruthLock.lock()
+        switchTruth_unlockedStore(loadInProgress: true)
+        switchTruthLock.unlock()
+        modelState = .loading
+        recognizerLoadStartedMs = nowMs()
+        notifyModelState()
+
+        guard let rec = Self.ffi_recognizer_create((modelDir as NSString).utf8String) else {
+            loadInProgress = false
+            switchTruthLock.lock()
+            switchTruth_unlockedStore(loadInProgress: false)
+            switchTruthLock.unlock()
+            modelState = .failed
+            notifyModelState()
+            print("[EcholetAsr] recognizer_create FAILED (invalid model or sherpa init error)")
+            completion(false, "recognizer_create_failed")
+            return
+        }
+        recognizer = rec
+        loadedModelDirectory = modelDir
+        loadInProgress = false
+        switchTruthLock.lock()
+        switchTruth_unlockedStore(loadInProgress: false)
+        switchTruthLock.unlock()
+        modelState = .loaded
+        if let started = recognizerLoadStartedMs {
+            print("[EcholetAsr] offline model loaded load_ms=\(nowMs() - started) (on-device only)")
+        }
+        notifyModelState()
+        completion(true, nil)
     }
 
     /// Create-then-swap serialized recognizer switch (asrQueue only).

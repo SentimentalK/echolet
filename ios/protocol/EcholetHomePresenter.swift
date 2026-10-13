@@ -109,9 +109,9 @@ public enum EcholetHomePresenter {
 
         // No model at all: honest No-Model home state — Prepare stays
         // disabled until the user actively downloads and selects a model.
-        // Never an auto-download: the single Download CTA is user-owned.
+        // Never an auto-download: each model's Download control is user-owned.
         if !inputs.modelInstalled {
-            let advisoryLine = "Download the verified offline model below to enable dictation."
+            let advisoryLine = "Download an offline model below to enable dictation."
                 + advisorySuffix(inputs.advisory)
             return Projection(
                 headline: "No Model",
@@ -189,143 +189,172 @@ public enum EcholetHomePresenter {
         case failed(message: String)
     }
 
-    /// Action available for a catalog row right now (honest gating).
+    /// Action available for a catalog row right now.
+    ///
+    /// Every registry model can be downloaded and selected, matching desktop.
+    /// Verification is a badge, not a lock. In-progress rows keep a visible
+    /// control (percent / Verifying / Installing / Loading) so the button
+    /// does not disappear while work is happening.
     public enum ModelRowAction: Equatable {
-        case download           // verified model, not installed → Download CTA
-        case retryDownload      // failed transfer → Download/Retry
-        case select             // installed, not active/loaded → Select
-        case selected           // active row, read-only confirmation
-        case none               // experimental rows: read-only only
+        case download
+        case retryDownload
+        case select
+        case selected
+        case busy(label: String)
     }
 
     public struct ModelRowProjection: Equatable {
         public let title: String
+        public let badge: String
         public let stateLine: String
         public let detail: String
         public let action: ModelRowAction
+
+        public var actionTitle: String {
+            switch action {
+            case .download: return "Download"
+            case .retryDownload: return "Retry"
+            case .select: return "Select"
+            case .selected: return "Selected"
+            case .busy(let label): return label
+            }
+        }
+
+        public var actionEnabled: Bool {
+            switch action {
+            case .download, .retryDownload, .select: return true
+            case .selected, .busy: return false
+            }
+        }
+
         public static func == (l: ModelRowProjection, r: ModelRowProjection) -> Bool {
-            l.title == r.title && l.stateLine == r.stateLine
+            l.title == r.title && l.badge == r.badge && l.stateLine == r.stateLine
                 && l.detail == r.detail && l.action == r.action
         }
     }
 
-    public static let experimentalNote =
-        "Experimental: shown for visibility; not yet verified on iOS."
+    /// Short badge next to the model name. Desktop shows "Verified"; iOS
+    /// also names Experimental so the row is identifiable without hiding it.
+    public static func badgeLabel(for verificationStatus: String) -> String {
+        let lower = verificationStatus.lowercased()
+        if lower.contains("verified") { return "Verified" }
+        if lower.contains("experimental") { return "Experimental" }
+        return verificationStatus
+    }
 
-    /// Projects ONE catalog row truthfully. Selection is disabled entirely
-    /// for rows whose runtime compatibility was not proven on iOS.
+    /// Projects ONE catalog row. `selectInProgress` covers the gap before
+    /// the persisted active id flips; `recognizerLoading` covers the active
+    /// row while the on-device recognizer is actually loading.
     public static func projectModelRow(
         _ entry: ModelEntry,
-        transfer: ModelTransferState
+        transfer: ModelTransferState,
+        selectInProgress: Bool = false,
+        recognizerLoading: Bool = false
     ) -> ModelRowProjection {
-        let sizeLine: String
-        if entry.installed {
-            if let s = entry.installedSizeBytes {
-                sizeLine = "Installed · \(byteLabel(s))"
-            } else {
-                sizeLine = "Installed"
-            }
-        } else if let s = entry.downloadSizeBytes {
-            sizeLine = "Not installed · \(byteLabel(s)) download"
-        } else {
-            sizeLine = "Not installed"
-        }
+        let badge = badgeLabel(for: entry.verificationStatus)
+        let detail = detailLine(entry, badge: badge)
 
-        let compatibility = entry.runtimeCompatible
-            ? "Echolet Verified · On-device offline dictation"
-            : Self.experimentalNote
+        if selectInProgress || (entry.active && recognizerLoading) {
+            return ModelRowProjection(
+                title: entry.displayName,
+                badge: badge,
+                stateLine: "Loading model…",
+                detail: detail,
+                action: .busy(label: "Loading…")
+            )
+        }
 
         switch transfer {
         case .downloading(let done, let total):
             var line = "Downloading… \(byteLabel(done))"
+            var button = "Downloading"
             if let total = total, total > 0 {
-                line += " / \(byteLabel(total)) (\(Int(done * 100 / total))%)"
+                let pct = Int(done * 100 / total)
+                line += " / \(byteLabel(total)) (\(pct)%)"
+                button = "\(pct)%"
             }
             return ModelRowProjection(
                 title: entry.displayName,
+                badge: badge,
                 stateLine: line,
-                detail: "Wi-Fi required · Verified SHA256 on completion",
-                action: .none
+                detail: "Wi-Fi required · checksum verified before install",
+                action: .busy(label: button)
             )
         case .verifying:
             return ModelRowProjection(
                 title: entry.displayName,
+                badge: badge,
                 stateLine: "Verifying checksum…",
-                detail: compatibility,
-                action: .none
+                detail: detail,
+                action: .busy(label: "Verifying")
             )
         case .installing:
             return ModelRowProjection(
                 title: entry.displayName,
+                badge: badge,
                 stateLine: "Installing…",
-                detail: compatibility,
-                action: .none
+                detail: detail,
+                action: .busy(label: "Installing")
             )
         case .failed(let message):
             return ModelRowProjection(
                 title: entry.displayName,
+                badge: badge,
                 stateLine: "Failed — \(message)",
-                detail: sizeLine,
+                detail: detail,
                 action: .retryDownload
             )
-        case .installed:
-            // Installed truth comes from the RUST read-back; a transfer-only
-            // state must never proclaim installed.
-            guard entry.installed else {
-                return idleProjection(entry, sizeLine: sizeLine, compatibility: compatibility)
-            }
-            if entry.runtimeCompatible {
-                return ModelRowProjection(
-                    title: entry.displayName,
-                    stateLine: "Installed — ready to select",
-                    detail: compatibility,
-                    action: .select
-                )
-            }
-            return ModelRowProjection(
-                title: entry.displayName,
-                stateLine: "Installed (experimental)",
-                detail: compatibility,
-                action: .none
-            )
-        case .idle:
-            return idleProjection(entry, sizeLine: sizeLine, compatibility: compatibility)
+        case .installed, .idle:
+            // Installed truth comes from the Rust read-back. A transfer-only
+            // `.installed` flag must not override Selected, and must not
+            // proclaim installed when Rust says the model is absent.
+            return idleProjection(entry, badge: badge, detail: detail)
         }
+    }
+
+    private static func detailLine(_ entry: ModelEntry, badge: String) -> String {
+        let size: String
+        if entry.installed, let bytes = entry.installedSizeBytes {
+            size = "\(byteLabel(bytes)) installed"
+        } else if let bytes = entry.downloadSizeBytes {
+            size = "\(byteLabel(bytes)) download"
+        } else if entry.installed {
+            size = "Installed on this device"
+        } else {
+            size = "On-device offline dictation"
+        }
+        if badge.isEmpty { return size }
+        return "\(badge) · \(size)"
     }
 
     private static func idleProjection(
         _ entry: ModelEntry,
-        sizeLine: String,
-        compatibility: String
+        badge: String,
+        detail: String
     ) -> ModelRowProjection {
-        if !entry.runtimeCompatible {
-            return ModelRowProjection(
-                title: entry.displayName,
-                stateLine: entry.installed ? "Installed (experimental)" : sizeLine,
-                detail: experimentalNote,
-                action: .none
-            )
-        }
         if entry.active {
             return ModelRowProjection(
                 title: entry.displayName,
+                badge: badge,
                 stateLine: "Selected",
-                detail: compatibility,
+                detail: detail,
                 action: .selected
             )
         }
         if entry.installed {
             return ModelRowProjection(
                 title: entry.displayName,
+                badge: badge,
                 stateLine: "Installed",
-                detail: compatibility,
+                detail: detail,
                 action: .select
             )
         }
         return ModelRowProjection(
             title: entry.displayName,
+            badge: badge,
             stateLine: "Not installed",
-            detail: compatibility,
+            detail: detail,
             action: .download
         )
     }

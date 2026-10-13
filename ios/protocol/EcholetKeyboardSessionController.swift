@@ -603,7 +603,7 @@ public final class EcholetKeyboardSessionController {
                     // Targeted honest projection: the containing app has no
                     // model installed yet; dictation cannot start.
                     failOpen(reason: "NO_MODEL_installed_open_Echolet_and_download")
-                    setPhase(.blocked(reason: "No model installed. Open Echolet and download the verified model first."))
+                    setPhase(.blocked(reason: "No model installed. Open Echolet and download a model first."))
                 } else {
                     failOpen(reason: "app_activation_failed_\(record.errorCode ?? "unknown")")
                 }

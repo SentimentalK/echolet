@@ -244,13 +244,26 @@ public final class WarmIPCService {
     //
     // After MIC_NATIVE_READY for a keyboard demand, bring forward the app the
     // user just left. The keyboard-resolved bundle id is preferred. One
-    // bundle-id open is attempted; a URL-scheme open (the call SwiftUI
-    // OpenURLAction makes) happens only if that API returns false. `true`
-    // only means Return Requested. If Echolet is still foreground shortly
-    // after, we stop and show the manual hint. This path never suspends.
+    // bundle-id open is attempted; a URL-scheme open happens only if that
+    // API returns false. `true` only means Return Requested — SpringBoard
+    // often drops that switch when Echolet has just become foreground, which
+    // is why the jump back sometimes happens and sometimes does not.
+    // If we are still foreground after the confirm window, one
+    // `suspendReturningToLastApp:` runs. That call does not need a bundle id
+    // and is the system "back to the previous app" path. It is not repeated.
     public static var debugOverrideHostBundleId: String? = nil
     private static let hostResolveRetryLimit = 4
     private static let returnConfirmWindowSeconds: Double = 0.8
+    /// Minimum time after becoming active before the first host switch.
+    /// Firing during the incoming animation is the intermittent failure.
+    private static let returnSettleAfterActiveSeconds: TimeInterval = 0.55
+    private var sceneBecameActiveAt: Date?
+    private var didAttemptSuspendReturn = false
+
+    /// SceneDelegate: each time Echolet actually becomes the foreground app.
+    public func noteSceneBecameActive() {
+        sceneBecameActiveAt = Date()
+    }
 
     private func attemptReturnToHostApp(nonce: String?, reason: String) {
         guard let defaults = sharedDefaults else {
@@ -272,12 +285,28 @@ public final class WarmIPCService {
             print("[Echolet-APP] RETURN_ATTEMPT(no_stored_host source=\(sourceApp ?? "nil") reason=\(reason) -> will read system breadcrumb)")
         }
 
-        // Give the audio session and mic engine 150ms to settle in foreground before background transition.
+        // The mic is already live. Wait out the foreground animation before
+        // asking SpringBoard to switch away, or the request is silently dropped.
+        // Settle math and the suspend flag stay on the main thread.
         let capturedStored = storedHost
         let capturedSource = sourceApp
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
-            self?.beginHostReturn(storedHost: capturedStored, sourceApp: capturedSource, resolveAttempt: 0)
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.didAttemptSuspendReturn = false
+            let delay = self.hostReturnSettleDelay()
+            print("[Echolet-APP] RETURN_SETTLE(delay=\(String(format: "%.2f", delay))s reason=\(reason))")
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                self?.beginHostReturn(storedHost: capturedStored, sourceApp: capturedSource, resolveAttempt: 0)
+            }
         }
+    }
+
+    /// How long to wait on the main thread before the first host switch.
+    private func hostReturnSettleDelay() -> TimeInterval {
+        let minimum = Self.returnSettleAfterActiveSeconds
+        guard let activeAt = sceneBecameActiveAt else { return minimum }
+        let elapsed = Date().timeIntervalSince(activeAt)
+        return max(0.2, minimum - elapsed)
     }
 
     /// Resolves one host, then performs at most one bundle open and, only if
@@ -346,8 +375,34 @@ public final class WarmIPCService {
     }
 
     private func stayInEcholet(reason: String) {
+        if shouldTrySuspendFallback(reason: reason) {
+            fallbackSuspendReturn()
+            return
+        }
         print("[Echolet-APP] RETURN_STAY(reason=\(reason))")
         publishReturnGuidance(EcholetLaunch.manualReturnHint)
+    }
+
+    /// Bundle-id and URL opens both miss often. One suspend-return is the
+    /// fallback that jumps back to whichever app was in front before Echolet.
+    private func shouldTrySuspendFallback(reason: String) -> Bool {
+        guard !didAttemptSuspendReturn else { return false }
+        switch reason {
+        case "no_returnable_host", "no_url_scheme", "bundle_open_rejected", "open_url_rejected", "return_unconfirmed":
+            return true
+        default:
+            return false
+        }
+    }
+
+    private func fallbackSuspendReturn() {
+        didAttemptSuspendReturn = true
+        let called = Self.performSuspendReturningToLastApp(arg: true)
+        if called {
+            beginConfirmationWatch(host: "previous_app", method: "suspend_returning")
+        } else {
+            stayInEcholet(reason: "suspend_unavailable")
+        }
     }
 
     /// Manual experiments. Each call is one open, then the same foreground check.
@@ -395,7 +450,11 @@ public final class WarmIPCService {
                     return
                 }
                 print("[Echolet-APP] RETURN_UNCONFIRMED(host=\(watch.host) method=\(watch.method) still_foreground)")
-                self.publishReturnGuidance(EcholetLaunch.manualReturnHint)
+                if watch.method == "suspend_returning" {
+                    self.stayInEcholet(reason: "suspend_unconfirmed")
+                } else {
+                    self.stayInEcholet(reason: "return_unconfirmed")
+                }
             }
         }
         if Thread.isMainThread {

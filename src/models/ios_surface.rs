@@ -11,9 +11,10 @@
 //! * Download specs exist ONLY for registry-validated models with an HTTPS
 //!   archive URL and a non-empty trusted `sha256` anchor (Rust stays the hash
 //!   authority; Swift never invents hashes).
-//! * Catalog compatibility on iOS: only `Echolet Verified` entries are
-//!   proclaimed runtime-compatible; Experimental entries stay visible but are
-//!   marked unverified so the UI disables selection.
+//! * Catalog compatibility on iOS: `runtime_compatible` is true only for
+//!   `Echolet Verified` entries (the tier with tested iOS load evidence).
+//!   The containing app still offers Download and Select for every registry
+//!   model, matching desktop; the flag is a badge, not an action lock.
 //! * Selection persistence is fail-closed: if the config save fails the
 //!   previous active model id is rolled back and the error is surfaced
 //!   (the desktop `ModelManager::set_active_model` ignores save failures, so

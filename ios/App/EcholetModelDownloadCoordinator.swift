@@ -65,6 +65,10 @@ public final class EcholetModelDownloadCoordinator: NSObject {
     public func download(modelId: String) {
         // Duplicate-tap coalesce FIRST (honest current-state check).
         guard !isCoalescingCopy(modelId: modelId) else { return }
+        // Visible immediately: the row must leave "Download" before the
+        // spec/network round trip, or the tap looks like it did nothing.
+        EcholetModelStore.shared.transferStates[modelId] =
+            .downloading(downloadedBytes: 0, totalBytes: nil)
 
         EcholetModelStore.shared.downloadSpec(for: modelId) { [weak self] result in
             DispatchQueue.main.async {
@@ -118,6 +122,15 @@ public final class EcholetModelDownloadCoordinator: NSObject {
             task.taskDescription = modelId
             transfer.task = task
             self.transfers[modelId] = transfer
+            let advertisedTotal = spec.downloadSizeBytes
+            DispatchQueue.main.async {
+                if case .downloading(let done, _) = EcholetModelStore.shared.transferStates[modelId] {
+                    EcholetModelStore.shared.transferStates[modelId] = .downloading(
+                        downloadedBytes: done,
+                        totalBytes: advertisedTotal
+                    )
+                }
+            }
             task.resume()
         }
     }

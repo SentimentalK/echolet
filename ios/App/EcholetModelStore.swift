@@ -133,11 +133,24 @@ public final class EcholetModelStore {
     /// Main-thread mirrors (mutated only on main).
     public private(set) var snapshot: Snapshot?
     public private(set) var ready = false
-    /// Live transfer states per model id (main thread only).
-    public var transferStates: [String: EcholetHomePresenter.ModelTransferState] = [:]
+    /// True after the first bootstrap publication (directory may still be nil
+    /// when nothing is installed). Loaders wait on this instead of racing.
+    private var bootstrapSettled = false
+    private var publishedActiveDirectory: String?
+    private var directoryWaiters: [(String?) -> Void] = []
+    /// Set when bootstrap cannot produce a catalog. Home shows this instead
+    /// of spinning on "Loading…" forever.
+    public private(set) var catalogUnavailableReason: String?
+    /// Live transfer states per model id (main thread only). Assignment
+    /// notifies `changeObserver` so Download / progress repaint immediately.
+    public var transferStates: [String: EcholetHomePresenter.ModelTransferState] = [:] {
+        didSet { notifyChange() }
+    }
 
     /// Main-thread observer for snapshot changes (Home panel).
     public var snapshotObserver: ((_ snapshot: Snapshot) -> Void)?
+    /// Main-thread observer for any catalog or transfer change.
+    public var changeObserver: (() -> Void)?
 
     /// Serial single-writer queue owning the Rust manager handle.
     private let storeQueue = DispatchQueue(label: "com.echolet.model.store", qos: .userInitiated)
@@ -187,6 +200,7 @@ public final class EcholetModelStore {
                 try fm.createDirectory(at: Self.downloadsDirectory(), withIntermediateDirectories: true)
             } catch {
                 print("[EcholetModelStore] FATAL: cannot create sandbox dirs: \(error)")
+                self.publishCatalogFailure("Could not prepare model storage on this device.")
                 return
             }
             // Model bytes must never be mirrored into iCloud backup.
@@ -203,6 +217,7 @@ public final class EcholetModelStore {
             }
             guard let handle = created else {
                 print("[EcholetModelStore] FATAL: Rust model manager bootstrap failed")
+                self.publishCatalogFailure("Could not read the model catalog.")
                 return
             }
             self.handle = handle
@@ -217,9 +232,42 @@ public final class EcholetModelStore {
             DispatchQueue.main.async { [weak self] in
                 guard let self = self else { return }
                 self.ready = true
-                // Publish ONE truthful active-dir to the ASR service.
-                EcholetAsrService.shared.publishActiveModelDirectory(activeDir)
+                self.noteDirectoryPublished(activeDir)
             }
+        }
+    }
+
+    /// Main-thread. One-shot: the first publication releases everyone waiting
+    /// to load a model. Later publishes only update the directory.
+    private func noteDirectoryPublished(_ directory: String?) {
+        publishedActiveDirectory = directory
+        EcholetAsrService.shared.publishActiveModelDirectory(directory)
+        guard !bootstrapSettled else { return }
+        bootstrapSettled = true
+        let waiters = directoryWaiters
+        directoryWaiters.removeAll()
+        waiters.forEach { $0(directory) }
+    }
+
+    /// Directory of the selected installed model once bootstrap has read it.
+    /// `nil` means bootstrap finished and nothing is selected. Completion is
+    /// on the main thread. Does not invent a directory.
+    public func activeDirectoryWhenReady(_ completion: @escaping (String?) -> Void) {
+        let deliver = { [weak self] in
+            guard let self = self else {
+                completion(nil)
+                return
+            }
+            if self.bootstrapSettled {
+                completion(self.publishedActiveDirectory)
+            } else {
+                self.directoryWaiters.append(completion)
+            }
+        }
+        if Thread.isMainThread {
+            deliver()
+        } else {
+            DispatchQueue.main.async(execute: deliver)
         }
     }
 
@@ -241,6 +289,7 @@ public final class EcholetModelStore {
         defer { Self.ffi_string_free(cString) }
         guard let decoded = decodeSnapshot(from: cString) else {
             print("[EcholetModelStore] snapshot decode failure")
+            publishCatalogFailure("Could not read the model catalog.")
             return
         }
         privateSnapshot = decoded.snapshot
@@ -254,9 +303,31 @@ public final class EcholetModelStore {
         let activeDirectory = privateActiveDirectory
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
+            self.catalogUnavailableReason = nil
             self.snapshot = snapshot
             self.snapshotObserver?(snapshot)
-            EcholetAsrService.shared.publishActiveModelDirectory(activeDirectory)
+            self.changeObserver?()
+            self.noteDirectoryPublished(activeDirectory)
+        }
+    }
+
+    /// Main-thread catalog failure. Leaves `snapshot` nil so Home does not
+    /// invent models, and stops the indefinite Loading row.
+    private func publishCatalogFailure(_ reason: String) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.catalogUnavailableReason = reason
+            self.noteDirectoryPublished(nil)
+            self.changeObserver?()
+        }
+    }
+
+    private func notifyChange() {
+        let notify = changeObserver
+        if Thread.isMainThread {
+            notify?()
+        } else {
+            DispatchQueue.main.async { notify?() }
         }
     }
 

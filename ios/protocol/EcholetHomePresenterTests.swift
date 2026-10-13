@@ -27,7 +27,9 @@ enum EcholetHomePresenterTests {
         testModelSwitchNoticeExists()
         testModelCatalogRows()
         testModelCatalogTransferStates()
-        testExperimentalRowsReadOnly()
+        testExperimentalRowsAreDownloadableAndSelectable()
+        testActiveRowStaysSelectedAfterInstallTransfer()
+        testSelectShowsLoading()
 
         if failures.isEmpty {
             print("EcholetHomePresenterTests: ALL PASS")
@@ -102,7 +104,7 @@ enum EcholetHomePresenterTests {
         // Any no-model state must point at a real download, not a promise.
         let noModel = EcholetHomePresenter.project(EcholetHomePresenter.Inputs(modelInstalled: false))
         expectTrue(
-            noModel.micDetail.lowercased().contains("verified"),
+            noModel.micDetail.lowercased().contains("offline model"),
             "testModelSwitchNoticeExists(1)"
         )
         expectTrue(
@@ -171,50 +173,86 @@ enum EcholetHomePresenterTests {
         )
         expectTrue(downloading.stateLine.lowercased().contains("downloading"), "testModelCatalogTransferStates(1)")
         expectTrue(downloading.stateLine.contains("%"), "testModelCatalogTransferStates(2)")
-        expectEqual(downloading.action, .none, "testModelCatalogTransferStates(3)")
+        expectEqual(downloading.action, .busy(label: "54%"), "testModelCatalogTransferStates(3)")
+        expectEqual(downloading.actionEnabled, false, "testModelCatalogTransferStates(3b)")
 
         let verifying = EcholetHomePresenter.projectModelRow(entry, transfer: .verifying)
         expectEqual(verifying.stateLine, "Verifying checksum…", "testModelCatalogTransferStates(4)")
+        expectEqual(verifying.action, .busy(label: "Verifying"), "testModelCatalogTransferStates(4b)")
 
         let installing = EcholetHomePresenter.projectModelRow(entry, transfer: .installing)
         expectEqual(installing.stateLine, "Installing…", "testModelCatalogTransferStates(5)")
+        expectEqual(installing.action, .busy(label: "Installing"), "testModelCatalogTransferStates(5b)")
 
-        // Installed ONLY after the real Rust read-back.
+        // Installed ONLY after the real Rust read-back, and the button stays Select.
         let installed = EcholetHomePresenter.projectModelRow(
             verifiedXasr(installed: true, active: false),
             transfer: .installed
         )
-        expectTrue(installed.stateLine.lowercased().contains("ready"), "testModelCatalogTransferStates(6)")
+        expectEqual(installed.stateLine, "Installed", "testModelCatalogTransferStates(6)")
         expectEqual(installed.action, .select, "testModelCatalogTransferStates(7)")
         // A not-yet-installed entry must NEVER claim installed.
         let premature = EcholetHomePresenter.projectModelRow(
             verifiedXasr(installed: false, active: false),
             transfer: .installed
         )
-        expectTrue(!premature.stateLine.lowercased().contains("ready to select"), "testModelCatalogTransferStates(8)")
+        expectEqual(premature.stateLine, "Not installed", "testModelCatalogTransferStates(8)")
+        expectEqual(premature.action, .download, "testModelCatalogTransferStates(8b)")
 
         let failed = EcholetHomePresenter.projectModelRow(entry, transfer: .failed(message: "HTTP 404"))
         expectTrue(failed.stateLine.lowercased().contains("4"), "testModelCatalogTransferStates(9)")
         expectEqual(failed.action, .retryDownload, "testModelCatalogTransferStates(10)")
     }
 
-    static func testExperimentalRowsReadOnly() {
-        // Experimental entries: visible, but NEVER selectable on iOS today.
+    static func testExperimentalRowsAreDownloadableAndSelectable() {
+        // Experimental entries stay visible AND actionable, matching desktop:
+        // Download when absent, Select when installed.
         let idle = EcholetHomePresenter.projectModelRow(experimentalKroko(installed: false), transfer: .idle)
-        expectEqual(idle.action, .none, "testExperimentalRowsReadOnly(1)")
-        expectTrue(idle.detail.lowercased().contains("experimental"), "testExperimentalRowsReadOnly(2)")
+        expectEqual(idle.action, .download, "testExperimentalRowsAreDownloadableAndSelectable(1)")
+        expectEqual(idle.actionTitle, "Download", "testExperimentalRowsAreDownloadableAndSelectable(1b)")
+        expectTrue(idle.detail.lowercased().contains("experimental"), "testExperimentalRowsAreDownloadableAndSelectable(2)")
+        expectEqual(idle.badge, "Experimental", "testExperimentalRowsAreDownloadableAndSelectable(2b)")
 
         let evenInstalled = EcholetHomePresenter.projectModelRow(
             experimentalKroko(installed: true),
             transfer: .installed
         )
-        // Installed experimental models must not expose a select action
-        // without tested iOS runtime evidence.
-        expectEqual(evenInstalled.action, .none, "testExperimentalRowsReadOnly(3)")
+        expectEqual(evenInstalled.action, .select, "testExperimentalRowsAreDownloadableAndSelectable(3)")
+        expectEqual(evenInstalled.stateLine, "Installed", "testExperimentalRowsAreDownloadableAndSelectable(3b)")
         expectTrue(
             evenInstalled.detail.lowercased().contains("experimental"),
-            "testExperimentalRowsReadOnly(4)"
+            "testExperimentalRowsAreDownloadableAndSelectable(4)"
         )
+    }
+
+    static func testActiveRowStaysSelectedAfterInstallTransfer() {
+        // A finished install must not keep offering Select once Rust says
+        // this row is the active model.
+        let selected = EcholetHomePresenter.projectModelRow(
+            verifiedXasr(installed: true, active: true),
+            transfer: .installed
+        )
+        expectEqual(selected.action, .selected, "testActiveRowStaysSelectedAfterInstallTransfer(1)")
+        expectEqual(selected.stateLine, "Selected", "testActiveRowStaysSelectedAfterInstallTransfer(2)")
+        expectEqual(selected.actionTitle, "Selected", "testActiveRowStaysSelectedAfterInstallTransfer(3)")
+    }
+
+    static func testSelectShowsLoading() {
+        let loading = EcholetHomePresenter.projectModelRow(
+            verifiedXasr(installed: true, active: false),
+            transfer: .installed,
+            selectInProgress: true
+        )
+        expectEqual(loading.stateLine, "Loading model…", "testSelectShowsLoading(1)")
+        expectEqual(loading.action, .busy(label: "Loading…"), "testSelectShowsLoading(2)")
+        expectEqual(loading.actionEnabled, false, "testSelectShowsLoading(3)")
+
+        let recognizer = EcholetHomePresenter.projectModelRow(
+            verifiedXasr(installed: true, active: true),
+            transfer: .idle,
+            recognizerLoading: true
+        )
+        expectEqual(recognizer.action, .busy(label: "Loading…"), "testSelectShowsLoading(4)")
     }
 }
 

@@ -6,9 +6,10 @@ import Foundation
 ///
 /// A clean scrollable control panel visually aligned with the Desktop
 /// Slint panel: narrow honest header, dark Start / red Disarm warm-mic
-/// card, the one truthfully installed offline model card, keyboard setup
-/// guidance, and an on-device privacy footer. No harness controls, epoch
-/// values, IPC internals, mock buttons or navigation experiments in the
+/// card, the full offline model catalog (download, select, and load,
+/// same actions as desktop), keyboard setup guidance, and an on-device
+/// privacy footer. No harness controls, epoch values, IPC internals,
+/// mock buttons or navigation experiments in the
 /// product surface — production logic lives in `WarmIPCService` /
 /// `EcholetAsrService` and this controller merely mirrors their published
 /// truth through the pure Foundation `EcholetHomePresenter`.
@@ -42,9 +43,12 @@ class EcholetHomeViewController: UIViewController, WarmIPCServiceDelegate, Echol
 
     private let modelSectionLabel = UILabel()
     private let modelCard = UIView()
+    private let catalogStatusLabel = UILabel()
     private let modelRowsStack = UIStackView()
-    /// Row identity for the grouped catalog (id -> projected state line).
+    /// Row identity for the grouped catalog (id -> row view).
     private var modelRowViews: [String: ModelRowView] = [:]
+    /// Model id whose Select tap is still loading the recognizer.
+    private var pendingSelectId: String?
 
     private let keyboardSectionLabel = UILabel()
     private let keyboardCard = UIView()
@@ -93,12 +97,17 @@ class EcholetHomeViewController: UIViewController, WarmIPCServiceDelegate, Echol
         EcholetModelStore.shared.snapshotObserver = { [weak self] _ in
             self?.refreshProjection()
         }
+        EcholetModelStore.shared.changeObserver = { [weak self] in
+            self?.refreshProjection()
+        }
     }
 
     // MARK: - UI construction
 
     private func setupUI() {
         scrollView.translatesAutoresizingMaskIntoConstraints = false
+        // A short tap on Download / Select must not be swallowed as a scroll.
+        scrollView.delaysContentTouches = false
         contentStack.translatesAutoresizingMaskIntoConstraints = false
         contentStack.axis = .vertical
         contentStack.spacing = 16
@@ -146,8 +155,8 @@ class EcholetHomeViewController: UIViewController, WarmIPCServiceDelegate, Echol
         buildWarmCard()
         contentStack.addArrangedSubview(warmCard)
 
-        // MODEL card
-        modelSectionLabel.text = "MODEL"
+        // MODELS card — every registry entry, same actions as desktop.
+        modelSectionLabel.text = "MODELS"
         styleSectionLabel(modelSectionLabel)
         contentStack.addArrangedSubview(modelSectionLabel)
 
@@ -245,8 +254,14 @@ class EcholetHomeViewController: UIViewController, WarmIPCServiceDelegate, Echol
             stack.bottomAnchor.constraint(equalTo: modelCard.bottomAnchor, constant: -14)
         ])
 
+        catalogStatusLabel.font = .systemFont(ofSize: 13)
+        catalogStatusLabel.textColor = .secondaryLabel
+        catalogStatusLabel.numberOfLines = 0
+        catalogStatusLabel.text = "Loading models…"
+        stack.addArrangedSubview(catalogStatusLabel)
+
         modelRowsStack.axis = .vertical
-        modelRowsStack.spacing = 14
+        modelRowsStack.spacing = 12
         stack.addArrangedSubview(modelRowsStack)
     }
 
@@ -330,43 +345,58 @@ class EcholetHomeViewController: UIViewController, WarmIPCServiceDelegate, Echol
         renderModelCatalogRows()
     }
 
-    /// Rebuilds the grouped catalog rows from the latest Rust snapshot +
-    /// observed transfer states (read-only rows stay buttonless).
+    /// Rebuilds the catalog rows from the latest Rust snapshot plus observed
+    /// transfer state. The loading notice is a label above the rows and is
+    /// hidden once the snapshot arrives — it must not stay in the list.
     private func renderModelCatalogRows() {
+        let recognizerLoading = modelState == EcholetAsrService.ModelState.loading.rawValue
         guard let snapshot = EcholetModelStore.shared.snapshot else {
-            modelRowsStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
-            let notice = ModelRowView(frame: .zero)
-            notice.apply(
-                projection: EcholetHomePresenter.ModelRowProjection(
-                    title: "Canonical model catalog",
-                    stateLine: "Loading…",
-                    detail: "Reads the versioned Rust registry.",
-                    action: .none
-                ),
-                modelId: "",
-                controller: self
-            )
-            modelRowsStack.addArrangedSubview(notice)
+            catalogStatusLabel.isHidden = false
+            catalogStatusLabel.text = EcholetModelStore.shared.catalogUnavailableReason
+                ?? "Loading models…"
+            clearModelRows()
             return
         }
+        catalogStatusLabel.isHidden = true
 
-        // Drop rows for entries no longer in the canonical catalog; retained
-        // local bytes/result rows for removed models stay on disk untouched.
-        modelRowViews = modelRowViews.filter { id, _ in
-            snapshot.entries.contains { $0.id == id }
+        let live = Set(snapshot.entries.map { $0.id })
+        for id in modelRowViews.keys.filter({ !live.contains($0) }) {
+            if let row = modelRowViews.removeValue(forKey: id) {
+                modelRowsStack.removeArrangedSubview(row)
+                row.removeFromSuperview()
+            }
         }
-        for entry in snapshot.entries {
+        for view in modelRowsStack.arrangedSubviews {
+            guard let row = view as? ModelRowView, modelRowViews[row.modelId] === row else {
+                modelRowsStack.removeArrangedSubview(view)
+                view.removeFromSuperview()
+                continue
+            }
+        }
+
+        for (index, entry) in snapshot.entries.enumerated() {
             let transfer = EcholetModelStore.shared.transferStates[entry.id] ?? .idle
             let projection = EcholetHomePresenter.projectModelRow(
                 presenterEntry(from: entry),
-                transfer: transfer
+                transfer: transfer,
+                selectInProgress: pendingSelectId == entry.id,
+                recognizerLoading: recognizerLoading
             )
             let row = modelRowViews[entry.id] ?? ModelRowView(frame: .zero)
             row.apply(projection: projection, modelId: entry.id, controller: self)
-            if modelRowViews[entry.id] == nil {
+            if row.superview == nil {
                 modelRowViews[entry.id] = row
-                modelRowsStack.addArrangedSubview(row)
+                let insertAt = min(index, modelRowsStack.arrangedSubviews.count)
+                modelRowsStack.insertArrangedSubview(row, at: insertAt)
             }
+        }
+    }
+
+    private func clearModelRows() {
+        modelRowViews.removeAll()
+        for view in modelRowsStack.arrangedSubviews {
+            modelRowsStack.removeArrangedSubview(view)
+            view.removeFromSuperview()
         }
     }
 
@@ -420,25 +450,30 @@ class EcholetHomeViewController: UIViewController, WarmIPCServiceDelegate, Echol
         // Projection re-syncs via delegate callback + bounded refresh.
     }
 
-    @objc func didTapDownload(_ sender: DownloadButton) {
-        // Honest pipeline: Download → Verify → Install → Select via the
-        // store + coordinator; duplicate taps coalesce upstream.
-        EcholetModelDownloadCoordinator.shared.download(modelId: sender.modelId)
-    }
-
-    @objc func didTapSelect(_ sender: SelectButton) {
-        sender.isEnabled = false
-        EcholetModelStore.shared.select(modelId: sender.modelId) { [weak self] outcome in
-            guard let self = self else { return }
-            switch outcome {
-            case .switched:
-                self.advisory = nil
-            case .denied(let guidance):
-                self.advisory = "Model switch blocked: \(guidance)"
-            case .failed(let message):
-                self.advisory = "Model switch failed: \(message)"
+    @objc func didTapModelAction(_ sender: ModelActionButton) {
+        switch sender.rowAction {
+        case .download, .retryDownload:
+            // Honest pipeline: Download → Verify → Install. The row switches
+            // to a visible progress control immediately inside download().
+            EcholetModelDownloadCoordinator.shared.download(modelId: sender.modelId)
+        case .select:
+            pendingSelectId = sender.modelId
+            refreshProjection()
+            EcholetModelStore.shared.select(modelId: sender.modelId) { [weak self] outcome in
+                guard let self = self else { return }
+                self.pendingSelectId = nil
+                switch outcome {
+                case .switched:
+                    self.advisory = nil
+                case .denied(let guidance):
+                    self.advisory = "Model switch blocked: \(guidance)"
+                case .failed(let message):
+                    self.advisory = "Model switch failed: \(message)"
+                }
+                self.refreshProjection()
             }
-            self.refreshProjection()
+        case .selected, .busy:
+            break
         }
     }
 
@@ -554,123 +589,151 @@ class EcholetHomeViewController: UIViewController, WarmIPCServiceDelegate, Echol
 
 // MARK: - Catalog row rendering
 
-final class DownloadButton: UIButton {
-    let modelId: String
-    init(modelId: String) {
-        self.modelId = modelId
-        super.init(frame: .zero)
-        setTitle("Download", for: .normal)
-        titleLabel?.font = .boldSystemFont(ofSize: 13)
-        setTitleColor(.systemBlue, for: .normal)
-        backgroundColor = .tertiarySystemFill
-        layer.cornerRadius = 8
-        translatesAutoresizingMaskIntoConstraints = false
-        heightAnchor.constraint(equalToConstant: 36).isActive = true
-    }
-    required init?(coder: NSCoder) { fatalError("unsupported") }
+/// Trailing action control for one catalog row. The model id and the
+/// projected action travel with the button so the tap handler does not
+/// guess from the title.
+final class ModelActionButton: UIButton {
+    var modelId: String = ""
+    var rowAction: EcholetHomePresenter.ModelRowAction = .download
 }
 
-final class SelectButton: UIButton {
-    let modelId: String
-    init(modelId: String) {
-        self.modelId = modelId
-        super.init(frame: .zero)
-        setTitle("Select", for: .normal)
-        titleLabel?.font = .boldSystemFont(ofSize: 13)
-        setTitleColor(.label, for: .normal)
-        backgroundColor = .tertiarySystemFill
-        layer.cornerRadius = 8
-        translatesAutoresizingMaskIntoConstraints = false
-        heightAnchor.constraint(equalToConstant: 36).isActive = true
-    }
-    required init?(coder: NSCoder) { fatalError("unsupported") }
-}
-
-// Reusable row view of the grouped model catalog card.
-final class ModelRowView: UIView {
+/// One catalog row: name + verification badge + status on the left, a
+/// fixed 44pt action control on the right (Download / Select / Selected /
+/// progress). The control stays in place while work is in progress so the
+/// row does not collapse into an untappable text block.
+final class ModelRowView: UIView, UIGestureRecognizerDelegate {
     private let titleLabel = UILabel()
+    private let badgeLabel = UILabel()
     private let stateLabel = UILabel()
     private let detailLabel = UILabel()
-    private var currentButton: UIButton?
+    private let actionButton = ModelActionButton(type: .system)
+    private var wired = false
+
+    var modelId: String { actionButton.modelId }
 
     override init(frame: CGRect) {
         super.init(frame: frame)
-        titleLabel.font = .boldSystemFont(ofSize: 14)
-        titleLabel.numberOfLines = 0
-        stateLabel.font = .systemFont(ofSize: 12, weight: .semibold)
-        stateLabel.numberOfLines = 0
-        detailLabel.font = .systemFont(ofSize: 11)
-        detailLabel.textColor = .secondaryLabel
-        detailLabel.numberOfLines = 0
 
-        let stack = UIStackView()
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        stack.axis = .vertical
-        stack.spacing = 4
-        stack.addArrangedSubview(titleLabel)
-        stack.addArrangedSubview(stateLabel)
-        stack.addArrangedSubview(detailLabel)
-        addSubview(stack)
+        titleLabel.font = .boldSystemFont(ofSize: 15)
+        titleLabel.numberOfLines = 2
+        titleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        badgeLabel.font = .systemFont(ofSize: 11, weight: .semibold)
+        badgeLabel.setContentHuggingPriority(.required, for: .horizontal)
+        badgeLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
+
+        stateLabel.font = .systemFont(ofSize: 13, weight: .semibold)
+        stateLabel.numberOfLines = 2
+
+        detailLabel.font = .systemFont(ofSize: 12)
+        detailLabel.textColor = .secondaryLabel
+        detailLabel.numberOfLines = 2
+
+        actionButton.translatesAutoresizingMaskIntoConstraints = false
+        actionButton.titleLabel?.font = .boldSystemFont(ofSize: 14)
+        actionButton.titleLabel?.adjustsFontSizeToFitWidth = true
+        actionButton.titleLabel?.minimumScaleFactor = 0.7
+        actionButton.layer.cornerRadius = 10
+        actionButton.clipsToBounds = true
+        actionButton.setContentHuggingPriority(.required, for: .horizontal)
+        actionButton.setContentCompressionResistancePriority(.required, for: .horizontal)
         NSLayoutConstraint.activate([
-            stack.topAnchor.constraint(equalTo: topAnchor),
-            stack.leadingAnchor.constraint(equalTo: leadingAnchor),
-            stack.trailingAnchor.constraint(equalTo: trailingAnchor),
-            stack.bottomAnchor.constraint(equalTo: bottomAnchor)
+            actionButton.widthAnchor.constraint(equalToConstant: 112),
+            actionButton.heightAnchor.constraint(equalToConstant: 44)
         ])
+
+        let titleRow = UIStackView(arrangedSubviews: [titleLabel, badgeLabel])
+        titleRow.axis = .horizontal
+        titleRow.spacing = 6
+        titleRow.alignment = .center
+
+        let textStack = UIStackView(arrangedSubviews: [titleRow, stateLabel, detailLabel])
+        textStack.axis = .vertical
+        textStack.spacing = 2
+        textStack.alignment = .fill
+
+        let row = UIStackView(arrangedSubviews: [textStack, actionButton])
+        row.translatesAutoresizingMaskIntoConstraints = false
+        row.axis = .horizontal
+        row.spacing = 12
+        row.alignment = .center
+        addSubview(row)
+        NSLayoutConstraint.activate([
+            row.topAnchor.constraint(equalTo: topAnchor, constant: 4),
+            row.leadingAnchor.constraint(equalTo: leadingAnchor),
+            row.trailingAnchor.constraint(equalTo: trailingAnchor),
+            row.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -4)
+        ])
+
+        let tap = UITapGestureRecognizer(target: self, action: #selector(didTapRow))
+        tap.delegate = self
+        addGestureRecognizer(tap)
     }
 
     required init?(coder: NSCoder) { fatalError("unsupported") }
 
-    /// Applies one truthful projection; the action button is rebuilt on kind
-    /// change and targets the controller's honest selectors.
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+        guard actionButton.isUserInteractionEnabled else { return false }
+        let point = touch.location(in: actionButton)
+        return !actionButton.point(inside: point, with: nil)
+    }
+
+    @objc private func didTapRow() {
+        guard actionButton.isUserInteractionEnabled else { return }
+        actionButton.sendActions(for: .touchUpInside)
+    }
+
+    /// Updates one truthful projection in place. The button is never removed,
+    /// so a download or select tap keeps a stable 44pt hit target.
     func apply(
         projection: EcholetHomePresenter.ModelRowProjection,
         modelId: String,
         controller: EcholetHomeViewController
     ) {
+        if !wired {
+            actionButton.addTarget(
+                controller,
+                action: #selector(EcholetHomeViewController.didTapModelAction(_:)),
+                for: .touchUpInside
+            )
+            wired = true
+        }
+        actionButton.modelId = modelId
+        actionButton.rowAction = projection.action
         titleLabel.text = projection.title
+        badgeLabel.text = projection.badge
+        badgeLabel.isHidden = projection.badge.isEmpty
+        badgeLabel.textColor = projection.badge == "Verified" ? .systemGreen : .secondaryLabel
         stateLabel.text = projection.stateLine
         detailLabel.text = projection.detail
 
+        actionButton.setTitle(projection.actionTitle, for: .normal)
+        actionButton.accessibilityLabel = "\(projection.actionTitle) \(projection.title)"
+        let enabled = projection.actionEnabled
+        actionButton.isUserInteractionEnabled = enabled
+        // Keep isEnabled so UIKit does not fade the title; interaction is
+        // gated above. Selected stays a solid badge, progress stays readable.
+        actionButton.isEnabled = true
         switch projection.action {
-        case .download, .retryDownload:
-            let button = makeDownloadButton(modelId: modelId)
-            button.setTitle(projection.action == .download ? "Download" : "Retry Download", for: .normal)
-            button.isEnabled = true
-            swapButton(button, selector: #selector(EcholetHomeViewController.didTapDownload(_:)), controller: controller)
-        case .select:
-            let button = makeSelectButton(modelId: modelId)
-            button.setTitle("Select", for: .normal)
-            button.isEnabled = true
-            swapButton(button, selector: #selector(EcholetHomeViewController.didTapSelect(_:)), controller: controller)
-        case .selected, .none:
-            if let existing = currentButton {
-                existing.removeFromSuperview()
-                currentButton = nil
-            }
+        case .selected:
+            actionButton.backgroundColor = Self.filledColor
+            actionButton.setTitleColor(Self.filledTitle, for: .normal)
+        case .busy:
+            actionButton.backgroundColor = .tertiarySystemFill
+            actionButton.setTitleColor(.secondaryLabel, for: .normal)
+        case .download, .retryDownload, .select:
+            actionButton.backgroundColor = Self.filledColor
+            actionButton.setTitleColor(Self.filledTitle, for: .normal)
         }
     }
 
-    private func makeDownloadButton(modelId: String) -> DownloadButton {
-        let button = (currentButton as? DownloadButton) ?? DownloadButton(modelId: modelId)
-        return button
+    private static let filledColor = UIColor { trait in
+        trait.userInterfaceStyle == .dark
+            ? UIColor(white: 0.92, alpha: 1)
+            : UIColor(white: 0.10, alpha: 1)
     }
 
-    private func makeSelectButton(modelId: String) -> SelectButton {
-        let button = (currentButton as? SelectButton) ?? SelectButton(modelId: modelId)
-        return button
-    }
-
-    private func swapButton(
-        _ button: UIButton,
-        selector: Selector,
-        controller: EcholetHomeViewController
-    ) {
-        guard currentButton !== button else { return }
-        currentButton?.removeFromSuperview()
-        currentButton = button
-        guard let stack = subviews.first as? UIStackView else { return }
-        button.addTarget(controller, action: selector, for: .touchUpInside)
-        stack.addArrangedSubview(button)
+    private static let filledTitle = UIColor { trait in
+        trait.userInterfaceStyle == .dark ? .black : .white
     }
 }
