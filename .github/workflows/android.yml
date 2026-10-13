@@ -3,28 +3,181 @@ name: Android Build & Test
 on:
   workflow_call:
     inputs:
-      upload_release:
+      upload_artifact:
         type: boolean
         default: false
-        description: 'Upload to GitHub Release'
+        description: 'Upload the verified release APK as a workflow artifact'
   workflow_dispatch:
+    inputs:
+      upload_artifact:
+        type: boolean
+        default: false
+        description: 'Upload the verified release APK as a workflow artifact'
+
+permissions:
+  contents: read
 
 jobs:
-  build-android:
-    name: Android Build & Test
+  build-android-release:
+    name: Android arm64 Release Build & Test
     runs-on: ubuntu-24.04
+
+    env:
+      ANDROID_ARTIFACT: echolet-android-arm64.apk
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Cache Echolet Base Model Archive
+      - name: Setup JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Cache Cargo dependencies and build cache
         uses: actions/cache@v4
         with:
           path: |
-            dist/model-*.tar.zst
-          key: echolet-base-model-${{ hashFiles('models/base-model.lock.json') }}
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-android-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-android-cargo-
 
-      - name: "Notice: Android CI Architecture Ready"
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches/
+            ~/.gradle/wrapper/
+          key: ${{ runner.os }}-gradle-${{ hashFiles('android/**/build.gradle.kts', 'android/gradle.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
+      - name: Install native SDK packages (pinned NDK + build tools)
         run: |
-          echo "Android platform build step ready. Consumes same models/base-model.lock.json."
+          sudo apt-get update
+          sudo apt-get install -y cmake
+          sdkmanager="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          test -x "$sdkmanager" || { echo "Blocker: sdkmanager missing under $ANDROID_HOME." >&2; exit 1; }
+          set +e
+          yes | "$sdkmanager" --licenses >/dev/null
+          set -e
+          "$sdkmanager" --install "build-tools;36.0.0" "ndk;30.0.16248370" "platform-tools" >/dev/null
+          "$sdkmanager" --install "platforms;android-37.0" >/dev/null \
+            || "$sdkmanager" --install "platforms;android-37" >/dev/null
+
+      - name: Verify Android host toolchain
+        run: |
+          export ANDROID_SDK_ROOT="$ANDROID_HOME"
+          android/scripts/check-env.sh
+
+      - name: Build native arm64 slice (pinned sherpa-onnx + Rust cdylib)
+        run: |
+          android/scripts/build-native-arm64.sh
+
+      - name: Resolve stable release signing from user secrets
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_SIGNING_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_SIGNING_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_SIGNING_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_SIGNING_KEY_PASSWORD }}
+        run: |
+          missing=""
+          [ -z "$KEYSTORE_BASE64" ]    && missing="$missing ANDROID_SIGNING_KEYSTORE_BASE64"
+          [ -z "$KEYSTORE_PASSWORD" ]  && missing="$missing ANDROID_SIGNING_KEYSTORE_PASSWORD"
+          [ -z "$KEY_ALIAS" ]          && missing="$missing ANDROID_SIGNING_KEY_ALIAS"
+          [ -z "$KEY_PASSWORD" ]       && missing="$missing ANDROID_SIGNING_KEY_PASSWORD"
+          if [ -n "$missing" ]; then
+            {
+              echo 'Blocker: Android release signing secrets are missing:'
+              printf '  missing:%s\n' "$missing"
+              echo 'The tag-gated Android release job requires a USER-OWNED persistent signing'
+              echo 'keystore supplied through ONE-TIME repository actions secrets. It NEVER signs'
+              echo 'releases with a temporary/random identity and NEVER falls back to debug'
+              echo 'signing. Configure once (not stored in the repo), then re-push the tag:'
+              echo ''
+              echo '  keytool -genkeypair -v -keystore echolet-release.keystore \'
+              echo '    -alias echolet -keyalg RSA -keysize 4096 -validity 10000'
+              echo '  base64 -w0 echolet-release.keystore   # keep the output + passwords in a password manager'
+              echo ''
+              echo 'GitHub repo -> Settings -> Secrets and variables -> Actions -> New repository secret:'
+              echo '  ANDROID_SIGNING_KEYSTORE_BASE64   = base64 of the keystore file'
+              echo '  ANDROID_SIGNING_KEYSTORE_PASSWORD = keystore password'
+              echo '  ANDROID_SIGNING_KEY_ALIAS         = key alias'
+              echo '  ANDROID_SIGNING_KEY_PASSWORD      = key password'
+            } >&2
+            exit 1
+          fi
+          mkdir -p android/app/.release
+          printf '%s' "$KEYSTORE_BASE64" | base64 -d > android/app/.release/echolet-release.keystore
+          echo "Keystore decoded (git-ignored location android/app/.release)."
+          echo "Validating keystore + key entry with keytool..."
+          keytool -list -keystore android/app/.release/echolet-release.keystore \
+            -storepass "$KEYSTORE_PASSWORD" -alias "$KEY_ALIAS" >/dev/null \
+            || { echo 'Blocker: keystore/password/alias combination is INVALID; refusing to build a release APK.' >&2; exit 1; }
+
+      - name: Gradle release APK build with stable signing
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_SIGNING_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_SIGNING_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_SIGNING_KEY_PASSWORD }}
+        run: |
+          cd android
+          args=[
+            "clean", ":app:testDebugUnitTest", ":app:assembleRelease",
+            "-Pecholet.release.storePath=$PWD/app/.release/echolet-release.keystore",
+            "-Pecholet.release.storePassword=$KEYSTORE_PASSWORD",
+            "-Pecholet.release.keyAlias=$KEY_ALIAS",
+            "-Pecholet.release.keyPassword=$KEY_PASSWORD"
+          ]
+          ./gradlew "${args[@]}" --stacktrace || {
+            echo 'Blocker: Gradle release build failed. The release package was NOT produced; stopping tag publication here.' >&2
+            exit 1
+          }
+
+      - name: Verify release APK (fail-closed packaging gate)
+        run: |
+          RELEASE_APK="android/app/build/outputs/apk/release/app-release.apk"
+          [ -f "$RELEASE_APK" ] || {
+            echo "Blocker: signed release APK missing at $RELEASE_APK — the build produced an UNSIGNED artifact or failed silently; refusing to publish." >&2
+            exit 1
+          }
+          android/scripts/verify-apk-arm64.sh "$RELEASE_APK"
+          badging="$("$ANDROID_HOME/build-tools/36.0.0/aapt2" dump badging "$RELEASE_APK")"
+          echo "$badging" | grep -q "package: name='com.mainstayx.echolet'" \
+            || { echo 'Blocker: release APK has the wrong applicationId.' >&2; exit 1; }
+          echo "$badging" | grep -q "native-code: 'arm64-v8a'" \
+            || { echo 'Blocker: release APK does not declare the arm64-v8a native ABI.' >&2; exit 1; }
+          expected_versionName=$(sed -n 's/^[[:space:]]*versionName = "\(.*\)"$/\1/p' android/app/build.gradle.kts | head -n1)
+          echo "$badging" | grep -q "versionName='$expected_versionName'" \
+            || { echo "Blocker: release APK versionName does not match the source manifest ($expected_versionName)." >&2; exit 1; }
+          echo "Release official verification passed (package id, arm64-v8a ABI, versionName $expected_versionName)."
+
+      - name: Stage release artifact + sha256
+        run: |
+          RELEASE_APK="android/app/build/outputs/apk/release/app-release.apk"
+          mkdir -p dist
+          cp -f "$RELEASE_APK" "dist/${ANDROID_ARTIFACT}"
+          echo "Release package:"
+          ls -lh "dist/${ANDROID_ARTIFACT}"
+          sha256sum "dist/${ANDROID_ARTIFACT}" | tee "dist/${ANDROID_ARTIFACT}.sha256"
+
+      - name: Upload build artifact
+        if: ${{ inputs.upload_artifact }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: echolet-android-arm64
+          path: |
+            dist/${{ env.ANDROID_ARTIFACT }}
+            dist/${{ env.ANDROID_ARTIFACT }}.sha256
+          if-no-files-found: error

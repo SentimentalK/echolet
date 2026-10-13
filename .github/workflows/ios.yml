@@ -1,0 +1,114 @@
+name: iOS Device Build & Package
+
+# Reusable iOS DEVICE (arm64) build pipeline. Produces an UNSIGNED IPA that
+# ships Payload/EcholetApp.app (with embedded PlugIns/EcholetKeyboard.appex)
+# as a re-signing input for SideStore/Sideloadly. It is NOT one-click
+# installable and it intentionally contains NO ASR model (the ~593 MB X-ASR
+# model is a runtime, user-owned download). CI never touches any developer
+# signing identity: CODE_SIGNING_ALLOWED=NO and no secrets are consumed.
+
+on:
+  workflow_call:
+    inputs:
+      upload_artifact:
+        type: boolean
+        default: false
+        description: 'Upload the unsigned device IPA as a workflow artifact'
+  workflow_dispatch:
+    inputs:
+      upload_artifact:
+        type: boolean
+        default: false
+        description: 'Upload the unsigned device IPA as a workflow artifact'
+
+permissions:
+  contents: read
+
+jobs:
+  build-ios-device:
+    name: iOS arm64 Device Build & Test (unsigned IPA)
+    runs-on: macos-15
+
+    env:
+      IPA_PATH: dist/echolet-ios-device-arm64.ipa
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios
+
+      - name: Cache Cargo dependencies and build cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            ios/ios-native/target/
+          key: ${{ runner.os }}-ios-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-ios-cargo-
+
+      - name: Install XcodeGen
+        run: |
+          brew install xcodegen
+
+      - name: Stage pinned native device statics (XcodeGen-free pre-step)
+        run: |
+          ios/scripts/build-ios-native.sh
+          test -f .local-runtime/ios-native/lib/libsherpa-onnx-c-api.a
+          test -f .local-runtime/ios-native/lib/libonnxruntime.a
+
+      - name: Build the Rust ios-native static bridge (aarch64-apple-ios)
+        run: |
+          cargo build --release --manifest-path ios/ios-native/Cargo.toml --target aarch64-apple-ios
+          test -f ios/ios-native/target/aarch64-apple-ios/release/libecholet_ios.a
+
+      - name: Run pure Foundation Swift CLI tests
+        run: |
+          ios/scripts/run-cli-tests.sh
+
+      - name: Regenerate Xcode project + build the App + Keyboard extension
+        run: |
+          cd ios
+          xcodegen generate
+          xcodebuild \
+            -project Echolet.xcodeproj \
+            -scheme EcholetApp \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build
+
+      - name: Package unsigned device IPA
+        run: |
+          set -euo pipefail
+          APP_DIR="ios/build/Build/Products/iphoneos/EcholetApp.app"
+          test -d "$APP_DIR" || { echo "Blocker: $APP_DIR missing; xcodebuild produced no device app bundle." >&2; exit 1; }
+          rm -rf Payload
+          mkdir -p Payload
+          cp -R "$APP_DIR" Payload/EcholetApp.app
+          mkdir -p dist
+          rm -f "$IPA_PATH"
+          zip -qry "$IPA_PATH" Payload
+          echo "Unsigned IPA staged at $IPA_PATH (RE-SIGNING INPUT ONLY, not one-click installable)."
+
+      - name: Verify IPA contents (fail-closed)
+        run: |
+          expected_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' ios/App/Info.plist)"
+          ios/scripts/verify-ipa.sh "$(pwd)/$IPA_PATH" "$expected_version"
+
+      - name: Upload build artifact
+        if: ${{ inputs.upload_artifact }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: echolet-ios-arm64
+          path: ${{ env.IPA_PATH }}
+          if-no-files-found: error

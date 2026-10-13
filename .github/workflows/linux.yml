@@ -3,10 +3,10 @@ name: Linux Build & Test
 on:
   workflow_call:
     inputs:
-      upload_release:
+      upload_artifact:
         type: boolean
         default: false
-        description: 'Upload to GitHub Release'
+        description: 'Upload the verified release package as a workflow artifact'
   workflow_dispatch:
 
 jobs:
@@ -83,8 +83,10 @@ jobs:
         run: |
           ./scripts/linux/build-release.sh ${{ matrix.arch }}
 
-      - name: Publish to GitHub Release
-        if: ${{ inputs.upload_release }}
-        uses: softprops/action-gh-release@v2
+      - name: Upload build artifact
+        if: ${{ inputs.upload_artifact }}
+        uses: actions/upload-artifact@v4
         with:
-          files: dist/${{ matrix.artifact }}.tar.gz
+          name: ${{ matrix.artifact }}
+          path: dist/${{ matrix.artifact }}.tar.gz
+          if-no-files-found: error

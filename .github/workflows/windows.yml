@@ -3,10 +3,10 @@ name: Windows Build & Test
 on:
   workflow_call:
     inputs:
-      upload_release:
+      upload_artifact:
         type: boolean
         default: false
-        description: 'Upload to GitHub Release'
+        description: 'Upload the verified release package as a workflow artifact'
   workflow_dispatch:
 
 jobs:
@@ -90,8 +90,10 @@ jobs:
         run: |
           ./scripts/windows/build-release.ps1 -Architecture x64
 
-      - name: Publish to GitHub Release
-        if: ${{ inputs.upload_release }}
-        uses: softprops/action-gh-release@v2
+      - name: Upload build artifact
+        if: ${{ inputs.upload_artifact }}
+        uses: actions/upload-artifact@v4
         with:
-          files: dist/echolet-windows-x64.zip
+          name: echolet-windows-x64
+          path: dist/echolet-windows-x64.zip
+          if-no-files-found: error

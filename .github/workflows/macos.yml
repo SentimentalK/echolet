@@ -3,16 +3,20 @@ name: macOS Build & Test
 on:
   workflow_call:
     inputs:
-      upload_release:
+      upload_artifact:
         type: boolean
         default: false
-        description: 'Upload to GitHub Release'
+        description: 'Upload verified release packages as workflow artifacts'
       include_intel:
         type: boolean
         default: false
         description: 'Include Intel (x86_64) runner'
   workflow_dispatch:
     inputs:
+      upload_artifact:
+        type: boolean
+        default: false
+        description: 'Upload verified release packages as workflow artifacts'
       include_intel:
         type: boolean
         default: false
@@ -77,15 +81,17 @@ jobs:
         run: |
           ./scripts/macos/build-release.sh arm64
 
-      - name: Publish to GitHub Release
-        if: ${{ inputs.upload_release }}
-        uses: softprops/action-gh-release@v2
+      - name: Upload build artifact (Apple Silicon)
+        if: ${{ inputs.upload_artifact }}
+        uses: actions/upload-artifact@v4
         with:
-          files: dist/echolet-macos-arm64.zip
+          name: echolet-macos-arm64
+          path: dist/echolet-macos-arm64.zip
+          if-no-files-found: error
 
   build-macos-x64:
     name: macOS Intel Build & Test
-    if: inputs.include_intel == true || inputs.upload_release == true
+    if: inputs.include_intel == true || inputs.upload_artifact == true
     runs-on: macos-15-intel
 
     steps:
@@ -142,8 +148,10 @@ jobs:
         run: |
           ./scripts/macos/build-release.sh x64
 
-      - name: Publish to GitHub Release
-        if: ${{ inputs.upload_release }}
-        uses: softprops/action-gh-release@v2
+      - name: Upload build artifact (Intel)
+        if: ${{ inputs.upload_artifact }}
+        uses: actions/upload-artifact@v4
         with:
-          files: dist/echolet-macos-x64.zip
+          name: echolet-macos-x64
+          path: dist/echolet-macos-x64.zip
+          if-no-files-found: error

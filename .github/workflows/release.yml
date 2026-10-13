@@ -1,5 +1,16 @@
 name: Application Release
 
+# Tag-gated, all-platform release pipeline. A push of a `v*` tag runs the
+# Linux / Windows / macOS / Android / iOS build+package jobs and then —
+# ONLY after every one of them SUCCEEDED — publishes ALL artifacts together
+# in the single publish-release job. There are no independent early uploads
+# and no partial release: if any platform job fails, nothing is published
+# and the tag publication simply stops (re-push the tag after fixing).
+#
+# Ordinary master CI (ci.yml) reuses the same build workflows with
+# upload_artifact=false and stays low cost; a tag push is the only path to
+# a published Release, so no duplicate cost appears on non-tag pushes.
+
 on:
   push:
     tags:
@@ -10,27 +21,155 @@ permissions:
   contents: write
 
 jobs:
+  preflight:
+    name: Release Preflight (version cross-check)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Cross-check tagged release versions
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME:-}"
+          expected=""
+          if [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            expected="${tag#v}"
+            echo "Preflight: tag $tag -> expected version $expected"
+          else
+            echo "Preflight: no tag ref ($tag); checking manifest CONSENSUS instead."
+          fi
+
+          versions=()
+          check() {
+            local name="$1" value="$2"
+            printf '  %-32s %s\n' "$name" "$value"
+            [ -n "$value" ] || { echo "Blocker: $name is empty." >&2; exit 1; }
+            if [ -n "$expected" ] && [ "$value" != "$expected" ]; then
+              echo "Blocker: $name is '$value' but the tag expects '$expected'." >&2
+              exit 1
+            fi
+            versions+=("$value")
+          }
+
+          cargo_version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n1)
+          check "Cargo.toml (echolet)" "$cargo_version"
+
+          lock_version=$(awk 'BEGIN{inpkg=0} /^name = "echolet"$/{inpkg=1} inpkg && /^version = /{print $3; exit}' Cargo.lock | tr -d '"')
+          check "Cargo.lock (echolet)" "$lock_version"
+
+          android_version=$(sed -n 's/^[[:space:]]*versionName = "\(.*\)"$/\1/p' android/app/build.gradle.kts | head -n1)
+          check "Android versionName" "$android_version"
+
+          ios_version=$(python3 -c 'import plistlib; print(plistlib.load(open("ios/App/Info.plist","rb"))["CFBundleShortVersionString"])')
+          ios_build=$(python3 -c 'import plistlib; print(plistlib.load(open("ios/App/Info.plist","rb"))["CFBundleVersion"])')
+          ios_keyboard_version=$(python3 -c 'import plistlib; print(plistlib.load(open("ios/Keyboard/Info.plist","rb"))["CFBundleShortVersionString"])')
+          ios_keyboard_build=$(python3 -c 'import plistlib; print(plistlib.load(open("ios/Keyboard/Info.plist","rb"))["CFBundleVersion"])')
+          check "iOS CFBundleShortVersionString" "$ios_version"
+          check "iOS CFBundleVersion (build)" "$ios_build"
+          check "iOS Keyboard CFBundleShortVersionString" "$ios_keyboard_version"
+          check "iOS Keyboard CFBundleVersion (build)" "$ios_keyboard_build"
+
+          if [ -z "$expected" ]; then
+            expected="${versions[0]}"
+            for v in "${versions[@]}"; do
+              [ "$v" = "$expected" ] || {
+                echo "Blocker: manifest versions disagree; all platforms must match consensus '$expected'." >&2
+                exit 1
+              }
+            done
+            echo "Preflight: manifest consensus version is $expected."
+          fi
+
   release-linux:
     name: Release Linux
+    needs: preflight
     uses: ./.github/workflows/linux.yml
     with:
-      upload_release: true
+      upload_artifact: true
 
   release-windows:
     name: Release Windows
+    needs: preflight
     uses: ./.github/workflows/windows.yml
     with:
-      upload_release: true
+      upload_artifact: true
 
   release-macos:
     name: Release macOS
+    needs: preflight
     uses: ./.github/workflows/macos.yml
     with:
-      upload_release: true
+      upload_artifact: true
       include_intel: true
 
   release-android:
     name: Release Android
+    needs: preflight
     uses: ./.github/workflows/android.yml
     with:
-      upload_release: true
+      upload_artifact: true
+
+  release-ios:
+    name: Release iOS (unsigned device IPA)
+    needs: preflight
+    uses: ./.github/workflows/ios.yml
+    with:
+      upload_artifact: true
+
+  publish-release:
+    name: Publish GitHub Release (ALL platforms)
+    runs-on: ubuntu-24.04
+    # The ONLY publication path: waits for the SUCCESS of every platform
+    # build+package job. Any failure above skips publication entirely —
+    # there is never a partial release.
+    needs:
+      - preflight
+      - release-linux
+      - release-windows
+      - release-macos
+      - release-android
+      - release-ios
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Collect all platform artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          pattern: 'echolet-*'
+          merge-multiple: true
+
+      - name: Verify the expected platform artifacts are present
+        run: |
+          set -euo pipefail
+          echo "Collected release assets:"
+          ls -lh release-assets
+          for required in \
+            echolet-linux-x64.tar.gz \
+            echolet-linux-arm64.tar.gz \
+            echolet-windows-x64.zip \
+            echolet-macos-arm64.zip \
+            echolet-macos-x64.zip \
+            echolet-android-arm64.apk \
+            echolet-ios-device-arm64.ipa; do
+            [ -f "release-assets/$required" ] || {
+              echo "Blocker: release asset $required is missing — refusing to publish a partial release." >&2
+              exit 1
+            }
+          done
+
+      - name: Generate SHA256SUMS from all artifacts
+        run: |
+          cd release-assets
+          find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%f\n' \
+            | xargs sha256sum -b > SHA256SUMS
+          sha256sum -c SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Publish to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release-assets/*
