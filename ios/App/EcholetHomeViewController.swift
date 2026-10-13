@@ -450,6 +450,15 @@ class EcholetHomeViewController: UIViewController, WarmIPCServiceDelegate, Echol
         // Projection re-syncs via delegate callback + bounded refresh.
     }
 
+    var isMicBusyOrArmed: Bool {
+        return warmHardwareActive
+            || WarmIPCService.shared.isUserArmed
+            || WarmIPCService.shared.hasActiveKeyboardSession
+            || dictationSessionActive
+            || AudioCaptureController.shared.recordingFromAnyPathWindow
+            || EcholetAsrService.shared.isBusyForModelSwitch
+    }
+
     @objc func didTapModelAction(_ sender: ModelActionButton) {
         switch sender.rowAction {
         case .download, .retryDownload:
@@ -457,23 +466,58 @@ class EcholetHomeViewController: UIViewController, WarmIPCServiceDelegate, Echol
             // to a visible progress control immediately inside download().
             EcholetModelDownloadCoordinator.shared.download(modelId: sender.modelId)
         case .select:
-            pendingSelectId = sender.modelId
-            refreshProjection()
-            EcholetModelStore.shared.select(modelId: sender.modelId) { [weak self] outcome in
-                guard let self = self else { return }
-                self.pendingSelectId = nil
-                switch outcome {
-                case .switched:
-                    self.advisory = nil
-                case .denied(let guidance):
-                    self.advisory = "Model switch blocked: \(guidance)"
-                case .failed(let message):
-                    self.advisory = "Model switch failed: \(message)"
-                }
-                self.refreshProjection()
+            if isMicBusyOrArmed {
+                let alert = UIAlertController(
+                    title: "Disarm Warm Mic First",
+                    message: "The microphone is currently armed or in use. You cannot switch models while the microphone is active.\n\nDisarm warm dictation to switch models?",
+                    preferredStyle: .alert
+                )
+                alert.addAction(UIAlertAction(title: "Disarm & Switch", style: .default) { [weak self] _ in
+                    guard let self = self else { return }
+                    self.didTapDisarmWarm()
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+                        self?.performModelSelect(modelId: sender.modelId)
+                    }
+                })
+                alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+                present(alert, animated: true)
+                return
             }
+            performModelSelect(modelId: sender.modelId)
         case .selected, .busy:
             break
+        }
+    }
+
+    private func performModelSelect(modelId: String) {
+        pendingSelectId = modelId
+        refreshProjection()
+        EcholetModelStore.shared.select(modelId: modelId) { [weak self] outcome in
+            guard let self = self else { return }
+            self.pendingSelectId = nil
+            switch outcome {
+            case .switched:
+                self.advisory = nil
+            case .denied(let guidance):
+                self.advisory = "Model switch blocked: \(guidance)"
+                let alert = UIAlertController(
+                    title: "Cannot Switch Model",
+                    message: guidance,
+                    preferredStyle: .alert
+                )
+                alert.addAction(UIAlertAction(title: "OK", style: .default))
+                self.present(alert, animated: true)
+            case .failed(let message):
+                self.advisory = "Model switch failed: \(message)"
+                let alert = UIAlertController(
+                    title: "Model Switch Failed",
+                    message: message,
+                    preferredStyle: .alert
+                )
+                alert.addAction(UIAlertAction(title: "OK", style: .default))
+                self.present(alert, animated: true)
+            }
+            self.refreshProjection()
         }
     }
 
@@ -721,9 +765,17 @@ final class ModelRowView: UIView, UIGestureRecognizerDelegate {
         case .busy:
             actionButton.backgroundColor = .tertiarySystemFill
             actionButton.setTitleColor(.secondaryLabel, for: .normal)
-        case .download, .retryDownload, .select:
+        case .download, .retryDownload:
             actionButton.backgroundColor = Self.filledColor
             actionButton.setTitleColor(Self.filledTitle, for: .normal)
+        case .select:
+            if controller.isMicBusyOrArmed {
+                actionButton.backgroundColor = .systemGray4
+                actionButton.setTitleColor(.secondaryLabel, for: .normal)
+            } else {
+                actionButton.backgroundColor = Self.filledColor
+                actionButton.setTitleColor(Self.filledTitle, for: .normal)
+            }
         }
     }
 

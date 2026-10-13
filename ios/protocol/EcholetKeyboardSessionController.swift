@@ -253,15 +253,13 @@ public final class EcholetKeyboardSessionController {
 
         // 1. Recover in-flight launch context from defaults if instance was recreated
         if launchContext == nil, let intent = EcholetLaunch.freshPendingStartIntent(nowMs: now, defaults: env.defaults) {
-            if let demand = EcholetLaunch.readDemand(defaults: env.defaults), demand.nonce == intent.launchNonce {
-                let url = try? EcholetLaunch.makeDictationPrepareURL(nonce: intent.launchNonce, tsMs: intent.initiatedAtMs)
-                if let url = url {
-                    launchContext = LaunchContext(nonce: intent.launchNonce, url: url, startedAtMs: intent.initiatedAtMs, autoStartIssued: false)
-                    preparedDemandURL = url
-                    if phase == .ready {
-                        setPhase(.opening)
-                        log("OPEN_RESUMED(recovered_pending_start_intent)")
-                    }
+            let url = try? EcholetLaunch.makeDictationPrepareURL(nonce: intent.launchNonce, tsMs: intent.initiatedAtMs)
+            if let url = url {
+                launchContext = LaunchContext(nonce: intent.launchNonce, url: url, startedAtMs: intent.initiatedAtMs, autoStartIssued: false)
+                preparedDemandURL = url
+                if phase == .ready {
+                    setPhase(.opening)
+                    log("OPEN_RESUMED(recovered_pending_start_intent)")
                 }
             }
         } else if let ctx = launchContext, now - ctx.startedAtMs <= EcholetLaunch.defaultDemandTtlMs {
@@ -275,8 +273,16 @@ public final class EcholetKeyboardSessionController {
         // 2. Check for explicit intent handoff:
         // If a fresh user-initiated start intent exists and warm mic / warmReady is now live,
         // automatically adopt the session and transition to listening (no second tap needed!).
-        if EcholetLaunch.freshPendingStartIntent(nowMs: now, defaults: env.defaults) != nil {
-            if freshWarmLiveExists() {
+        if let intent = EcholetLaunch.freshPendingStartIntent(nowMs: now, defaults: env.defaults) {
+            let isWarmReady: Bool
+            if let epoch = env.currentAppEpoch(),
+               let phaseRec = EcholetLaunch.freshPhaseMatching(nonce: intent.launchNonce, appEpoch: epoch, nowMs: now, defaults: env.defaults),
+               (phaseRec.phase == .warmReady || phaseRec.phase == .micNativeReady) {
+                isWarmReady = true
+            } else {
+                isWarmReady = freshWarmLiveExists()
+            }
+            if isWarmReady {
                 log("INTENT_HANDOFF(warm_live_adopted)")
                 EcholetLaunch.clearPendingStartIntent(defaults: env.defaults)
                 launchContext = nil
@@ -579,8 +585,19 @@ public final class EcholetKeyboardSessionController {
     }
 
     private func resolveLaunchEvidence() {
-        guard let ctx = launchContext else { return }
         let now = env.nowMs()
+
+        if launchContext == nil, let intent = EcholetLaunch.freshPendingStartIntent(nowMs: now, defaults: env.defaults) {
+            let url = try? EcholetLaunch.makeDictationPrepareURL(nonce: intent.launchNonce, tsMs: intent.initiatedAtMs)
+            if let url = url {
+                launchContext = LaunchContext(nonce: intent.launchNonce, url: url, startedAtMs: intent.initiatedAtMs, autoStartIssued: false)
+                if phase == .ready {
+                    setPhase(.opening)
+                }
+            }
+        }
+
+        guard let ctx = launchContext else { return }
 
         // Positive app acknowledgement through the nonce-fenced phase record.
         if let epoch = env.currentAppEpoch(),
@@ -590,9 +607,7 @@ public final class EcholetKeyboardSessionController {
                 log("APP_URI_RECEIVED")
             case .modelLoaded:
                 log("MODEL_LOAD(observed)")
-            case .micNativeReady:
-                log("MIC_NATIVE_READY(observed)")
-            case .warmReady:
+            case .micNativeReady, .warmReady:
                 log("OPEN_RESULT(warm_ready_evidence)")
                 issueStartForWarmReady(context: ctx)
             case .requested:

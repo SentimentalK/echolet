@@ -164,6 +164,7 @@ enum EcholetKeyboardSessionTests {
         testPreparedDemandURLRotatesNearExpiry()
         testExplicitStartIntentHandoffAfterColdLaunch()
         testRecreatedKeyboardAdoptsPendingStartIntent()
+        testRecreatedKeyboardAdoptsWhenDemandConsumedAndWarmReadyPhase()
         testStaleHostReturnContextRejectedForDifferentNonce()
         testIntentHandoffExpiresIfColdLaunchTimesOut()
         testBackspaceGating()
@@ -912,6 +913,39 @@ enum EcholetKeyboardSessionTests {
         let req = h.lastRequest()
         expectEqual(req?.command, EcholetIPC.Command.start, "testRecreatedKeyboardAdoptsPendingStartIntent(4)")
         expectEqual(EcholetLaunch.readPendingStartIntent(defaults: h.defaults), nil, "testRecreatedKeyboardAdoptsPendingStartIntent(5)")
+    }
+
+    static func testRecreatedKeyboardAdoptsWhenDemandConsumedAndWarmReadyPhase() {
+        let h = FakeHarness()
+        let c1 = h.controller()
+
+        // User taps Start Listening on instance 1
+        c1.handleAppeared()
+        c1.handlePrimaryButtonTap()
+        c1.handleDisappeared()
+
+        // Containing app consumes the demand
+        _ = EcholetLaunch.consumeDemand(defaults: h.defaults)
+        expectNil(EcholetLaunch.readDemand(defaults: h.defaults), "demand consumed")
+
+        // Containing app reports warmReady phase
+        let intent = EcholetLaunch.readPendingStartIntent(defaults: h.defaults)!
+        h.now += 1200
+        _ = EcholetLaunch.writePhase(
+            nonce: intent.launchNonce,
+            appEpoch: h.appEpoch,
+            phase: .warmReady,
+            nowMs: h.now,
+            defaults: h.defaults
+        )
+
+        // System instantiates new controller instance c2
+        let c2 = h.controller()
+        c2.handleAppeared()
+        expectEqual(c2.phase, EcholetKeyboardSessionController.Phase.starting, "adopts via warmReady phase even when demand is consumed")
+        let req = h.lastRequest()
+        expectEqual(req?.command, EcholetIPC.Command.start, "issues START command")
+        expectEqual(EcholetLaunch.readPendingStartIntent(defaults: h.defaults), nil, "intent cleared")
     }
 
     static func testStaleHostReturnContextRejectedForDifferentNonce() {

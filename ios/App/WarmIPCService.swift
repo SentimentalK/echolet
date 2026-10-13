@@ -296,7 +296,18 @@ public final class WarmIPCService {
             let delay = self.hostReturnSettleDelay()
             print("[Echolet-APP] RETURN_SETTLE(delay=\(String(format: "%.2f", delay))s reason=\(reason))")
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
-                self?.beginHostReturn(storedHost: capturedStored, sourceApp: capturedSource, resolveAttempt: 0)
+                guard let self = self else { return }
+                self.ipcQueue.async {
+                    if self.flowCoordinator.isWarmStandbyHardwareActive, let defaults = self.sharedDefaults {
+                        _ = EcholetLaunch.writeWarmLive(
+                            appEpoch: AppDelegate.sharedEpoch,
+                            recorderActive: true,
+                            nowMs: WarmIPCService.currentTimeMs(),
+                            defaults: defaults
+                        )
+                    }
+                }
+                self.beginHostReturn(storedHost: capturedStored, sourceApp: capturedSource, resolveAttempt: 0)
             }
         }
     }
