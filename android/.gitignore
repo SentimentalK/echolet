@@ -13,3 +13,6 @@ captures/
 # `./gradlew clean` never removes the staged .so set.
 app/.native-jniLibs/
 native/target/
+
+# Release signing secrets are never committed (see android.yml + README).
+app/.release/

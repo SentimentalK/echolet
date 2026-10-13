@@ -2,6 +2,14 @@ plugins {
     id("com.android.application")
 }
 
+// Required signing secrets are supplied exclusively through gradle
+// properties (see android.yml and android/README.md); a missing secret is
+// a hard configuration error, never a silent fall-back.
+fun echoletReleaseProperty(name: String): String {
+    val value = property(name) as? String
+    return value ?: error("Missing required signing gradle property '$name'")
+}
+
 android {
     namespace = "com.mainstayx.echolet"
     compileSdk = 37
@@ -11,8 +19,8 @@ android {
         applicationId = "com.mainstayx.echolet"
         minSdk = 26
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 2
+        versionName = "2.0.0"
 
         // Phase 0-A feasibility: the native slice is built and validated for
         // arm64-v8a only (libecholet_android.so, libsherpa-onnx-c-api.so,
@@ -25,6 +33,32 @@ android {
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
+    }
+
+    val releaseStorePath = findProperty("echolet.release.storePath") as String?
+    signingConfigs {
+        if (releaseStorePath != null) {
+            create("echoletRelease") {
+                storeFile = file(releaseStorePath)
+                storePassword = echoletReleaseProperty("echolet.release.storePassword")
+                keyAlias = echoletReleaseProperty("echolet.release.keyAlias")
+                keyPassword = echoletReleaseProperty("echolet.release.keyPassword")
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            // STABLE user-owned signing identity only: configured via the
+            // gradle properties above when the CI/release caller supplies
+            // them. There is deliberately NO debug-signing fallback for
+            // release packages; without signing properties an unsigned APK
+            // is produced and the release pipeline's verification gate
+            // fails it (never published).
+            if (releaseStorePath != null) {
+                signingConfig = signingConfigs.getByName("echoletRelease")
+            }
+        }
     }
 
     // JVM mediation tests exercise the real controller with fake main/lane;

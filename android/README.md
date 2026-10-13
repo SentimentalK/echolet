@@ -32,6 +32,49 @@ Application id: `com.mainstayx.echolet`.
 Kotlin is compiled by AGP's built-in Kotlin support. Do not apply
 `org.jetbrains.kotlin.android`.
 
+## Release signing secrets (GitHub Actions, one-time setup)
+
+Tag-gated Android releases (`.github/workflows/android.yml` called from
+`.github/workflows/release.yml` on `v*` tags) build a release APK signed
+with a USER-OWNED, PERSISTENT keystore supplied through encrypted GitHub
+Actions secrets. The pipeline NEVER signs with a temporary/random identity
+and NEVER falls back to debug signing: when any secret is missing the job
+prints the exact missing-secret list and FAILS, which stops the tag
+publication (no partial release).
+
+One-time setup (keystore and passwords are NOT stored in the repo):
+
+```sh
+keytool -genkeypair -v -keystore echolet-release.keystore \
+  -alias echolet -keyalg RSA -keysize 4096 -validity 10000
+base64 -w0 echolet-release.keystore
+```
+
+Keep the `.keystore` file, the base64 blob and the passwords in a password
+manager, then create the four repository secrets
+(GitHub → Settings → Secrets and variables → Actions → New repository secret):
+
+| Secret | Value |
+| --- | --- |
+| `ANDROID_SIGNING_KEYSTORE_BASE64` | base64 of the keystore file (single line) |
+| `ANDROID_SIGNING_KEYSTORE_PASSWORD` | keystore password |
+| `ANDROID_SIGNING_KEY_ALIAS` | key alias |
+| `ANDROID_SIGNING_KEY_PASSWORD` | key password |
+
+PKCS12 keystores (the `keytool` default) require the key password to equal
+the keystore password; generate with `-storepass`/`-keypass` holding the
+same value for both and set both secrets accordingly.
+
+The workflow decodes the keystore into the git-ignored
+`android/app/.release/` directory, validates the password/alias pair with
+`keytool` before anything builds, and passes the identity to Gradle only via
+`-P` properties (`android/app/build.gradle.kts` maps them to the release
+`signingConfig`). Losing the keystore means the Play/App store cannot ever
+update-same-application — protect it. A release APK built without these
+secrets is impossible by construction; the CI gate also verifies the APK
+packaging (`verify-apk-arm64.sh`), its `applicationId`,
+`arm64-v8a` native ABI, and that `versionName` matches the source manifest.
+
 ## Prepare this machine
 
 JDK 17 and the Android command-line tools (`sdkmanager`) must already be
