@@ -134,14 +134,42 @@ for lic in "${LICENSES[@]}"; do
     fi
 done
 
-# 7. Check for host path leakage in text files
+# 7. Check desktop integration files (icon, desktop entry, installer)
+echo "--> Verifying desktop integration assets..."
+DESKTOP_FILES=(
+    "echolet.desktop"
+    "echolet.png"
+    "icon.png"
+    "install.sh"
+    "uninstall.sh"
+)
+
+for df in "${DESKTOP_FILES[@]}"; do
+    TARGET_DF="${DIST_DIR}/${df}"
+    if [[ ! -f "${TARGET_DF}" || ! -s "${TARGET_DF}" ]]; then
+        echo "[Error] Missing or empty desktop integration file: ${TARGET_DF}" >&2
+        exit 1
+    fi
+done
+
+if [[ ! -x "${DIST_DIR}/install.sh" ]]; then
+    echo "[Error] ${DIST_DIR}/install.sh is not executable!" >&2
+    exit 1
+fi
+
+if [[ ! -x "${DIST_DIR}/uninstall.sh" ]]; then
+    echo "[Error] ${DIST_DIR}/uninstall.sh is not executable!" >&2
+    exit 1
+fi
+
+# 8. Check for host path leakage in text files
 echo "--> Checking for host path leakage..."
 if grep -rn "/home/sentimentalk/sherpa-onnx" "${DIST_DIR}/licenses" "${DIST_DIR}/models/registry.json" >/dev/null 2>&1; then
     echo "[Error] Host path leaked into release metadata/licenses!" >&2
     exit 1
 fi
 
-# 8. Print final bundle size
+# 9. Print final bundle size
 echo "--> Staged package size:"
 du -sh "${DIST_DIR}"
 

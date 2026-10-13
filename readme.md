@@ -55,6 +55,12 @@ Download the latest pre-built package for your operating system from [GitHub Rel
 
 ### Linux
 Echolet uses `uinput` for low-latency keystroke injection across X11 and Wayland sessions.
+- **Desktop & Icon Installation**: Extract the tarball and run the one-click installer:
+  ```bash
+  tar -xzf echolet-linux-x64.tar.gz
+  cd echolet-linux-x64
+  ./install.sh
+  ```
 - **Initial Setup**: Run the setup command once to configure uinput permissions:
   ```bash
   echolet setup-uinput

@@ -62,10 +62,27 @@ cp "${REPO_ROOT}/models/registry.json" "${DIST_DIR}/models/registry.json"
 echo "--> Copying licenses..."
 cp -a "${REPO_ROOT}/licenses"/* "${DIST_DIR}/licenses/"
 
-# 9. Sanity check bundle completeness
+# 9. Copy desktop integration assets & installer
+echo "--> Copying desktop integration assets and installers..."
+cp "${REPO_ROOT}/assets/linux/echolet.desktop" "${DIST_DIR}/echolet.desktop"
+cp "${REPO_ROOT}/assets/linux/echolet.png" "${DIST_DIR}/echolet.png"
+cp "${REPO_ROOT}/assets/linux/echolet.png" "${DIST_DIR}/icon.png"
+if [[ -f "${REPO_ROOT}/assets/linux/echolet.svg" ]]; then
+    cp "${REPO_ROOT}/assets/linux/echolet.svg" "${DIST_DIR}/echolet.svg"
+fi
+cp "${REPO_ROOT}/assets/linux/install.sh" "${DIST_DIR}/install.sh"
+cp "${REPO_ROOT}/assets/linux/uninstall.sh" "${DIST_DIR}/uninstall.sh"
+chmod +x "${DIST_DIR}/install.sh" "${DIST_DIR}/uninstall.sh"
+
+# 10. Sanity check bundle completeness
 echo "--> Validating production bundle structure..."
 REQUIRED_FILES=(
     "${DIST_DIR}/echolet"
+    "${DIST_DIR}/echolet.desktop"
+    "${DIST_DIR}/echolet.png"
+    "${DIST_DIR}/icon.png"
+    "${DIST_DIR}/install.sh"
+    "${DIST_DIR}/uninstall.sh"
     "${DIST_DIR}/models/registry.json"
     "${DIST_DIR}/runtime/lib/libsherpa-onnx-c-api.so"
     "${DIST_DIR}/runtime/lib/libonnxruntime.so"

@@ -55,6 +55,12 @@
 
 ### Linux
 Echolet 使用 `uinput` 实现 X11 / Wayland 环境下的低延迟虚拟按键模拟。
+- **桌面与图标一键安装**：解压发布的 tar 包并运行安装脚本：
+  ```bash
+  tar -xzf echolet-linux-x64.tar.gz
+  cd echolet-linux-x64
+  ./install.sh
+  ```
 - **一键权限配置**：首次运行前执行配置命令：
   ```bash
   echolet setup-uinput

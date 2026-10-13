@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Echolet
+Comment=Real-time Voice Typing & Speech Recognition
+Exec=echolet
+Icon=echolet
+Terminal=false
+Categories=Utility;AudioVideo;Audio;
+StartupWMClass=echolet
+StartupNotify=true
+Keywords=voice;typing;speech;recognition;asr;dictation;
