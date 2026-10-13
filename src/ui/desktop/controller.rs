@@ -233,6 +233,11 @@ impl DesktopPanelRuntime {
                 }
             }
 
+            #[cfg(target_os = "linux")]
+            {
+                let _ = slint::set_xdg_app_id("echolet");
+            }
+
             let panel_res =
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(EcholetPanel::new));
             let panel = match panel_res {
