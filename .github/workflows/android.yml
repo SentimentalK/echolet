@@ -136,6 +136,35 @@ jobs:
           keytool -list -keystore android/app/.release/echolet-release.keystore \
             -storepass "$KEYSTORE_PASSWORD" -alias "$KEY_ALIAS" >/dev/null \
             || { echo 'Blocker: keystore/password/alias combination is INVALID; refusing to build a release APK.' >&2; exit 1; }
+
+          # Verify private key access with keytool -certreq (checks decryption of private key entry)
+          resolved_key_pass=""
+          for candidate in \
+            "$KEY_PASSWORD" \
+            "$(printf '%s' "$KEY_PASSWORD" | tr -d '\r\n')" \
+            "$KEYSTORE_PASSWORD" \
+            "$(printf '%s' "$KEYSTORE_PASSWORD" | tr -d '\r\n')"; do
+            [ -n "$candidate" ] || continue
+            if keytool -certreq -keystore android/app/.release/echolet-release.keystore \
+              -alias "$KEY_ALIAS" -storepass "$KEYSTORE_PASSWORD" -keypass "$candidate" >/dev/null 2>&1; then
+              resolved_key_pass="$candidate"
+              break
+            fi
+          done
+
+          if [ -z "$resolved_key_pass" ]; then
+            if [ "${{ inputs.upload_artifact }}" = "true" ]; then
+              echo "Blocker: Neither ANDROID_SIGNING_KEY_PASSWORD nor ANDROID_SIGNING_KEYSTORE_PASSWORD could unlock the private key for alias '$KEY_ALIAS'." >&2
+              exit 1
+            else
+              echo "Android signing key password cannot unlock private key in CI test mode; falling back to debug build."
+              echo "has_signing=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
+
+          echo "::add-mask::$resolved_key_pass"
+          echo "RESOLVED_KEY_PASSWORD=$resolved_key_pass" >> "$GITHUB_ENV"
           echo "has_signing=true" >> "$GITHUB_OUTPUT"
 
       - name: Gradle release APK build with stable signing
@@ -143,7 +172,6 @@ jobs:
         env:
           KEYSTORE_PASSWORD: ${{ secrets.ANDROID_SIGNING_KEYSTORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.ANDROID_SIGNING_KEY_ALIAS }}
-          KEY_PASSWORD: ${{ secrets.ANDROID_SIGNING_KEY_PASSWORD }}
         run: |
           cd android
           args=(
@@ -151,7 +179,7 @@ jobs:
             "-Pecholet.release.storePath=$PWD/app/.release/echolet-release.keystore"
             "-Pecholet.release.storePassword=$KEYSTORE_PASSWORD"
             "-Pecholet.release.keyAlias=$KEY_ALIAS"
-            "-Pecholet.release.keyPassword=$KEY_PASSWORD"
+            "-Pecholet.release.keyPassword=$RESOLVED_KEY_PASSWORD"
           )
           ./gradlew "${args[@]}" --stacktrace || {
             echo 'Blocker: Gradle release build failed. The release package was NOT produced; stopping tag publication here.' >&2
