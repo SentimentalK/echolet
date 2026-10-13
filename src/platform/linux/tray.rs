@@ -228,6 +228,7 @@ pub fn spawn_linux_tray(action_tx: Sender<AppAction>) -> LinuxPlatformHandle {
     let _ = std::thread::Builder::new()
         .name("echolet-slint-ui".into())
         .spawn(move || {
+            let _ = slint::BackendSelector::default().select();
             let _ = slint::set_xdg_app_id("echolet");
             let runtime = DesktopPanelRuntime::from_init(panel_init);
             if let Err(e) = runtime.run() {

@@ -235,6 +235,7 @@ impl DesktopPanelRuntime {
 
             #[cfg(target_os = "linux")]
             {
+                let _ = slint::BackendSelector::default().select();
                 let _ = slint::set_xdg_app_id("echolet");
             }
 
