@@ -40,6 +40,10 @@ jobs:
         with:
           targets: aarch64-linux-android
 
+      - name: Install cargo-ndk
+        run: |
+          which cargo-ndk || cargo install cargo-ndk --locked
+
       - name: Cache Cargo dependencies and build cache
         uses: actions/cache@v4
         with:
