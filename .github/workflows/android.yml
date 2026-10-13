@@ -30,7 +30,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Setup JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'
@@ -90,6 +90,7 @@ jobs:
           android/scripts/build-native-arm64.sh
 
       - name: Resolve stable release signing from user secrets
+        id: signing
         env:
           KEYSTORE_BASE64: ${{ secrets.ANDROID_SIGNING_KEYSTORE_BASE64 }}
           KEYSTORE_PASSWORD: ${{ secrets.ANDROID_SIGNING_KEYSTORE_PASSWORD }}
@@ -102,25 +103,31 @@ jobs:
           [ -z "$KEY_ALIAS" ]          && missing="$missing ANDROID_SIGNING_KEY_ALIAS"
           [ -z "$KEY_PASSWORD" ]       && missing="$missing ANDROID_SIGNING_KEY_PASSWORD"
           if [ -n "$missing" ]; then
-            {
-              echo 'Blocker: Android release signing secrets are missing:'
-              printf '  missing:%s\n' "$missing"
-              echo 'The tag-gated Android release job requires a USER-OWNED persistent signing'
-              echo 'keystore supplied through ONE-TIME repository actions secrets. It NEVER signs'
-              echo 'releases with a temporary/random identity and NEVER falls back to debug'
-              echo 'signing. Configure once (not stored in the repo), then re-push the tag:'
-              echo ''
-              echo '  keytool -genkeypair -v -keystore echolet-release.keystore \'
-              echo '    -alias echolet -keyalg RSA -keysize 4096 -validity 10000'
-              echo '  base64 -w0 echolet-release.keystore   # keep the output + passwords in a password manager'
-              echo ''
-              echo 'GitHub repo -> Settings -> Secrets and variables -> Actions -> New repository secret:'
-              echo '  ANDROID_SIGNING_KEYSTORE_BASE64   = base64 of the keystore file'
-              echo '  ANDROID_SIGNING_KEYSTORE_PASSWORD = keystore password'
-              echo '  ANDROID_SIGNING_KEY_ALIAS         = key alias'
-              echo '  ANDROID_SIGNING_KEY_PASSWORD      = key password'
-            } >&2
-            exit 1
+            if [ "${{ inputs.upload_artifact }}" = "true" ]; then
+              {
+                echo 'Blocker: Android release signing secrets are missing:'
+                printf '  missing:%s\n' "$missing"
+                echo 'The tag-gated Android release job requires a USER-OWNED persistent signing'
+                echo 'keystore supplied through ONE-TIME repository actions secrets. It NEVER signs'
+                echo 'releases with a temporary/random identity and NEVER falls back to debug'
+                echo 'signing. Configure once (not stored in the repo), then re-push the tag:'
+                echo ''
+                echo '  keytool -genkeypair -v -keystore echolet-release.keystore \'
+                echo '    -alias echolet -keyalg RSA -keysize 4096 -validity 10000'
+                echo '  base64 -w0 echolet-release.keystore   # keep the output + passwords in a password manager'
+                echo ''
+                echo 'GitHub repo -> Settings -> Secrets and variables -> Actions -> New repository secret:'
+                echo '  ANDROID_SIGNING_KEYSTORE_BASE64   = base64 of the keystore file'
+                echo '  ANDROID_SIGNING_KEYSTORE_PASSWORD = keystore password'
+                echo '  ANDROID_SIGNING_KEY_ALIAS         = key alias'
+                echo '  ANDROID_SIGNING_KEY_PASSWORD      = key password'
+              } >&2
+              exit 1
+            else
+              echo "Android release signing secrets missing in CI test mode; skipping signed release APK build."
+              echo "has_signing=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
           fi
           mkdir -p android/app/.release
           printf '%s' "$KEYSTORE_BASE64" | base64 -d > android/app/.release/echolet-release.keystore
@@ -129,8 +136,10 @@ jobs:
           keytool -list -keystore android/app/.release/echolet-release.keystore \
             -storepass "$KEYSTORE_PASSWORD" -alias "$KEY_ALIAS" >/dev/null \
             || { echo 'Blocker: keystore/password/alias combination is INVALID; refusing to build a release APK.' >&2; exit 1; }
+          echo "has_signing=true" >> "$GITHUB_OUTPUT"
 
       - name: Gradle release APK build with stable signing
+        if: steps.signing.outputs.has_signing == 'true'
         env:
           KEYSTORE_PASSWORD: ${{ secrets.ANDROID_SIGNING_KEYSTORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.ANDROID_SIGNING_KEY_ALIAS }}
@@ -149,7 +158,14 @@ jobs:
             exit 1
           }
 
+      - name: Gradle debug build & unit tests (fallback when signing secrets unavailable)
+        if: steps.signing.outputs.has_signing != 'true'
+        run: |
+          cd android
+          ./gradlew clean :app:testDebugUnitTest :app:assembleDebug --stacktrace
+
       - name: Verify release APK (fail-closed packaging gate)
+        if: steps.signing.outputs.has_signing == 'true'
         run: |
           RELEASE_APK="android/app/build/outputs/apk/release/app-release.apk"
           [ -f "$RELEASE_APK" ] || {
@@ -168,6 +184,7 @@ jobs:
           echo "Release official verification passed (package id, arm64-v8a ABI, versionName $expected_versionName)."
 
       - name: Stage release artifact + sha256
+        if: steps.signing.outputs.has_signing == 'true'
         run: |
           RELEASE_APK="android/app/build/outputs/apk/release/app-release.apk"
           mkdir -p dist
@@ -181,7 +198,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: echolet-android-arm64
-          path: |
-            dist/${{ env.ANDROID_ARTIFACT }}
-            dist/${{ env.ANDROID_ARTIFACT }}.sha256
+          path: dist/${{ env.ANDROID_ARTIFACT }}
           if-no-files-found: error

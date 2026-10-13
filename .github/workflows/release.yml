@@ -118,6 +118,7 @@ jobs:
     name: Release Android
     needs: preflight
     uses: ./.github/workflows/android.yml
+    secrets: inherit
     with:
       upload_artifact: true
 

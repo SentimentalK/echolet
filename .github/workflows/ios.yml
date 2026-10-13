@@ -90,8 +90,11 @@ jobs:
       - name: Package unsigned device IPA
         run: |
           set -euo pipefail
-          APP_DIR="ios/build/Build/Products/iphoneos/EcholetApp.app"
-          test -d "$APP_DIR" || { echo "Blocker: $APP_DIR missing; xcodebuild produced no device app bundle." >&2; exit 1; }
+          APP_DIR="ios/build/Build/Products/Release-iphoneos/EcholetApp.app"
+          if [ ! -d "$APP_DIR" ]; then
+            APP_DIR="$(find ios/build/Build/Products -name 'EcholetApp.app' -type d 2>/dev/null | head -n 1)"
+          fi
+          test -n "$APP_DIR" && test -d "$APP_DIR" || { echo "Blocker: EcholetApp.app missing in ios/build/Build/Products; xcodebuild produced no device app bundle." >&2; exit 1; }
           rm -rf Payload
           mkdir -p Payload
           cp -R "$APP_DIR" Payload/EcholetApp.app
