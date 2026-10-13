@@ -46,9 +46,6 @@ else
     cp -r "${SCRIPT_DIR}/licenses" "${APP_DIR}/"
     cp "${SCRIPT_DIR}/echolet.png" "${APP_DIR}/"
     cp "${SCRIPT_DIR}/echolet.png" "${APP_DIR}/icon.png"
-    if [[ -f "${SCRIPT_DIR}/echolet.svg" ]]; then
-        cp "${SCRIPT_DIR}/echolet.svg" "${APP_DIR}/"
-    fi
     chmod +x "${APP_DIR}/echolet"
 fi
 
@@ -61,11 +58,6 @@ ln -sf "${TARGET_BIN}" "${BIN_DIR}/echolet"
 echo "--> Installing desktop icons..."
 mkdir -p "${ICON_DIR}/512x512/apps"
 cp "${SCRIPT_DIR}/echolet.png" "${ICON_DIR}/512x512/apps/echolet.png"
-
-if [[ -f "${SCRIPT_DIR}/echolet.svg" ]]; then
-    mkdir -p "${ICON_DIR}/scalable/apps"
-    cp "${SCRIPT_DIR}/echolet.svg" "${ICON_DIR}/scalable/apps/echolet.svg"
-fi
 
 # Also place icon.png in TARGET_DIR if in-place mode
 if [[ "${IN_PLACE}" == true && ! -f "${TARGET_DIR}/icon.png" ]]; then

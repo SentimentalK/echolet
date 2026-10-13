@@ -28,9 +28,4 @@ im_resized.save(out_png, optimize=True)
 print(f"Generated {out_png} (512x512, {os.path.getsize(out_png)} bytes)")
 EOF
 
-if [[ -f "${SRC_SVG}" ]]; then
-    cp "${SRC_SVG}" "${LINUX_ASSETS}/echolet.svg"
-    echo "Copied scalable vector icon to ${LINUX_ASSETS}/echolet.svg"
-fi
-
 echo "--> Linux icon assets generated successfully."

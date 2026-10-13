@@ -67,9 +67,6 @@ echo "--> Copying desktop integration assets and installers..."
 cp "${REPO_ROOT}/assets/linux/echolet.desktop" "${DIST_DIR}/echolet.desktop"
 cp "${REPO_ROOT}/assets/linux/echolet.png" "${DIST_DIR}/echolet.png"
 cp "${REPO_ROOT}/assets/linux/echolet.png" "${DIST_DIR}/icon.png"
-if [[ -f "${REPO_ROOT}/assets/linux/echolet.svg" ]]; then
-    cp "${REPO_ROOT}/assets/linux/echolet.svg" "${DIST_DIR}/echolet.svg"
-fi
 cp "${REPO_ROOT}/assets/linux/install.sh" "${DIST_DIR}/install.sh"
 cp "${REPO_ROOT}/assets/linux/uninstall.sh" "${DIST_DIR}/uninstall.sh"
 chmod +x "${DIST_DIR}/install.sh" "${DIST_DIR}/uninstall.sh"
