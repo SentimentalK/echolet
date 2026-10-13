@@ -133,13 +133,13 @@ jobs:
           KEY_PASSWORD: ${{ secrets.ANDROID_SIGNING_KEY_PASSWORD }}
         run: |
           cd android
-          args=[
-            "clean", ":app:testDebugUnitTest", ":app:assembleRelease",
-            "-Pecholet.release.storePath=$PWD/app/.release/echolet-release.keystore",
-            "-Pecholet.release.storePassword=$KEYSTORE_PASSWORD",
-            "-Pecholet.release.keyAlias=$KEY_ALIAS",
+          args=(
+            "clean" ":app:testDebugUnitTest" ":app:assembleRelease"
+            "-Pecholet.release.storePath=$PWD/app/.release/echolet-release.keystore"
+            "-Pecholet.release.storePassword=$KEYSTORE_PASSWORD"
+            "-Pecholet.release.keyAlias=$KEY_ALIAS"
             "-Pecholet.release.keyPassword=$KEY_PASSWORD"
-          ]
+          )
           ./gradlew "${args[@]}" --stacktrace || {
             echo 'Blocker: Gradle release build failed. The release package was NOT produced; stopping tag publication here.' >&2
             exit 1

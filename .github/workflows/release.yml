@@ -66,9 +66,20 @@ jobs:
           ios_keyboard_version=$(python3 -c 'import plistlib; print(plistlib.load(open("ios/Keyboard/Info.plist","rb"))["CFBundleShortVersionString"])')
           ios_keyboard_build=$(python3 -c 'import plistlib; print(plistlib.load(open("ios/Keyboard/Info.plist","rb"))["CFBundleVersion"])')
           check "iOS CFBundleShortVersionString" "$ios_version"
-          check "iOS CFBundleVersion (build)" "$ios_build"
           check "iOS Keyboard CFBundleShortVersionString" "$ios_keyboard_version"
-          check "iOS Keyboard CFBundleVersion (build)" "$ios_keyboard_build"
+
+          check_build() {
+            local name="$1" value="$2"
+            printf '  %-32s %s\n' "$name" "$value"
+            [ -n "$value" ] || { echo "Blocker: $name is empty." >&2; exit 1; }
+            [[ "$value" =~ ^[0-9]+$ ]] || { echo "Blocker: $name '$value' must be a numeric build number." >&2; exit 1; }
+          }
+          check_build "iOS CFBundleVersion (build)" "$ios_build"
+          check_build "iOS Keyboard CFBundleVersion (build)" "$ios_keyboard_build"
+          [ "$ios_build" = "$ios_keyboard_build" ] || {
+            echo "Blocker: iOS App and Keyboard CFBundleVersion disagree ($ios_build vs $ios_keyboard_build)." >&2
+            exit 1
+          }
 
           if [ -z "$expected" ]; then
             expected="${versions[0]}"
