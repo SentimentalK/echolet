@@ -868,15 +868,24 @@ public final class EcholetKeyboardSessionController {
         lastLivePartial = nil
     }
 
-    /// Suffix guard: if docFingerprint.before is known, only perform deleteBackward
-    /// if the document text immediately preceding the insertion point ends with
-    /// the expected tail to be deleted.
+    /// Suffix guard, FAIL-CLOSED. deleteBackward may run ONLY when the
+    /// observed document text immediately preceding the insertion point is
+    /// positively known AND ends with the expected tail to delete. A nil
+    /// `docFingerprint().before` (editor context unavailable) or a mismatch
+    /// (cursor moved elsewhere / foreign text) REFUSES the delete: blindly
+    /// deleting into an unknown editor state can corrupt the user's final
+    /// transcript, so the gap is never bridged speculatively. The refused
+    /// case keeps the streamed partial untouched and logs a guard event.
     private func safeToDeleteTail(expectedTail: String, count: Int) -> Bool {
         guard let before = env.docFingerprint().before else {
-            // When editor context before input is unavailable (nil), permit deletion
-            return true
+            log("STREAM_DELETE_GUARDED(fingerprint_missing)")
+            return false
         }
-        return before.hasSuffix(expectedTail)
+        guard before.hasSuffix(expectedTail) else {
+            log("STREAM_DELETE_GUARDED(tail_mismatch_or_cursor_moved)")
+            return false
+        }
+        return true
     }
 
     private func commonPrefixCount(_ a: String, _ b: String) -> Int {

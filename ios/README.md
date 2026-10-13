@@ -36,7 +36,52 @@ This directory contains the native iOS / iPadOS Containing Application and Custo
 
 ## Status: BUILT & TESTED (Xcode 16.2 / Sonoma)
 
-All pure Foundation protocol tests, admission gate tests, capture lifecycle tests, and adversarial fence tests run via CLI. Native `EcholetApp` and embedded `EcholetKeyboard` targets compile cleanly on Xcode 16.2 (`** BUILD SUCCEEDED **`) for physical iPhoneOS (arm64) and Simulator. Signed debug build previously deployed to connected iPad mini (iPadOS 18.7.7).
+All pure Foundation protocol tests, admission gate tests, capture lifecycle tests, and adversarial fence tests run via CLI (single runner: `ios/scripts/run-cli-tests.sh`). Native `EcholetApp` and embedded `EcholetKeyboard` targets compile cleanly on Xcode 16.2 (`** BUILD SUCCEEDED **`) for physical iPhoneOS (arm64) and Simulator. Signed debug build previously deployed to connected iPad mini (iPadOS 18.7.7).
+
+A tag-gated iOS pipeline now exists: `.github/workflows/ios.yml`
+(workflow_call with `upload_artifact`) runs on macOS, builds the pinned
+native statics + the Rust `ios-native` bridge, runs this exact CLI test
+suite, builds the App + embedded keyboard with `CODE_SIGNING_ALLOWED=NO`,
+and packages an UNSIGNED, model-free device IPA
+(`echolet-ios-device-arm64.ipa`). That IPA is a RE-SIGNING INPUT for
+SideStore/Sideloadly — it is NOT one-click installable, and CI never
+consumes any Apple account secret or touches developer signing settings.
+
+---
+
+## FREE, no-cost remote install (wife's own iPhone — honest caveats)
+
+The unsigned IPA (`echolet-ios-device-arm64.ipa` from a Release) can be
+installed on HER iPhone at zero cost. Trust NOTHING below until the final
+"must pass on-device test" actually passes on the device:
+
+1. **One-time pairing (wife's own hardware, both sides):** her iPhone with
+   HER OWN Windows PC or Mac; install SideStore (needs the paired computer
+   once via its launcher) or simply connect the phone each time and use
+   Sideloadly. Both tools install the IPA using HER OWN free Apple Account
+   (an Apple ID signed in on her phone). Never enter the account anywhere
+   in CI — GitHub actions contain NO Apple secrets.
+2. **Free-account 7-day limit:** a free Apple developer identity signs apps
+   for ~7 days. She must re-sign/refresh the app roughly every ~7 days
+   (SideStore can refresh by itself when the phone speaks to it; Sideloadly
+   requires plugging in again).
+3. **The IPA is an unsigned resigning input, NOT one-click installable** —
+   the sign-in step happens in SideStore/Sideloadly, not by opening the IPA.
+4. **Keyboard setup:** iOS Settings → General → Keyboard → Keyboards →
+   Add New Keyboard… → Echolet → enable **Allow Full Access**.
+5. **Model:** after install, open Echolet and download the X-ASR model
+   (bilingual zh-en) in the app; nothing is bundled in the IPA.
+6. **APPGROUP CAVEAT — and verification obligation:** re-signing can change
+   or STRIP App Group entitlements for free (non-App-Store) identities. If
+   the entitlement is stripped from either side, the app↔keyboard IPC
+   breaks and dictation cannot work. Therefore: before trusting the setup,
+   make BOTH the host `EcholetApp` and the `EcholetKeyboard` extension run
+   with the SAME working App Group and pass an on-device IPC + dictation
+   test (open the app, Prepare Warm Dictation, dictate into any text field
+   via the keyboard, see the transcript insert). Until that real-device
+   evidence exists, this path is labeled
+   **FREE_SIDELOAD_APP_GROUP_UNVERIFIED** — a free remote installation is
+   NOT guaranteed.
 
 ---
 
@@ -219,7 +264,9 @@ cd ios/probe && xcodegen generate && xcodebuild -project EcholetNativeProbe.xcod
   -scheme EcholetNativeProbe -sdk iphoneos -destination 'generic/platform=iOS' build
 xcrun devicectl device install app --device <UUID> <DerivedData>/…/EcholetNativeProbe.app
 ```
-Note: no CI pipeline exists for iOS artifacts; nothing runs automatically.
+Note: since 2026-10-12 an iOS device pipeline exists
+(`.github/workflows/ios.yml`, tag-gated through `release.yml`); before that
+date nothing iOS-related ran automatically.
 
 ### 2026-10-10 J4A 决策附录（decision appendix, J4A evidence pack）
 

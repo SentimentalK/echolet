@@ -516,6 +516,7 @@ class AppStatusViewController: UIViewController, AudioCaptureDelegate, WarmIPCSe
     }
 
     @objc private func didTapDemoResponse() {
+        #if DEBUG
         // Mock submission is queue-owned: eligibility is validated and written
         // on WarmIPCService.ipcQueue (single writer). The completion mirrors the
         // real write/result honestly on the main thread.
@@ -534,6 +535,7 @@ class AppStatusViewController: UIViewController, AudioCaptureDelegate, WarmIPCSe
                 self.lastRequestLabel.text = "Mock response NOT written: \(rejectionReason ?? "unknown rejection")"
             }
         }
+        #endif
     }
 
     // ============================================================

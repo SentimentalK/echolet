@@ -49,6 +49,12 @@ class EcholetHomeViewController: UIViewController, WarmIPCServiceDelegate, Echol
     private var modelRowViews: [String: ModelRowView] = [:]
     /// Model id whose Select tap is still loading the recognizer.
     private var pendingSelectId: String?
+    /// Model id whose Select tap chose "Disarm & Switch". The select runs
+    /// ONLY after an OBSERVED positive mic-off confirmation (delegate
+    /// callbacks / bounded re-check) — never on a blind timer.
+    private var pendingPostDisarmSelectId: String?
+    /// When the disarm-then-select handoff must give up honestly.
+    private var pendingPostDisarmSelectDeadline: Date?
 
     private let keyboardSectionLabel = UILabel()
     private let keyboardCard = UIView()
@@ -430,6 +436,9 @@ class EcholetHomeViewController: UIViewController, WarmIPCServiceDelegate, Echol
             if !self.warmHardwareActive && !WarmIPCService.shared.hasActiveKeyboardSession {
                 self.dictationSessionActive = false
             }
+            // Positive mic-off confirmation re-check for a pending
+            // Disarm-then-Select handoff (with honest timeout above).
+            self.attemptDisarmThenSelectModel()
             self.refreshProjection()
         }
     }
@@ -473,11 +482,7 @@ class EcholetHomeViewController: UIViewController, WarmIPCServiceDelegate, Echol
                     preferredStyle: .alert
                 )
                 alert.addAction(UIAlertAction(title: "Disarm & Switch", style: .default) { [weak self] _ in
-                    guard let self = self else { return }
-                    self.didTapDisarmWarm()
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
-                        self?.performModelSelect(modelId: sender.modelId)
-                    }
+                    self?.beginDisarmThenSelectModel(modelId: sender.modelId)
                 })
                 alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
                 present(alert, animated: true)
@@ -487,6 +492,43 @@ class EcholetHomeViewController: UIViewController, WarmIPCServiceDelegate, Echol
         case .selected, .busy:
             break
         }
+    }
+
+    // MARK: - Disarm-then-Select handoff (no blind timer)
+
+    /// Explicit Disarm first; the Select is executed later ONLY from an
+    /// observed positive mic-off confirmation. The old fixed
+    /// `asyncAfter(0.3)` could race the disarm (mic still live ⇒ the model
+    /// switch gate or an in-flight session could be violated); every path
+    /// here instead re-checks the SAME busy gate as a direct Select tap.
+    private func beginDisarmThenSelectModel(modelId: String) {
+        guard pendingPostDisarmSelectId == nil else { return }
+        pendingPostDisarmSelectId = modelId
+        pendingPostDisarmSelectDeadline = Date().addingTimeInterval(5.0)
+        disarmWarmButton.isEnabled = false
+        WarmIPCService.shared.setUserArmMicrophone(false)
+        WarmIPCService.shared.registerManualCaptureStopped()
+        attemptDisarmThenSelectModel()
+    }
+
+    /// Runs the select iff the microphone is now CONFIRMED fully off. Also
+    /// abandons the handoff honestly when confirmation never arrives.
+    private func attemptDisarmThenSelectModel() {
+        guard let modelId = pendingPostDisarmSelectId else { return }
+        if isMicBusyOrArmed {
+            if let deadline = pendingPostDisarmSelectDeadline, Date() >= deadline {
+                pendingPostDisarmSelectId = nil
+                pendingPostDisarmSelectDeadline = nil
+                advisory = "Model switch cancelled: the microphone did not confirm disarm in time; model '\(modelId)' was not selected."
+                disarmWarmButton.isEnabled = true
+                refreshProjection()
+            }
+            return
+        }
+        pendingPostDisarmSelectId = nil
+        pendingPostDisarmSelectDeadline = nil
+        disarmWarmButton.isEnabled = true
+        performModelSelect(modelId: modelId)
     }
 
     private func performModelSelect(modelId: String) {
@@ -597,6 +639,16 @@ class EcholetHomeViewController: UIViewController, WarmIPCServiceDelegate, Echol
 
     func warmIPCService(_ service: WarmIPCService, didEncounterBlockedState reason: String) {
         advisory = reason
+        if pendingPostDisarmSelectId != nil,
+           WarmIPCService.shared.isUserArmed || WarmIPCService.shared.warmStandbyHardwareActive {
+            // Disarm never confirmed (e.g. permission blocked): abandon the
+            // handoff honestly instead of racing a later model switch.
+            let modelId = pendingPostDisarmSelectId
+            pendingPostDisarmSelectId = nil
+            pendingPostDisarmSelectDeadline = nil
+            disarmWarmButton.isEnabled = true
+            advisory = "Model switch cancelled after disarm problem: \(reason) (model '\(modelId ?? "")' was not selected)"
+        }
         refreshProjection()
     }
 
@@ -604,6 +656,9 @@ class EcholetHomeViewController: UIViewController, WarmIPCServiceDelegate, Echol
         warmHardwareActive = active
         if !active {
             dictationSessionActive = WarmIPCService.shared.hasActiveKeyboardSession
+        }
+        if !active {
+            attemptDisarmThenSelectModel()
         }
         refreshProjection()
     }
@@ -618,6 +673,9 @@ class EcholetHomeViewController: UIViewController, WarmIPCServiceDelegate, Echol
     func audioCaptureController(_ controller: AudioCaptureController, didUpdateStatus status: AudioCaptureController.Status) {
         manualCaptureActive = (status == .recording) && !warmHardwareActive
             && !WarmIPCService.shared.hasActiveKeyboardSession
+        if status == .stopped {
+            attemptDisarmThenSelectModel()
+        }
         refreshProjection()
     }
 

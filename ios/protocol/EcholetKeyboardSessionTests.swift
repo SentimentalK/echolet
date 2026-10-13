@@ -160,6 +160,8 @@ enum EcholetKeyboardSessionTests {
         testNoSpeechFinalRemovesPartial()
         testPreparedDemandURLMatchesDemandRecord()
         testGuardedPartialDeletionOnCursorMismatch()
+        testNilFingerprintTailDeletesRefused()
+        testFinalReconcileFailsClosedWithoutFingerprint()
         testColdProcessRecoveryNewEpoch()
         testPreparedDemandURLRotatesNearExpiry()
         testExplicitStartIntentHandoffAfterColdLaunch()
@@ -623,6 +625,9 @@ enum EcholetKeyboardSessionTests {
         expectEqual(h.deleteBackwardCounts, [] as [Int], "testLivePartialStreaming(5)")
 
         // ASR may diverge: "你好啊" replaces "你好世" (1 deletion + 1 insertion).
+        // FAIL-CLOSED guard: the editor tail must be positively observed to
+        // allow the delete, so the fake reports the known editor state.
+        h.fingerprints.append(("你好世", nil, nil))
         h.writeResponse(sessionId: req.sessionId, ackReq: req.requestId, ackSeq: req.sequence, rev: 5, state: .processing, text: "你好啊")
         c.handleTimerTick()
         expectEqual(h.deleteBackwardCounts.last, 1, "testLivePartialStreaming(6)")
@@ -632,6 +637,7 @@ enum EcholetKeyboardSessionTests {
         expectTrue(c.phase == .listening, "testLivePartialStreaming(8)")
 
         // No speech final with only partial: partial removed.
+        h.fingerprints.append(("你好啊", nil, nil))
         h.writeResponse(sessionId: req.sessionId, ackReq: req.requestId, ackSeq: req.sequence, rev: 6, state: .completed, text: "", isFinal: true)
         c.handleTimerTick()
         expectEqual(h.deleteBackwardCounts.last, 3, "testLivePartialStreaming(9)")
@@ -696,6 +702,9 @@ enum EcholetKeyboardSessionTests {
         c.handleTimerTick()
         h.writeResponse(sessionId: req.sessionId, ackReq: req.requestId, ackSeq: req.sequence, rev: 2, state: .processing, text: "abc")
         c.handleTimerTick()
+        // Fail-closed guard: the observed editor tail must match the streamed
+        // partial for the final removal to run.
+        h.fingerprints.append(("abc", nil, nil))
         h.writeResponse(sessionId: req.sessionId, ackReq: req.requestId, ackSeq: req.sequence, rev: 3, state: .completed, text: "", isFinal: true)
         c.handleTimerTick()
         expectEqual(h.deleteBackwardCounts.last, 3, "testNoSpeechFinalRemovesPartial(1)")
@@ -781,6 +790,95 @@ enum EcholetKeyboardSessionTests {
         // deleteBackward should be GUARDED and NOT called!
         expectEqual(h.deleteBackwardCounts, [] as [Int], "testGuardedPartialDeletionOnCursorMismatch(2)")
         expectTrue(h.logs.contains("STREAM_DELETE_GUARDED(tail_mismatch_or_cursor_moved)"), "testGuardedPartialDeletionOnCursorMismatch(3)")
+
+        // Missing (nil) fingerprint must ALSO refuse the delete (fail-closed,
+        // never speculative). The subsequent insert of the divergent remainder
+        // still happens, without any destructive deletion.
+        h.fingerprints.append((nil, nil, nil))
+        h.writeResponse(sessionId: req.sessionId, ackReq: req.requestId, ackSeq: req.sequence, rev: 4, state: .processing, text: "qux")
+        c.handleTimerTick()
+        expectEqual(h.deleteBackwardCounts, [] as [Int], "testGuardedPartialDeletionOnCursorMismatch(4)")
+        expectEqual(h.insertedTexts.last, "qux", "testGuardedPartialDeletionOnCursorMismatch(5)")
+        expectTrue(h.logs.contains("STREAM_DELETE_GUARDED(fingerprint_missing)"), "testGuardedPartialDeletionOnCursorMismatch(6)")
+    }
+
+    static func testNilFingerprintTailDeletesRefused() {
+        let h = FakeHarness()
+        h.writeWarmLive(epoch: h.appEpoch, active: true, tsMs: h.now)
+        let c = h.controller()
+        c.handleAppeared()
+        c.handlePrimaryButtonTap()
+        let req = h.lastRequest()!
+        h.writeResponse(sessionId: req.sessionId, ackReq: req.requestId, ackSeq: req.sequence, rev: 1, state: .listening)
+        c.handleTimerTick()
+        expectTrue(c.phase == .listening, "testNilFingerprintTailDeletesRefused(1)")
+
+        // Streamed partial with NO editor fingerprint (nil before): first
+        // insert is safe, but any tail deletion must be refused.
+        h.writeResponse(sessionId: req.sessionId, ackReq: req.requestId, ackSeq: req.sequence, rev: 2, state: .processing, text: "abc")
+        c.handleTimerTick()
+        expectEqual(h.insertedTexts, ["abc"], "testNilFingerprintTailDeletesRefused(2)")
+        expectEqual(h.deleteBackwardCounts, [] as [Int], "testNilFingerprintTailDeletesRefused(3)")
+
+        // Divergent partial would need a speculative delete of "c" under the
+        // old permissive rule; fail-closed refuses BOTH the delete.
+        h.writeResponse(sessionId: req.sessionId, ackReq: req.requestId, ackSeq: req.sequence, rev: 3, state: .processing, text: "abd")
+        c.handleTimerTick()
+        expectEqual(h.deleteBackwardCounts, [] as [Int], "testNilFingerprintTailDeletesRefused(4)")
+        expectTrue(c.phase == .listening, "testNilFingerprintTailDeletesRefused(5)")
+
+        // No-speech final with a stale nil fingerprint also refuses to remove
+        // the partial (no blind delete into unknown editor state).
+        h.writeResponse(sessionId: req.sessionId, ackReq: req.requestId, ackSeq: req.sequence, rev: 4, state: .completed, text: "", isFinal: true)
+        c.handleTimerTick()
+        expectEqual(h.deleteBackwardCounts, [] as [Int], "testNilFingerprintTailDeletesRefused(6)")
+        expectTrue(h.logs.contains("STREAM_DELETE_GUARDED(fingerprint_missing)"), "testNilFingerprintTailDeletesRefused(7)")
+        expectTrue(c.phase == .ready, "testNilFingerprintTailDeletesRefused(8)")
+    }
+
+    static func testFinalReconcileFailsClosedWithoutFingerprint() {
+        let h = FakeHarness()
+        h.writeWarmLive(epoch: h.appEpoch, active: true, tsMs: h.now)
+        let c = h.controller()
+        c.handleAppeared()
+        c.handlePrimaryButtonTap()
+        let req = h.lastRequest()!
+        h.writeResponse(sessionId: req.sessionId, ackReq: req.requestId, ackSeq: req.sequence, rev: 1, state: .listening)
+        c.handleTimerTick()
+
+        // Stream "你好世", then a DIVERGING final "你好啊": with no positively
+        // observed editor tail (nil fingerprint before) the delete is REFUSED,
+        // so no speculative destructive edit happens toward the final.
+        h.writeResponse(sessionId: req.sessionId, ackReq: req.requestId, ackSeq: req.sequence, rev: 2, state: .processing, text: "你好世")
+        c.handleTimerTick()
+        c.handleStopTap()
+        let stopReq = h.lastRequest()!
+        h.writeResponse(sessionId: stopReq.sessionId, ackReq: stopReq.requestId, ackSeq: stopReq.sequence, rev: 3, state: .completed, text: "你好啊", isFinal: true)
+        c.handleTimerTick()
+
+        expectEqual(h.deleteBackwardCounts, [] as [Int], "testFinalReconcileFailsClosedWithoutFingerprint(1)")
+        expectTrue(h.logs.contains("STREAM_DELETE_GUARDED(fingerprint_missing)"), "testFinalReconcileFailsClosedWithoutFingerprint(2)")
+        // The controller settles honestly and never corrupts the transcript.
+        expectTrue(c.phase == .ready, "testFinalReconcileFailsClosedWithoutFingerprint(3)")
+        // Verified against a KNOWN editor tail, the same reconcile deletes
+        // and inserts the divergent tail (positive confirmation path works).
+        let h2 = FakeHarness()
+        h2.writeWarmLive(epoch: h2.appEpoch, active: true, tsMs: h2.now)
+        let c2 = h2.controller()
+        c2.handleAppeared()
+        c2.handlePrimaryButtonTap()
+        let req2 = h2.lastRequest()!
+        h2.fingerprints.append(("你好世", nil, nil))
+        h2.writeResponse(sessionId: req2.sessionId, ackReq: req2.requestId, ackSeq: req2.sequence, rev: 1, state: .listening)
+        c2.handleTimerTick()
+        h2.writeResponse(sessionId: req2.sessionId, ackReq: req2.requestId, ackSeq: req2.sequence, rev: 2, state: .processing, text: "你好世")
+        c2.handleTimerTick()
+        c2.handleStopTap()
+        let stopReq2 = h2.lastRequest()!
+        h2.writeResponse(sessionId: stopReq2.sessionId, ackReq: stopReq2.requestId, ackSeq: stopReq2.sequence, rev: 3, state: .completed, text: "你好啊", isFinal: true)
+        c2.handleTimerTick()
+        expectEqual(h2.deleteBackwardCounts.last, 1, "testFinalReconcileFailsClosedWithoutFingerprint(4)")
+        expectEqual(h2.insertedTexts.last, "啊", "testFinalReconcileFailsClosedWithoutFingerprint(5)")
     }
 
     static func testColdProcessRecoveryNewEpoch() {
@@ -926,7 +1024,7 @@ enum EcholetKeyboardSessionTests {
 
         // Containing app consumes the demand
         _ = EcholetLaunch.consumeDemand(defaults: h.defaults)
-        expectNil(EcholetLaunch.readDemand(defaults: h.defaults), "demand consumed")
+        expectEqual(EcholetLaunch.readDemand(defaults: h.defaults), nil, "demand consumed")
 
         // Containing app reports warmReady phase
         let intent = EcholetLaunch.readPendingStartIntent(defaults: h.defaults)!
