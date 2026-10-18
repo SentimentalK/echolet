@@ -76,8 +76,11 @@ Echolet uses `uinput` for low-latency keystroke injection across X11 and Wayland
 - Echolet lives in your macOS Menu Bar.
 
 ### Windows
-- For early releases, you may need to click *More info → Run anyway* on Windows Defender SmartScreen.
-- Echolet runs silently in the Windows system tray notification area.
+- **Extract Archive**: Extract the entire `echolet-windows-x64.zip` package into a regular folder before launching (do not run directly from inside the compressed ZIP preview).
+- **Normal Launch**: Double-click `echolet.exe`. It runs in the Windows system tray notification area. Normal launch requires no diagnostic tools or dev environment.
+- **SmartScreen**: For early releases, you may need to click *More info → Run anyway* on Windows Defender SmartScreen.
+- **Troubleshooting with Doctor**: If Echolet fails to start, double-click `doctor.cmd` (or execute `.\doctor.ps1` in PowerShell) in the extracted folder to run read-only environment and bundle diagnostics without modifying your system.
+- **Error `0xC0000142` (`STATUS_DLL_INIT_FAILED`)**: This error indicates that the Windows loader found the binary but a dependent native DLL failed during initialization before application code could run. A common cause is a missing or outdated Microsoft Visual C++ 2015-2022 Redistributable (x64). If reported by Doctor, install the official runtime from [Microsoft Visual C++ Redistributable (x64)](https://aka.ms/vs/17/release/vc_redist.x64.exe).
 
 ---
 

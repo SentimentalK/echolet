@@ -43,26 +43,42 @@ New-Item -ItemType Directory -Force -Path "$AppDir\licenses" | Out-Null
 Write-Host "--> Copying executable..."
 Copy-Item -Path "$RepoRoot\target\release\echolet.exe" -Destination "$AppDir\echolet.exe" -Force
 
-# 5. Copy all runtime dynamic libraries (*.dll)
+# 5. Copy essential native runtime dynamic libraries
 Write-Host "--> Copying native runtime DLLs..."
 $DllSource = if (Test-Path "$LocalRuntime\runtime\bin") { "$LocalRuntime\runtime\bin" } else { "$LocalRuntime\runtime\lib" }
-Copy-Item -Path "$DllSource\*.dll" -Destination $AppDir -Force
+$NativeDlls = @("sherpa-onnx-c-api.dll", "onnxruntime.dll")
+foreach ($dll in $NativeDlls) {
+    $src = Join-Path $DllSource $dll
+    if (Test-Path $src) {
+        Copy-Item -Path $src -Destination $AppDir -Force
+    } else {
+        Write-Error "[Error] Required runtime library not found: $src"
+        exit 1
+    }
+}
 
-# 6. Copy model catalog metadata (registry.json only, no weights)
+# 6. Copy diagnostic doctor scripts
+Write-Host "--> Copying diagnostic doctor scripts..."
+Copy-Item -Path "$PSScriptRoot\doctor.ps1" -Destination "$AppDir\doctor.ps1" -Force
+Copy-Item -Path "$PSScriptRoot\doctor.cmd" -Destination "$AppDir\doctor.cmd" -Force
+
+# 7. Copy model catalog metadata (registry.json only, no weights)
 Write-Host "--> Copying model registry..."
 Copy-Item -Path "$RepoRoot\models\registry.json" -Destination "$AppDir\models\registry.json" -Force
 
-# 7. Copy licenses
+# 8. Copy licenses
 Write-Host "--> Copying licenses..."
 Copy-Item -Path "$RepoRoot\licenses\*" -Destination "$AppDir\licenses\" -Force
 
-# 8. Sanity check bundle completeness
+# 9. Sanity check bundle completeness
 Write-Host "--> Validating production package structure..."
 $RequiredFiles = @(
     "$AppDir\echolet.exe",
     "$AppDir\models\registry.json",
     "$AppDir\sherpa-onnx-c-api.dll",
     "$AppDir\onnxruntime.dll",
+    "$AppDir\doctor.ps1",
+    "$AppDir\doctor.cmd",
     "$AppDir\licenses\sherpa-onnx-LICENSE",
     "$AppDir\licenses\onnxruntime-LICENSE",
     "$AppDir\licenses\model-LICENSE",

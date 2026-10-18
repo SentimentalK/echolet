@@ -76,8 +76,11 @@ Echolet 使用 `uinput` 实现 X11 / Wayland 环境下的低延迟虚拟按键�
 - Echolet 将常驻在顶部菜单栏。
 
 ### Windows
-- 早期测试版本如遇到 SmartScreen 提示，请点击 *更多信息 → 仍要运行*。
-- Echolet 启动后默认在系统右下角托盘静默运行。
+- **完整解压**：运行前请先将 `echolet-windows-x64.zip` 完整解压至普通文件夹（切勿在压缩包预览窗口中直接双击运行）。
+- **正常启动**：直接双击 `echolet.exe` 即可启动，程序在系统右下角托盘静默运行。日常正常使用无需运行任何诊断工具或开发环境。
+- **SmartScreen 提示**：早期测试版本如遇到 SmartScreen 提示，请点击 *更多信息 → 仍要运行*。
+- **运行故障与 Doctor 诊断**：若启动失败或无响应，可双击解压目录中的 `doctor.cmd`（或在 PowerShell 中执行 `.\doctor.ps1`）运行只读诊断，自动检查文件完整性、架构兼容性及运行时环境，不会修改系统设置。
+- **`0xC0000142` 错误（`STATUS_DLL_INIT_FAILED`）**：此错误通常表明 Windows 加载器在进入程序主体前，底层依赖的 C/C++ 动态链接库初始化失败。最常见原因为系统缺少或未更新 Microsoft Visual C++ 2015-2022 Redistributable (x64)。如遇此错误，请前往微软官方下载安装：[Microsoft Visual C++ Redistributable (x64)](https://aka.ms/vs/17/release/vc_redist.x64.exe)。
 
 ---
 
