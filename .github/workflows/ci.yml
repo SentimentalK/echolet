@@ -99,7 +99,7 @@ jobs:
   windows:
     name: Windows CI
     needs: detect-changes
-    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.full_matrix == true)
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.full_matrix == true) || needs.detect-changes.outputs.windows == 'true' || needs.detect-changes.outputs.core == 'true' || needs.detect-changes.outputs.platform_build == 'true'
     uses: ./.github/workflows/windows.yml
     with:
       upload_artifact: false
